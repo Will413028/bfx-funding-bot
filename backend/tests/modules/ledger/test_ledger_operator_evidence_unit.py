@@ -10,7 +10,7 @@ from bfx_funding_bot.modules.ledger import ResolutionRejected, ResolutionSubject
 from bfx_funding_bot.modules.ledger.read import build_operator_evidence
 from bfx_funding_bot.modules.ledger.read.operator_evidence import observation_id
 
-SCOPE = Scope(uuid4(), "ci")
+SCOPE = Scope(uuid4())
 ID = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 SUBJECT = ResolutionSubject(uuid4(), "fUST")
 TOKEN = f"ledger:v1:obs:{ID}"
@@ -21,7 +21,6 @@ def evidence_session():
         id=ID,
         query_id=uuid4(),
         exchange_account_id=SCOPE.exchange_account_id,
-        deployment_environment="ci",
         accepted=True,
         first_digest="digest",
         confirmation_digest="digest",
@@ -36,12 +35,11 @@ def evidence_session():
     )
     opening = SimpleNamespace(
         exchange_account_id=SCOPE.exchange_account_id,
-        deployment_environment="ci",
         symbol="fUST",
         opened_at_ms=10,
     )
     query = SimpleNamespace(
-        exchange_account_id=SCOPE.exchange_account_id, deployment_environment="ci", started_at_ms=20
+        exchange_account_id=SCOPE.exchange_account_id, started_at_ms=20
     )
     session = AsyncMock()
     # ``verify`` selects explicit columns (one row each): observation, opening, query.
@@ -128,7 +126,7 @@ async def test_ledger_rejects_invalid_evidence(fault):
     elif fault == "observation_scope":
         observation.exchange_account_id = uuid4()
     elif fault == "query_scope":
-        query.deployment_environment = "other"
+        query.exchange_account_id = uuid4()
     else:
         opening.symbol = "fUSD"
     with pytest.raises(ResolutionRejected):

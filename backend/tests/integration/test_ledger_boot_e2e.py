@@ -78,7 +78,7 @@ from .test_ledger_unknown_resolver_pg import Clock, FakeVenue
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
-SCOPE = Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci")
+SCOPE = Scope(TEST_EXCHANGE_ACCOUNT_ID)
 CELL = "fUST_a30"
 AMOUNT = Decimal("200.00000500")
 POLICY = CapitalPolicy(enabled=True, reserve_amount=Decimal("100"), max_cell_fraction=Decimal(1))
@@ -177,7 +177,7 @@ async def _dangling_attempt(env: Env, *, started_at_ms: int) -> UUID:
     async with env.factory.begin() as session:
         session.add(ExecutionDecisionRow(
             decision_id=decision_id, account_id=str(TEST_EXCHANGE_ACCOUNT_ID),
-            exchange_account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci",
+            exchange_account_id=TEST_EXCHANGE_ACCOUNT_ID,
             reconcile_id="e2e", cell_id=CELL, symbol="fUST", signal_correlation_id=str(uuid4()),
             outcome="submitted", signal_rate=Decimal("0.0001"), applied_rate=Decimal("0.0001"),
             amount_usdt=Decimal("50"), duration_days=2, model_evidence={}, safety_result={},
@@ -216,7 +216,7 @@ async def _ready(env: Env) -> ReadyToSubmit:
     async with env.factory.begin() as session:
         session.add(ExecutionDecisionRow(
             decision_id=decision_id, account_id=str(TEST_EXCHANGE_ACCOUNT_ID),
-            exchange_account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci",
+            exchange_account_id=TEST_EXCHANGE_ACCOUNT_ID,
             reconcile_id="gate", cell_id=CELL, symbol="fUST",
             signal_correlation_id=str(correlation), outcome="ready",
             signal_rate=Decimal("0.0001"), applied_rate=Decimal("0.0001"),
@@ -241,7 +241,7 @@ async def _ready(env: Env) -> ReadyToSubmit:
 
 def _scope():
     from bfx_funding_bot.modules.trading import CapitalScope
-    return CapitalScope(TEST_EXCHANGE_ACCOUNT_ID, "ci", "fUST", CELL)
+    return CapitalScope(TEST_EXCHANGE_ACCOUNT_ID, "fUST", CELL)
 
 
 def _ctx() -> AccountContext:
@@ -338,7 +338,7 @@ async def test_the_policy_worker_amends_the_policy_without_the_event_stream(
     async with env.factory.begin() as session:
         session.add(CapitalPolicyRequestRow(
             request_id=request_id, exchange_account_id=TEST_EXCHANGE_ACCOUNT_ID,
-            deployment_environment="ci", symbol="fUST", action="disable", reason="maintenance",
+            symbol="fUST", action="disable", reason="maintenance",
             requested_by="operator", created_at_ms=_now()))
 
     async def allow(session, *, account_id, user) -> bool:

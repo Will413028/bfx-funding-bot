@@ -106,7 +106,7 @@ class OperatorRequestWorker[RowT, PreparedT](ABC):
         self.session_factory = session_factory
         self.account_id = account_id
         self.environment = environment
-        self.ledger_scope = Scope(account_id, environment)
+        self.ledger_scope = Scope(account_id)
         # The ledger's lock, the one every money-state write of this scope is under;
         # nothing outside the ledger takes the primitive (ADR 2026-10-19 D4).
         self.scope_lock = scope_lock

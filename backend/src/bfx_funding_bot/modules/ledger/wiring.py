@@ -138,9 +138,7 @@ class _SqlCommandJournal:
             attempt = await session.get(SubmissionAttemptJournalRow, attempt_id)
             if attempt is None:
                 raise ValueError("attempt does not exist")
-            if (attempt.exchange_account_id, attempt.deployment_environment) != (
-                scope.exchange_account_id, scope.deployment_environment,
-            ):
+            if attempt.exchange_account_id != scope.exchange_account_id:
                 raise ValueError("attempt scope mismatch")
             stored = await journal.read_back_outcome(session, attempt_id)
             if stored is not None and stored.attempt_id != attempt_id:

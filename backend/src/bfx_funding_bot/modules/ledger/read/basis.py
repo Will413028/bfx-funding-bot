@@ -33,9 +33,7 @@ async def previous_basis(session: AsyncSession, scope: Scope) -> AcceptedCapital
         )
         .where(
             LedgerObservationQueryRow.exchange_account_id == scope.exchange_account_id,
-            LedgerObservationQueryRow.deployment_environment == scope.deployment_environment,
             AcceptedCapitalBasisRow.exchange_account_id == scope.exchange_account_id,
-            AcceptedCapitalBasisRow.deployment_environment == scope.deployment_environment,
         )
         .order_by(LedgerObservationQueryRow.query_revision.desc())
         .limit(1)

@@ -84,7 +84,6 @@ async def _admit(
     policy = await session.scalar(
         select(CapitalPolicyHeadRow.revision_id).where(
             CapitalPolicyHeadRow.exchange_account_id == scope.exchange_account_id,
-            CapitalPolicyHeadRow.deployment_environment == scope.deployment_environment,
             CapitalPolicyHeadRow.symbol == attempt.symbol,
         )
     )
@@ -149,8 +148,7 @@ async def _read_budget(
     assert attempt.cell_id is not None
     read = await capital_reader.read_capital_locked(
         session,
-        CapitalScope(scope.exchange_account_id, scope.deployment_environment,
-                     attempt.symbol, attempt.cell_id),
+        CapitalScope(scope.exchange_account_id, attempt.symbol, attempt.cell_id),
         now_ms=now_ms, max_snapshot_age_ms=max_snapshot_age_ms,
     )
     result = read.result
@@ -218,7 +216,6 @@ async def _resolve_token(
         select(LedgerObservationQueryRow.query_id)
         .where(
             LedgerObservationQueryRow.exchange_account_id == scope.exchange_account_id,
-            LedgerObservationQueryRow.deployment_environment == scope.deployment_environment,
         )
         .order_by(LedgerObservationQueryRow.query_revision.desc())
         .limit(1)
@@ -235,7 +232,6 @@ async def _resolve_token(
             LedgerObservationRow.accepted.is_(True),
             AcceptedCapitalBasisRow.accepted.is_(True),
             AcceptedCapitalBasisRow.exchange_account_id == scope.exchange_account_id,
-            AcceptedCapitalBasisRow.deployment_environment == scope.deployment_environment,
         )
     )
     if basis_id is None:
@@ -243,7 +239,6 @@ async def _resolve_token(
     clock = await session.scalar(
         select(CapitalCommandClockRow.revision).where(
             CapitalCommandClockRow.exchange_account_id == scope.exchange_account_id,
-            CapitalCommandClockRow.deployment_environment == scope.deployment_environment,
         )
     )
     return _STALE if clock != revision else (basis_id, revision)
@@ -304,7 +299,6 @@ async def close_dangling(
             )
             .where(
                 SubmissionAttemptJournalRow.exchange_account_id == scope.exchange_account_id,
-                SubmissionAttemptJournalRow.deployment_environment == scope.deployment_environment,
                 SubmissionAttemptJournalRow.started_at_ms <= now_ms - grace_ms,
                 TransportOutcomeJournalRow.attempt_id.is_(None),
             )
@@ -335,7 +329,6 @@ async def record_attempt(session: AsyncSession, scope: Scope, attempt: Attempt) 
     latest = await session.scalar(
         select(func.max(SubmissionAttemptJournalRow.attempt_seq)).where(
             SubmissionAttemptJournalRow.exchange_account_id == scope.exchange_account_id,
-            SubmissionAttemptJournalRow.deployment_environment == scope.deployment_environment,
         )
     )
     payload = canonical_payload(attempt.normalized_payload)
@@ -346,7 +339,6 @@ async def record_attempt(session: AsyncSession, scope: Scope, attempt: Attempt) 
             attempt_id=attempt.attempt_id,
             execution_decision_id=attempt.execution_decision_id,
             exchange_account_id=scope.exchange_account_id,
-            deployment_environment=scope.deployment_environment,
             symbol=attempt.symbol,
             cell_id=attempt.cell_id,
             attempt_seq=sequence,
@@ -385,10 +377,7 @@ async def record_outcome(session: AsyncSession, scope: Scope, outcome: Outcome) 
     attempt = await session.get(SubmissionAttemptJournalRow, outcome.attempt_id)
     if attempt is None:
         raise ValueError("attempt does not exist")
-    if (attempt.exchange_account_id, attempt.deployment_environment) != (
-        scope.exchange_account_id,
-        scope.deployment_environment,
-    ):
+    if attempt.exchange_account_id != scope.exchange_account_id:
         raise ValueError("attempt scope mismatch")
     stored = await read_back_outcome(session, outcome.attempt_id)
     if stored is not None:
@@ -457,7 +446,6 @@ async def record_resolution(session: AsyncSession, scope: Scope, resolution: Res
         opening_ms = subject.opened_at_ms if subject is not None else None
     if subject is None or (
         subject.exchange_account_id != scope.exchange_account_id
-        or subject.deployment_environment != scope.deployment_environment
         or subject.symbol != resolution.symbol
     ):
         raise ResolutionRejected("subject scope mismatch")
@@ -472,7 +460,6 @@ async def record_resolution(session: AsyncSession, scope: Scope, resolution: Res
         or opening_ms is None
         or query.started_at_ms <= opening_ms
         or observation.exchange_account_id != scope.exchange_account_id
-        or observation.deployment_environment != scope.deployment_environment
         or not all(
             (
                 observation.wallets_complete,
@@ -497,7 +484,6 @@ async def record_resolution(session: AsyncSession, scope: Scope, resolution: Res
             attempt_id=resolution.attempt_id,
             quarantine_id=resolution.quarantine_id,
             exchange_account_id=scope.exchange_account_id,
-            deployment_environment=scope.deployment_environment,
             symbol=resolution.symbol,
             action=resolution.action,
             venue_offer_id=resolution.venue_offer_id,

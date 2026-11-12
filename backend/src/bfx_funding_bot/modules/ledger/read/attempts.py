@@ -30,7 +30,6 @@ MAX_TAIL_ATTEMPTS = 256
 _ATTEMPT_COLUMNS = (
     SubmissionAttemptJournalRow.attempt_id,
     SubmissionAttemptJournalRow.exchange_account_id,
-    SubmissionAttemptJournalRow.deployment_environment,
     SubmissionAttemptJournalRow.symbol,
     SubmissionAttemptJournalRow.cell_id,
     SubmissionAttemptJournalRow.attempt_seq,
@@ -57,7 +56,6 @@ async def fresh_all[T](session: AsyncSession, statement: Select[tuple[T]]) -> li
 async def tail_attempts(
     session: AsyncSession,
     account: UUID,
-    environment: str,
     high_water: int,
     *,
     limit: int,
@@ -70,7 +68,6 @@ async def tail_attempts(
         .options(load_only(*_columns(with_payload)))
         .where(
             SubmissionAttemptJournalRow.exchange_account_id == account,
-            SubmissionAttemptJournalRow.deployment_environment == environment,
             SubmissionAttemptJournalRow.attempt_seq > high_water,
         )
         .order_by(SubmissionAttemptJournalRow.attempt_seq)

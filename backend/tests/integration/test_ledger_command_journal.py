@@ -91,10 +91,10 @@ async def test_cancel_refusal_has_no_writes(factory, change):  # noqa: F811
                 "occurred_at_ms,raw) VALUES (:id,:o,'cancel-me','fUST',1,0,false,'active',0,'canceled',10,'{}')"
             ), {"id": evidence_id, "o": UUID(_O)})
             await session.execute(text(
-                "INSERT INTO venue_offer_mirror(exchange_account_id,deployment_environment,venue_offer_id,"
+                "INSERT INTO venue_offer_mirror(exchange_account_id,venue_offer_id,"
                 "symbol,amount_original,amount_remaining,rate_observed,status,mts_created,"
                 "last_accepted_observation_id,present_in_latest_accepted_snapshot,terminal_evidence_id,terminal_kind) "
-                "VALUES (:a,'ci','cancel-me','fUST',1,0,false,'active',0,:o,false,:id,'canceled')"
+                "VALUES (:a,'cancel-me','fUST',1,0,false,'active',0,:o,false,:id,'canceled')"
             ), {"a": UUID(_A), "o": UUID(_O), "id": evidence_id})
         before = await _state(session)
     calls = []
@@ -149,6 +149,6 @@ async def test_command_outcome_owned_commit_duplicate_and_scoped_readback(factor
             await port.record_outcome(SCOPE, attempt.attempt_id, second)
         assert error.value.stored == outcome
     with pytest.raises(ValueError, match="scope mismatch"):
-        await port.read_back_outcome(replace(SCOPE, deployment_environment="other"), attempt.attempt_id)
+        await port.read_back_outcome(replace(SCOPE, exchange_account_id=uuid4()), attempt.attempt_id)
     async with factory.begin() as session:
         assert await _state(session) == (before[0], before[1] + 1, before[2] + 1)

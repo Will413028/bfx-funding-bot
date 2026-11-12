@@ -102,7 +102,7 @@ async def amend_capital_policy(
     amended = _amended(applied.policy, changes)
     report: dict[str, Any] = {
         "status": "dry_run", "account_id": str(store.scope.exchange_account_id),
-        "environment": store.scope.deployment_environment, "symbol": symbol,
+        "symbol": symbol,
         "changes": changes.as_dict(),
         "expected_revision": applied.revision, "current_policy_digest": applied.digest,
         "current_policy": policy_payload(applied.policy),

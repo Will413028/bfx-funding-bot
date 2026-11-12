@@ -21,7 +21,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -121,7 +121,7 @@ async def test_positions_use_only_the_latest_basis(book) -> None:
 @pytest.mark.asyncio
 async def test_positions_are_scoped(book) -> None:
     await book.accept(_observation("1000", credits=(_credit("c1", "50", opening=101_100),)))
-    other = Scope(book.scope.exchange_account_id, "ci2")
+    other = Scope(uuid4())
     assert await _positions(book, other) == ()
     assert len(await _positions(book)) == 1
 

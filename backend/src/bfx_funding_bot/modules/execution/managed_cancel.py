@@ -38,7 +38,7 @@ class ManagedOfferSweep:
                  environment: str, canceller: CancelPort, ctx: AccountContext,
                  offers: ManagedOfferReader) -> None:
         self._sf = session_factory
-        self._scope = Scope(account_id, environment)
+        self._scope = Scope(account_id)
         self._canceller = canceller
         self._ctx = ctx
         self._offers = offers

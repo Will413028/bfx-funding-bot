@@ -89,7 +89,6 @@ async def attempt_match(
             .where(
                 SubmissionAttemptJournalRow.attempt_id == attempt_id,
                 SubmissionAttemptJournalRow.exchange_account_id == scope.exchange_account_id,
-                SubmissionAttemptJournalRow.deployment_environment == scope.deployment_environment,
                 TransportOutcomeJournalRow.kind == "unknown",
             )
         )

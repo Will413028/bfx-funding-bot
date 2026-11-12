@@ -86,7 +86,7 @@ from .test_ledger_basis import (
 from .test_ledger_schema_roles import _A, ledger_db  # noqa: F401 - fixture re-export
 
 pytestmark = pytest.mark.integration
-SCOPE = Scope(UUID(_A), "ci")
+SCOPE = Scope(UUID(_A))
 JOURNAL = build_ledger_journal()
 READER = build_ledger_capital_reader()
 OBSERVATIONS = build_ledger_observations()
@@ -185,23 +185,22 @@ class Book:
     ) -> UUID:
         assert self.basis_id is not None
         self.decisions += 1
-        decision_id = f"reader-{self.scope.deployment_environment}-{self.decisions}-{uuid4()}"
+        decision_id = f"reader-{self.decisions}-{uuid4()}"
         attempt_id = uuid4()
         async with self.factory.begin() as session:
             await session.execute(
                 text(
                     "INSERT INTO execution_decisions(decision_id, account_id, "
-                    "exchange_account_id, deployment_environment, reconcile_id, cell_id, "
+                    "exchange_account_id, reconcile_id, cell_id, "
                     "symbol, signal_correlation_id, outcome, signal_rate, amount_usdt, "
                     "duration_days, model_evidence, safety_result, execution_policy, "
                     "service_version, config_hash, occurred_at_ms, recorded_at_ms) VALUES "
-                    "(:d, 'account', :a, :e, 'r', :cell, :symbol, :d, 'submitted', 0, "
+                    "(:d, 'account', :a, 'r', :cell, :symbol, :d, 'submitted', 0, "
                     ":amount, 2, '{}', '{}', 'policy', 'test', 'hash', 0, 0)"
                 ),
                 {
                     "d": decision_id,
                     "a": str(self.scope.exchange_account_id),
-                    "e": self.scope.deployment_environment,
                     "cell": cell,
                     "symbol": symbol,
                     "amount": amount,
@@ -301,7 +300,6 @@ class Book:
             "id": revision_id,
             "a": str(self.scope.exchange_account_id),
             "o": str(owner or self.scope.exchange_account_id),
-            "e": self.scope.deployment_environment,
             "s": symbol,
             "r": revision,
             "v": policy_schema_version(policy),
@@ -312,17 +310,17 @@ class Book:
             await session.execute(
                 text(
                     "INSERT INTO capital_policy_revisions(id, exchange_account_id, "
-                    "deployment_environment, symbol, revision, schema_version, policy, digest, "
-                    "source) VALUES (:id, :o, :e, :s, :r, :v, CAST(:p AS jsonb), :d, '{}')"
+                    "symbol, revision, schema_version, policy, digest, "
+                    "source) VALUES (:id, :o, :s, :r, :v, CAST(:p AS jsonb), :d, '{}')"
                 ),
                 params,
             )
             await session.execute(
                 text(
                     "INSERT INTO capital_policy_heads(exchange_account_id, "
-                    "deployment_environment, symbol, revision_id, revision) "
-                    "VALUES (:a, :e, :s, :id, :r) ON CONFLICT (exchange_account_id, "
-                    "deployment_environment, symbol) DO UPDATE SET "
+                    "symbol, revision_id, revision) "
+                    "VALUES (:a, :s, :id, :r) ON CONFLICT (exchange_account_id, "
+                    "symbol) DO UPDATE SET "
                     "revision_id = EXCLUDED.revision_id, revision = EXCLUDED.revision"
                 ),
                 params,
@@ -342,7 +340,6 @@ class Book:
     ) -> LedgerCapitalRead:
         scope = CapitalScope(
             account or self.scope.exchange_account_id,
-            self.scope.deployment_environment,
             symbol,
             cell,
         )
@@ -377,8 +374,8 @@ async def book(ledger_db):  # noqa: F811
         conn.execute(
             text(
                 "INSERT INTO capital_policy_revisions(id, exchange_account_id, "
-                "deployment_environment, symbol, revision, schema_version, policy, digest, "
-                "source) VALUES (:p, :a, 'ci', 'fATTEMPT', 1, 1, '{}', 'p', '{}')"
+                "symbol, revision, schema_version, policy, digest, "
+                "source) VALUES (:p, :a, 'fATTEMPT', 1, 1, '{}', 'p', '{}')"
             ),
             {"p": _ATTEMPT_POLICY, "a": _A},
         )
@@ -764,7 +761,7 @@ async def test_scopes_are_isolated(book) -> None:
         await session.execute(
             text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','other')"),
             {"id": account})
-    other = Book(book.factory, Scope(account, SCOPE.deployment_environment))
+    other = Book(book.factory, Scope(account))
     await book.policy("fUST")
     await other.policy("fUST")
     await book.accept()

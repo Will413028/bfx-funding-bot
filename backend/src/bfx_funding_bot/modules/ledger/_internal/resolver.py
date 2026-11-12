@@ -102,7 +102,6 @@ async def _subjects(session: AsyncSession, scope: Scope) -> list[UnknownTerms]:
         .where(
             SubmissionAttemptJournalRow.attempt_id.in_(ids),
             SubmissionAttemptJournalRow.exchange_account_id == scope.exchange_account_id,
-            SubmissionAttemptJournalRow.deployment_environment == scope.deployment_environment,
         )
         .order_by(SubmissionAttemptJournalRow.attempt_seq)
     )
@@ -216,7 +215,6 @@ async def resolve_unknowns(
             alerts.emit(
                 alerts.LEDGER_UNKNOWN_RESOLUTION_REJECTED, level=alerts.WARNING,
                 exchange_account_id=str(scope.exchange_account_id),
-                deployment_environment=scope.deployment_environment,
                 attempt_id=str(terms.attempt_id), symbol=terms.symbol,
                 action=resolution.action, error=str(exc),
             )

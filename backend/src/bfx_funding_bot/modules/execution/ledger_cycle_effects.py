@@ -144,10 +144,7 @@ class LedgerCycleEffects:
         for symbol, cell in self._cells:
             try:
                 read = await self._capital.read(
-                    CapitalScope(
-                        self._scope.exchange_account_id, self._scope.deployment_environment,
-                        symbol, cell,
-                    ),
+                    CapitalScope(self._scope.exchange_account_id, symbol, cell),
                     now_ms=self._clock(), session=None,
                 )
             except Exception as exc:

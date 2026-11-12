@@ -31,7 +31,7 @@ def _url(pg_engine) -> str:
 async def test_guard_fails_closed_when_lock_lost(pg_engine) -> None:
     lock = WriterLock(
         database_url=_url(pg_engine),
-        key=derive_lock_key(f"d-{uuid4().hex[:8]}", "prod"),
+        key=derive_lock_key(f"d-{uuid4().hex[:8]}"),
     )
     await lock.acquire()
     guard = WriterLockGuard(lock=lock)

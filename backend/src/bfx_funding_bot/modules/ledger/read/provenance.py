@@ -45,7 +45,6 @@ async def offer_provenance(
             TransportOutcomeJournalRow.kind == "ack",
             TransportOutcomeJournalRow.venue_offer_id.in_(venue_ids),
             SubmissionAttemptJournalRow.exchange_account_id == scope.exchange_account_id,
-            SubmissionAttemptJournalRow.deployment_environment == scope.deployment_environment,
         )
     )
     for outcome in acked:
@@ -64,7 +63,6 @@ async def offer_provenance(
             ExecutionResolutionJournalRow.venue_offer_id.in_(venue_ids),
             ExecutionResolutionJournalRow.attempt_id.is_not(None),
             ExecutionResolutionJournalRow.exchange_account_id == scope.exchange_account_id,
-            ExecutionResolutionJournalRow.deployment_environment == scope.deployment_environment,
         )
     )
     for resolution in bound:
@@ -91,9 +89,8 @@ def sole_owner(
     attempt = attempts.get(next(iter(attempt_ids)))
     if attempt is None or (
         attempt.exchange_account_id,
-        attempt.deployment_environment,
         attempt.symbol,
-    ) != (scope.exchange_account_id, scope.deployment_environment, symbol):
+    ) != (scope.exchange_account_id, symbol):
         raise LookupError("provenance_conflict")
     return attempt
 

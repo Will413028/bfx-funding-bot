@@ -266,13 +266,11 @@ async def accept_observation(
     query = await session.get(LedgerObservationQueryRow, handle.query_id)
     if query is None or (
         query.exchange_account_id,
-        query.deployment_environment,
         query.query_revision,
         query.start_revision,
         query.started_at_ms,
     ) != (
         scope.exchange_account_id,
-        scope.deployment_environment,
         handle.query_revision,
         handle.start_revision,
         handle.started_at_ms,
@@ -281,13 +279,11 @@ async def accept_observation(
     latest = await session.scalar(
         select(func.max(LedgerObservationQueryRow.query_revision)).where(
             LedgerObservationQueryRow.exchange_account_id == scope.exchange_account_id,
-            LedgerObservationQueryRow.deployment_environment == scope.deployment_environment,
         )
     )
     clock = await session.scalar(
         select(CapitalCommandClockRow.revision).where(
             CapitalCommandClockRow.exchange_account_id == scope.exchange_account_id,
-            CapitalCommandClockRow.deployment_environment == scope.deployment_environment,
         )
     )
     accepted = latest == handle.query_revision and (clock or 0) == handle.start_revision
@@ -295,7 +291,6 @@ async def accept_observation(
         await session.execute(
             insert(CapitalCommandClockRow).values(
                 exchange_account_id=scope.exchange_account_id,
-                deployment_environment=scope.deployment_environment,
                 revision=0,
             )
         )
@@ -306,7 +301,6 @@ async def accept_observation(
             id=observation_id,
             query_id=handle.query_id,
             exchange_account_id=scope.exchange_account_id,
-            deployment_environment=scope.deployment_environment,
             schema_version=1,
             query_finished_at_ms=first.finished_at_ms,
             confirmation_finished_at_ms=confirmation.finished_at_ms,
@@ -418,7 +412,6 @@ async def _mirror_offers(
         await session.scalars(
             select(VenueOfferMirrorRow).where(
                 VenueOfferMirrorRow.exchange_account_id == scope.exchange_account_id,
-                VenueOfferMirrorRow.deployment_environment == scope.deployment_environment,
                 or_(
                     VenueOfferMirrorRow.present_in_latest_accepted_snapshot,
                     VenueOfferMirrorRow.venue_offer_id.in_((*observed, *history)),
@@ -465,7 +458,6 @@ async def _mirror_offers(
             session.add(
                 VenueOfferMirrorRow(
                     exchange_account_id=scope.exchange_account_id,
-                    deployment_environment=scope.deployment_environment,
                     last_accepted_observation_id=observation_id,
                     present_in_latest_accepted_snapshot=True,
                     terminal_evidence_id=None,
@@ -489,7 +481,6 @@ async def _mirror_credits(
         await session.scalars(
             select(VenueCreditMirrorRow).where(
                 VenueCreditMirrorRow.exchange_account_id == scope.exchange_account_id,
-                VenueCreditMirrorRow.deployment_environment == scope.deployment_environment,
                 or_(
                     VenueCreditMirrorRow.present_in_latest_accepted_snapshot,
                     VenueCreditMirrorRow.venue_credit_id.in_(ids),
@@ -536,7 +527,6 @@ async def _mirror_credits(
             session.add(
                 VenueCreditMirrorRow(
                     exchange_account_id=scope.exchange_account_id,
-                    deployment_environment=scope.deployment_environment,
                     last_accepted_observation_id=observation_id,
                     present_in_latest_accepted_snapshot=True,
                     terminal_evidence_id=None,

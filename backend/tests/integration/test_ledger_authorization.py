@@ -56,8 +56,8 @@ async def factory(seeded):  # noqa: F811
     with seeded.begin() as conn:
         conn.execute(
             text(
-                "INSERT INTO capital_policy_heads(exchange_account_id, deployment_environment, "
-                "symbol, revision_id, revision) VALUES (:a, 'ci', 'fUST', :p, 1)"
+                "INSERT INTO capital_policy_heads(exchange_account_id, "
+                "symbol, revision_id, revision) VALUES (:a, 'fUST', :p, 1)"
             ),
             {"a": _A, "p": _P},
         )
@@ -74,11 +74,11 @@ async def _fresh_attempt(session, *, started_at_ms: int = 0):
     await session.execute(
         text(
             "INSERT INTO execution_decisions(decision_id, account_id, "
-            "exchange_account_id, deployment_environment, reconcile_id, cell_id, "
+            "exchange_account_id, reconcile_id, cell_id, "
             "symbol, signal_correlation_id, outcome, signal_rate, amount_usdt, "
             "duration_days, model_evidence, safety_result, execution_policy, "
             "service_version, config_hash, occurred_at_ms, recorded_at_ms) VALUES "
-            "(:d, 'account', :a, 'ci', 'r', 'cell', 'fUST', :d, 'submitted', 0, "
+            "(:d, 'account', :a, 'r', 'cell', 'fUST', :d, 'submitted', 0, "
             "1, 2, '{}', '{}', 'policy', 'test', 'hash', 0, 0)"
         ),
         {"d": decision_id, "a": _A},
@@ -122,15 +122,15 @@ async def test_authorize_refusal_has_no_writes(factory, change: str, reason: str
             await session.execute(
                 text(
                     "INSERT INTO capital_policy_revisions(id, exchange_account_id, "
-                    "deployment_environment, symbol, revision, schema_version, policy, digest, "
-                    "source) VALUES (:id, :a, 'ci', 'fUST', 2, 1, '{}', 'p', '{}')"
+                    "symbol, revision, schema_version, policy, digest, "
+                    "source) VALUES (:id, :a, 'fUST', 2, 1, '{}', 'p', '{}')"
                 ),
                 {"id": newer, "a": _A},
             )
             await session.execute(
                 text(
                     "UPDATE capital_policy_heads SET revision_id=:p, revision=2 WHERE "
-                    "exchange_account_id=:a AND deployment_environment='ci' AND symbol='fUST'"
+                    "exchange_account_id=:a AND symbol='fUST'"
                 ),
                 {"p": newer, "a": _A},
             )
@@ -141,7 +141,7 @@ async def test_authorize_refusal_has_no_writes(factory, change: str, reason: str
             attempt = replace(attempt, basis_id=uuid4())
         elif change == "malformed":
             token = "1"
-    scope = replace(SCOPE, deployment_environment="other") if change == "scope" else SCOPE
+    scope = replace(SCOPE, exchange_account_id=uuid4()) if change == "scope" else SCOPE
     async with factory.begin() as session:
         before = await _state(session)
         result = await JOURNAL.authorize_attempt(session, scope, attempt, token, now_ms=10)
@@ -224,7 +224,7 @@ async def test_close_dangling_grace_scope_idempotence_and_admission(factory) -> 
         before = await _state(session)
         assert (
             await JOURNAL.close_dangling(
-                session, replace(SCOPE, deployment_environment="other"), now_ms=200_000, grace_ms=RUNTIME_GRACE_MS
+                session, replace(SCOPE, exchange_account_id=uuid4()), now_ms=200_000, grace_ms=RUNTIME_GRACE_MS
             )
             == ()
         )
@@ -263,14 +263,12 @@ async def test_close_dangling_rolls_back_outcome_and_clock(factory) -> None:
         assert await JOURNAL.read_back_outcome(session, attempt.attempt_id) is None
 
 
-@pytest.mark.parametrize("field", ["account", "environment", "symbol", "missing"])
+@pytest.mark.parametrize("field", ["account", "symbol", "missing"])
 @pytest.mark.asyncio
 async def test_source_quarantine_refuses_mismatch_before_bump(factory, field: str) -> None:
     from decimal import Decimal
 
     scope = replace(SCOPE, exchange_account_id=uuid4()) if field == "account" else SCOPE
-    if field == "environment":
-        scope = replace(SCOPE, deployment_environment="other")
     opening = Quarantine(
         uuid4(),
         "fUSD" if field == "symbol" else "fUST",

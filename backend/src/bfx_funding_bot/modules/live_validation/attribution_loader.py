@@ -269,7 +269,7 @@ async def load_credit_inputs(
         FundingInterestPaymentRow.deployment_environment == env,
     ))).all()
 
-    scope = Scope(account_uuid, env)
+    scope = Scope(account_uuid)
     journal_links = await journal_offer_cells(
         session, scope, {str(t.offer_id) for t in trade_rows})
     mirror = await mirror_credits(session, scope)

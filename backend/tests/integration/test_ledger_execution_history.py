@@ -50,7 +50,7 @@ from bfx_funding_bot.modules.execution.archived_execution_history import (
     ArchivedExecutionHistory,
 )
 from bfx_funding_bot.modules.ledger import CreditHistory, OfferHistory, Scope
-from tests.pg_templates import DISABLE_REALM_TRIGGERS_SQL, OPEN_LEGACY_ARCHIVE_SQL
+from tests.pg_templates import OPEN_LEGACY_ARCHIVE_SQL
 
 from .test_ledger_basis import _credit, _observation, _offer
 from .test_ledger_capital_reader import SCOPE, Book
@@ -59,17 +59,17 @@ from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture dependen
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 WATERMARK = 1_000
+ENVIRONMENT = "ci"  # the database's realm stamp, which the web API is given at assembly
 
 
 async def _plant_archive(
-    book: Book, *events: tuple[str, int], environment: str = SCOPE.deployment_environment
+    book: Book, *events: tuple[str, int], environment: str = ENVIRONMENT
 ) -> None:
     """Pre-switch ``event_log`` rows ``(event_type, occurred_at_ms)`` of SCOPE's account, planted
-    in the frozen archive opened on this clone (another environment with the realm trigger off)."""
+    in the frozen archive opened on this clone. The archive keeps its environment column, so a
+    row of another environment can still sit there."""
     async with book.factory.begin() as session:
         await session.execute(text(OPEN_LEGACY_ARCHIVE_SQL))
-        if environment != SCOPE.deployment_environment:
-            await session.execute(text(DISABLE_REALM_TRIGGERS_SQL))
         for etype, at in events:
             await session.execute(text(
                 "INSERT INTO legacy_archive.event_log (account_id, exchange_account_id, "
@@ -115,7 +115,7 @@ async def _client(
             yield session
 
     app = FastAPI()
-    app.state.deployment_environment = SCOPE.deployment_environment
+    app.state.deployment_environment = ENVIRONMENT
     app.include_router(build_projections_router())
     app.state.read_models = read_models or build_read_models()
     app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")
@@ -299,7 +299,7 @@ async def test_another_scopes_observations_and_journal_add_nothing(book, monkeyp
         await session.execute(
             text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','other')"),
             {"id": account})
-    other = Book(book.factory, Scope(account, SCOPE.deployment_environment))
+    other = Book(book.factory, Scope(account))
     await other.accept()
     await other.attempt("11", outcome="ack", venue_offer_id="theirs", started_at_ms=2_000,
                         completed_at_ms=2_010)

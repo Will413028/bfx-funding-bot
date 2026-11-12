@@ -172,7 +172,7 @@ class TradingStateRepository:
         self._sf = session_factory
         self.account_id = account_id if isinstance(account_id, UUID) else UUID(str(account_id))
         self.environment = deployment_environment
-        self._scope = Scope(self.account_id, deployment_environment)
+        self._scope = Scope(self.account_id)
         # The ledger's scope lock: transitions serialise with every other money-state
         # write of the scope, and nothing outside the ledger takes the primitive (D4).
         self._scope_lock = scope_lock

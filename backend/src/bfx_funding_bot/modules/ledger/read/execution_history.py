@@ -201,7 +201,6 @@ class LedgerExecutionHistory:
             _A.match_rate.label("rate"),
         ).where(
             _A.exchange_account_id == scope.exchange_account_id,
-            _A.deployment_environment == scope.deployment_environment,
             _A.started_at_ms >= since,
         )
         outcomes = select(
@@ -219,7 +218,6 @@ class LedgerExecutionHistory:
             _A.match_rate,
         ).join(_A, _A.attempt_id == _O.attempt_id).where(
             _A.exchange_account_id == scope.exchange_account_id,
-            _A.deployment_environment == scope.deployment_environment,
             _O.completed_at_ms >= since,
         )
         resolutions = (
@@ -241,7 +239,6 @@ class LedgerExecutionHistory:
             .outerjoin(_Q, _Q.quarantine_id == _R.quarantine_id)
             .where(
                 _R.exchange_account_id == scope.exchange_account_id,
-                _R.deployment_environment == scope.deployment_environment,
                 _R.resolved_at_ms >= since,
             )
         )
@@ -264,7 +261,6 @@ def _observed(scope: Scope) -> Any:
     """Every stored observation of the scope, accepted or fenced."""
     return (
         _OBS.exchange_account_id == scope.exchange_account_id,
-        _OBS.deployment_environment == scope.deployment_environment,
     )
 
 
@@ -273,12 +269,10 @@ def _own_offers(scope: Scope) -> Any:
     return union_all(
         select(_O.venue_offer_id).join(_A, _A.attempt_id == _O.attempt_id).where(
             _A.exchange_account_id == scope.exchange_account_id,
-            _A.deployment_environment == scope.deployment_environment,
             _O.venue_offer_id.is_not(None),
         ),
         select(_R.venue_offer_id).where(
             _R.exchange_account_id == scope.exchange_account_id,
-            _R.deployment_environment == scope.deployment_environment,
             _R.venue_offer_id.is_not(None),
         ),
     )

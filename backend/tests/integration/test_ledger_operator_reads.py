@@ -200,7 +200,7 @@ async def test_detail_returns_none_for_everything_that_is_not_an_uncertainty(
     in_flight = await book.attempt("50", outcome=None)
     for subject in (in_flight, scenario.acked, uuid4()):
         assert await _get(book, subject) is None
-    other = Scope(uuid4(), "ci")
+    other = Scope(uuid4())
     for subject in (scenario.open_unknown, scenario.orphan, scenario.resolved_quarantine):
         assert await _get(book, subject, other) is None
         assert await _get(book, subject) is not None

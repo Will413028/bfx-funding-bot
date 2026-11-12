@@ -42,7 +42,7 @@ from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.trading import CapitalPolicy, CapitalScope
 from tests.async_wait import until
 
-from .contracts.stacks import ACCOUNT, ENVIRONMENT, NOW, SCOPE, Stack, build_stack, seed_account
+from .contracts.stacks import ACCOUNT, NOW, SCOPE, Stack, build_stack, seed_account
 from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture re-export
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -90,7 +90,7 @@ def policy_guard(stack: Stack) -> CapitalPolicyGuard:
 
 async def read_capital(stack: Stack, cell_id: str, symbol: str = "fUST") -> CapitalAvailable:
     """What the planner reads for one cell."""
-    view = await stack.capital.read(CapitalScope(ACCOUNT, ENVIRONMENT, symbol, cell_id),
+    view = await stack.capital.read(CapitalScope(ACCOUNT, symbol, cell_id),
                                     now_ms=NOW)
     assert isinstance(view, CapitalAvailable), view
     return view
@@ -131,7 +131,7 @@ async def decision(stack: Stack, amount: str = AMOUNT, *, cell: str = "a30",
     async with stack.factory.begin() as session:
         session.add(ExecutionDecisionRow(
             decision_id=decision_id, account_id=str(ACCOUNT), exchange_account_id=ACCOUNT,
-            deployment_environment=ENVIRONMENT, reconcile_id="test", cell_id=cell, symbol=symbol,
+            reconcile_id="test", cell_id=cell, symbol=symbol,
             signal_correlation_id=str(signal), outcome="ready", signal_rate=Decimal("0.0001"),
             applied_rate=Decimal("0.0001"), amount_usdt=Decimal(amount), duration_days=2,
             model_evidence={}, safety_result={}, execution_policy="test", service_version="test",
@@ -490,7 +490,7 @@ async def test_halt_writer_waits_for_authorization_lock(pg_session_factory):
     task = None
     try:
         async with factory.begin() as session:
-            await build_scope_lock().lock(session, Scope(account, "ci"))
+            await build_scope_lock().lock(session, Scope(account))
             task = asyncio.create_task(halt.transition("HALTED", cause="operator", reason="stop",
                                                        actor="test"))
 
@@ -583,7 +583,7 @@ async def test_cancel_requires_scoped_managed_provenance(gate_stack, identity):
         other = uuid4()
         async with gate_stack.factory.begin() as session:
             session.add(ExchangeAccount(id=other, venue="bitfinex", label="other"))
-        rig.gate._boundary = replace(rig.gate._boundary, scope=Scope(other, "ci"))
+        rig.gate._boundary = replace(rig.gate._boundary, scope=Scope(other))
         account_id = str(other)
         ctx = replace(rig.ctx, account_id=account_id)
     else:

@@ -28,14 +28,13 @@ from bfx_funding_bot.modules.trading import (
 
 
 async def applied_policy(
-    session: AsyncSession, account: UUID, environment: str, symbol: str
+    session: AsyncSession, account: UUID, symbol: str
 ) -> AppliedPolicy | Blocked:
     """The symbol's head -> its revision, proven (``check_pointer``) and parsed."""
     head = (
         await session.execute(
             select(CapitalPolicyHeadRow.revision_id, CapitalPolicyHeadRow.revision).where(
                 CapitalPolicyHeadRow.exchange_account_id == account,
-                CapitalPolicyHeadRow.deployment_environment == environment,
                 CapitalPolicyHeadRow.symbol == symbol,
             )
         )
@@ -46,7 +45,6 @@ async def applied_policy(
             select(
                 CapitalPolicyRevisionRow.id,
                 CapitalPolicyRevisionRow.exchange_account_id,
-                CapitalPolicyRevisionRow.deployment_environment,
                 CapitalPolicyRevisionRow.symbol,
                 CapitalPolicyRevisionRow.revision,
                 CapitalPolicyRevisionRow.schema_version,
@@ -56,7 +54,6 @@ async def applied_policy(
         )).first()
     blocked = check_pointer(
         account,
-        environment,
         symbol,
         None if head is None else (head[0], head[1]),
         None
@@ -64,7 +61,6 @@ async def applied_policy(
         else (
             row.id,
             row.exchange_account_id,
-            row.deployment_environment,
             row.symbol,
             row.revision,
         ),
@@ -76,12 +72,12 @@ async def applied_policy(
         policy = parse_policy(row.schema_version, row.policy, row.digest)
     except PolicyRejectedError as exc:
         return Blocked(exc.reason, (("revision", str(row.id)),))
-    return AppliedPolicy(account, environment, symbol, row.revision, row.digest, row.id, policy)
+    return AppliedPolicy(account, symbol, row.revision, row.digest, row.id, policy)
 
 
 async def read_policy(session: AsyncSession, scope: Scope, symbol: str) -> AppliedPolicy | Blocked:
     """The symbol's applied policy; no snapshot transaction and no lock (policy rows only)."""
-    return await applied_policy(session, scope.exchange_account_id, scope.deployment_environment, symbol)
+    return await applied_policy(session, scope.exchange_account_id, symbol)
 
 
 

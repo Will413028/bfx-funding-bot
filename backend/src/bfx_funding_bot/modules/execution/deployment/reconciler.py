@@ -374,8 +374,7 @@ class DeploymentReconciler:
                     views: dict[str, CapitalAvailable] = {}
                     for cell in active:
                         read = await self._capital.read(
-                            CapitalScope(self._scope.exchange_account_id,
-                                         self._scope.deployment_environment, symbol, cell),
+                            CapitalScope(self._scope.exchange_account_id, symbol, cell),
                             now_ms=self._clock(), session=session,
                         )
                         if isinstance(read, CapitalBlocked):

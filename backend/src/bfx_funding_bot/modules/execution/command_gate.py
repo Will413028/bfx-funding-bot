@@ -161,7 +161,7 @@ class AccountCommandGate:
         account_id = _canonical_account_id(context.account_id)
         try:
             is_open = await self._uncertainty_reader.has_open(
-                None, Scope(account_id, self._deployment_environment), payload.symbol,
+                None, Scope(account_id), payload.symbol,
             )
         except Exception as exc:
             raise CommandGateBlocked("uncertainty guard unavailable") from exc
@@ -213,7 +213,7 @@ class AccountCommandGate:
         view = ready.capital_view
         if view is None:
             raise CommandGateBlocked("capital_authority_missing")
-        if boundary.scope != Scope(account_id, self._deployment_environment):
+        if boundary.scope != Scope(account_id):
             raise CommandGateBlocked("capital_scope_conflict")
         async with boundary.session_factory.begin() as session:
             row = await session.get(ExecutionDecisionRow, ready.decision_id)
@@ -233,7 +233,7 @@ class AccountCommandGate:
                     raise CommandGateBlocked("amount_fingerprint_missing")
                 assert self._offers is not None  # required with a boundary
                 if fingerprint in await self._offers.fingerprints_in_use(
-                    locked, Scope(account_id, self._deployment_environment),
+                    locked, Scope(account_id),
                     decision.symbol,
                 ):
                     raise CommandGateBlocked("amount_fingerprint_collision")
@@ -420,7 +420,7 @@ class AccountCommandGate:
         occurred_at_ms: int,
     ) -> None:
         decision = ready.decision
-        scope = Scope(_canonical_account_id(context.account_id), self._deployment_environment)
+        scope = Scope(_canonical_account_id(context.account_id))
         secrets = (context.credentials.api_key, context.credentials.api_secret)
         kind = result.outcome_kind
         boundary = self._boundary

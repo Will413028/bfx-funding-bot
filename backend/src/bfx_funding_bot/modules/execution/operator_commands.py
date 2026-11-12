@@ -131,11 +131,11 @@ class OperatorContext:
 
     @property
     def scope(self) -> Scope:
-        return Scope(self.exchange_account_id, self.deployment_environment)
+        return Scope(self.exchange_account_id)
 
     @property
     def resolution_scope(self) -> ResolutionScope:
-        return ResolutionScope(self.exchange_account_id, self.deployment_environment)
+        return ResolutionScope(self.exchange_account_id)
 
 
 def _not_found() -> OperatorCommandError:

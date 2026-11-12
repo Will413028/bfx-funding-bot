@@ -272,19 +272,19 @@ def parse_policy(schema_version: int, raw: Any, digest: str) -> CapitalPolicy:
 
 
 # A policy head as (revision_id, revision); a stored revision as
-# (id, account_id, environment, symbol, revision).
+# (id, account_id, symbol, revision).
 type PolicyHead = tuple[UUID, int]
-type PolicyRevisionKey = tuple[UUID, UUID, str, str, int]
+type PolicyRevisionKey = tuple[UUID, UUID, str, int]
 
 
 def check_pointer(
-    account_id: UUID, environment: str, symbol: str,
+    account_id: UUID, symbol: str,
     head: PolicyHead | None, revision: PolicyRevisionKey | None,
 ) -> Blocked | None:
     """Prove the scope's head points at its own revision, in the authority's order."""
     if head is None:
         return Blocked("policy_unavailable", ())
-    if revision is None or revision != (head[0], account_id, environment, symbol, head[1]):
+    if revision is None or revision != (head[0], account_id, symbol, head[1]):
         return Blocked("inconsistent_policy_pointer", ())
     return None
 

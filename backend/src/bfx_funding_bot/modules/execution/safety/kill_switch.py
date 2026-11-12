@@ -222,7 +222,7 @@ class KillSwitch:
         symbols = set(self._configured)
         error = None
         try:
-            scope = Scope(self._trading.account_id, self._trading.environment)
+            scope = Scope(self._trading.account_id)
             async with self._sf() as session:
                 symbols.update(record.symbol for record in
                                await self._uncertainty.list_open(session, scope))

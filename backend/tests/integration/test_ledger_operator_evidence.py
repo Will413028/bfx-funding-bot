@@ -101,7 +101,7 @@ async def test_ledger_port_rejects_invalid_observation_pg(seeded_fixture, fault,
             )
             if fault == "not_latest":
                 await _observation(session)
-            scope = Scope(SCOPE.exchange_account_id, "other") if fault == "cross_scope" else SCOPE
+            scope = Scope(uuid4()) if fault == "cross_scope" else SCOPE
             with pytest.raises(ResolutionRejected, match=code):
                 await PORT.verify(
                     session,

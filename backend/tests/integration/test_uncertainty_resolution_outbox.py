@@ -449,7 +449,7 @@ def test_queueing_a_request_never_waits_for_or_holds_the_account_writer_lock(
         operator_engine = _restricted_engine(url, "bfx_operator")
         operator = async_sessionmaker(operator_engine, expire_on_commit=False)
         try:
-            key = derive_transaction_lock_key(account_id_canonical(str(account)), "ci")
+            key = derive_transaction_lock_key(account_id_canonical(str(account)))
             daemon = await owner_engine.connect()
             transaction = await daemon.begin()
             try:

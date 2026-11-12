@@ -56,8 +56,7 @@ class CapitalPolicyGuard:
             if ctx.account_id != str(scope.exchange_account_id) or not ctx.capital_cell_id:
                 raise ValueError("capital_scope_missing")
             view = await self.authority.read(
-                CapitalScope(scope.exchange_account_id, scope.deployment_environment,
-                             decision.symbol, ctx.capital_cell_id),
+                CapitalScope(scope.exchange_account_id, decision.symbol, ctx.capital_cell_id),
                 now_ms=self.clock(), session=ctx.command_session)
             if isinstance(view, CapitalBlocked):
                 return GuardResult(False, self.name, f"capital_unavailable: {view.reason}")
@@ -244,7 +243,7 @@ class UncertaintyGuard:
         try:
             rows: Sequence[object] = await self._reader.list_open(
                 ctx.command_session,
-                Scope(account_id, self._deployment_environment),
+                Scope(account_id),
                 decision.symbol,
             )
         except Exception as exc:

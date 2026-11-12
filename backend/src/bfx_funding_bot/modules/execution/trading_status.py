@@ -311,8 +311,7 @@ class TradingStatusService:
                     if cell.symbol != symbol:
                         continue
                     read = await reads.authority.read(
-                        CapitalScope(scope.exchange_account_id, scope.deployment_environment,
-                                     symbol, cell.cell_id),
+                        CapitalScope(scope.exchange_account_id, symbol, cell.cell_id),
                         now_ms=reads.clock(), session=session,
                     )
                     if isinstance(read, CapitalBlocked):

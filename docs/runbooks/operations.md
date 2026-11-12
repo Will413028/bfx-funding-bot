@@ -65,7 +65,7 @@ webapi 也沒有啟用的端點，資料庫的 trigger 拒絕 table owner 與 `b
 container，用 `/opt/bfx/runtime/migrate.env`（owner role）。在正式環境，script 是 capital policy 的第二個寫入者，和 bot 用同一把 scope lock 序列化（ADR 2026-09-26 D1、ADR 2026-10-19 D4）：
 
 ```bash
-python -m scripts.amend_capital_policy --exchange-account-id UUID --environment prod \
+python -m scripts.amend_capital_policy --exchange-account-id UUID \
   --symbol fUST --max-offer-amount 200 --min-period-days 2 --max-period-days 2 \
   --max-open-offers 6 --rate-floor-ratio 0.5 --min-rate-apr 0.01
 # 看完整報告後，同一組參數加 --apply-digest DIGEST --reason "為什麼改" 再跑一次

@@ -13,7 +13,8 @@ Mutations (each in a copy of the migration; the named test fails):
 * leave one trigger function unrewritten: the same test's ``prosrc`` check;
 * do not rebuild a foreign key: ``test_the_upgrade_keeps_rows_and_rebuilds_keys_by_name``;
 * change an archive row during the upgrade: ``test_archive_rows_are_unchanged``;
-* drop the realm assertion: ``test_a_row_of_another_realm_refuses_the_upgrade``.
+* drop the realm assertion: ``test_a_row_of_another_realm_refuses_the_upgrade``;
+* keep the column on one live table: ``test_a_statement_of_the_previous_version_cannot_run``.
 """
 from __future__ import annotations
 
@@ -277,6 +278,52 @@ def test_a_row_of_another_realm_refuses_the_upgrade(before: tuple[str, Engine]) 
         assert conn.scalar(text(
             "SELECT count(*) FROM information_schema.columns WHERE table_name = 'nav_peak' "
             "AND column_name = 'deployment_environment'")) == 1
+
+
+def test_a_statement_of_the_previous_version_cannot_run(before: tuple[str, Engine]) -> None:
+    """The advisory-lock keys lost the environment in this release, so a program of the
+    previous version takes a different key and no longer excludes the new one. What keeps
+    it from writing is the schema: every statement that names the column is refused, on
+    every table that had it, before any row is read or changed."""
+    url, engine = before
+    with engine.connect() as conn:
+        tables = conn.execute(text(
+            "SELECT table_schema, table_name FROM information_schema.columns "
+            "WHERE column_name = 'deployment_environment' AND table_schema <> ALL(:s) "
+            "ORDER BY 1, 2"), {"s": list(_ARCHIVES)}).all()
+        loose = conn.execute(text(
+            "SELECT table_name FROM information_schema.columns "
+            "WHERE column_name = 'deployment_environment' AND table_schema <> ALL(:s) "
+            "AND (is_nullable <> 'NO' OR column_default IS NOT NULL)"),
+            {"s": list(_ARCHIVES)}).scalars().all()
+    assert len(tables) == 31
+    # The other direction: on the previous schema the column is required and has no
+    # default, so an INSERT of this version (which does not name it) is refused too:
+    # by the realm trigger first, and by NOT NULL behind it.
+    assert loose == []
+    _refused(engine, "refuses a write of realm <NULL> to capital_command_clock",
+             f"INSERT INTO capital_command_clock (exchange_account_id, revision) VALUES ('{_A}', 0)")
+    alembic(url, "upgrade", _REVISION)
+    statements = [
+        statement
+        for schema, table in tables
+        for name in [f'"{schema}"."{table}"']
+        for statement in (
+            f"INSERT INTO {name} (deployment_environment) VALUES ('ci')",
+            f"UPDATE {name} SET deployment_environment = 'ci'",
+            f"SELECT 1 FROM {name} WHERE deployment_environment = 'ci'",
+            f"DELETE FROM {name} WHERE deployment_environment = 'ci'",
+        )
+    ]
+    # The clock upsert as the previous version wrote it (conflict target included).
+    statements.append(
+        "INSERT INTO capital_command_clock (exchange_account_id, deployment_environment, "
+        f"revision) VALUES ('{_A}', 'ci', 0) "
+        "ON CONFLICT (exchange_account_id, deployment_environment) DO NOTHING")
+    for statement in statements:
+        with pytest.raises(DBAPIError) as refused, engine.begin() as conn:
+            conn.exec_driver_sql(statement)
+        assert getattr(refused.value.orig, "sqlstate", None) == "42703", statement
 
 
 def test_the_downgrade_refuses(upgraded: tuple[str, Engine]) -> None:

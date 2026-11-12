@@ -189,22 +189,21 @@ async def read_capital_locked(
     the statements below see one committed state; a caller that never took the
     lock, or runs REPEATABLE READ (its snapshot may predate the lock), is refused.
     """
-    await _require_locked_transaction(session, Scope(scope.account_id, scope.environment))
+    await _require_locked_transaction(session, Scope(scope.account_id))
     return await _read(session, scope, now_ms=now_ms, max_snapshot_age_ms=max_snapshot_age_ms)
 
 
 async def _read(
     session: AsyncSession, scope: CapitalScope, *, now_ms: int, max_snapshot_age_ms: int
 ) -> LedgerCapitalRead:
-    account, environment = scope.account_id, scope.environment
-    policy = await applied_policy(session, account, environment, scope.symbol)
+    account = scope.account_id
+    policy = await applied_policy(session, account, scope.symbol)
 
     query = await _first(
         session,
         select(LedgerObservationQueryRow.query_id, LedgerObservationQueryRow.started_at_ms)
         .where(
             LedgerObservationQueryRow.exchange_account_id == account,
-            LedgerObservationQueryRow.deployment_environment == environment,
         )
         .order_by(LedgerObservationQueryRow.query_revision.desc()),
     )
@@ -222,7 +221,6 @@ async def _read(
     clock = await session.scalar(
         select(CapitalCommandClockRow.revision).where(
             CapitalCommandClockRow.exchange_account_id == account,
-            CapitalCommandClockRow.deployment_environment == environment,
         )
     )
     if observation is not None and observation.accepted:
@@ -241,7 +239,6 @@ async def _read(
             select(AcceptedCapitalBasisRow.id)
             .where(
                 AcceptedCapitalBasisRow.exchange_account_id == account,
-                AcceptedCapitalBasisRow.deployment_environment == environment,
             )
             .limit(1)
         )
@@ -316,14 +313,12 @@ async def _read(
         session,
         select(QuarantineOpeningRow.quarantine_id, QuarantineOpeningRow.symbol).where(
             QuarantineOpeningRow.exchange_account_id == account,
-            QuarantineOpeningRow.deployment_environment == environment,
             QuarantineOpeningRow.opened_revision > basis.accept_revision,
         ),
     )
     tail = await tail_attempts(
         session,
         account,
-        environment,
         basis.attempt_seq_high_water,
         limit=MAX_TAIL_ATTEMPTS + 1,
         with_payload=False,
@@ -341,7 +336,7 @@ async def _read(
     # Current open uncertainty: an UNKNOWN without resolution, or any quarantine
     # the basis has not seen (it keeps blocking until a new basis lists it).
     uncertainties: list[UncertaintyFact] = [
-        UncertaintyFact(attempt_id, account, environment, symbol, True)
+        UncertaintyFact(attempt_id, account, symbol, True)
         for attempt_id, symbol in open_unknowns(
             [(row.attempt_id, row.symbol) for row in unresolved]
             + [(row.attempt_id, row.symbol) for row in tail],
@@ -351,7 +346,7 @@ async def _read(
     ]
     seen = {row.quarantine_id for row in listed}
     uncertainties.extend(
-        UncertaintyFact(row.quarantine_id, account, environment, row.symbol, True)
+        UncertaintyFact(row.quarantine_id, account, row.symbol, True)
         for row in later
         if row.quarantine_id not in seen
     )
@@ -369,9 +364,7 @@ async def _read(
         attempts.append(
             AttemptFact(
                 row.attempt_id,
-                CapitalScope(
-                    row.exchange_account_id, row.deployment_environment, row.symbol, row.cell_id
-                ),
+                CapitalScope(row.exchange_account_id, row.symbol, row.cell_id),
                 row.attempt_seq,
                 amount,
                 "pending" if kind is None else _OUTCOMES[kind],
@@ -395,7 +388,6 @@ async def _read(
         )
     accepted = AcceptedCapitalBasis(
         account,
-        environment,
         observation.id,
         query.query_id,
         basis.attempt_seq_high_water,

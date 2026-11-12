@@ -335,7 +335,7 @@ async def build_daemon(
         raise
     # Capital ports: every adapter a consumer binds to is the ledger's (apps/bot_ports.py).
     env_str = config.deployment_environment.value
-    capital_scope = Scope(account_bootstrap.exchange_account_id, env_str)
+    capital_scope = Scope(account_bootstrap.exchange_account_id)
     account_id = account_bootstrap.account_id
     bus = DomainEventBus()
     resync = ResyncChannel()
@@ -564,7 +564,7 @@ async def build_daemon(
     # guard-append and the return.
     writer_lock = WriterLock(
         database_url=config.database_url,
-        key=derive_lock_key(account_id, env_str),
+        key=derive_lock_key(account_id),
     )
     if config.database_url.startswith(("postgres", "postgresql")):
         await writer_lock.acquire()  # raises WriterLockUnacquired on contention
@@ -815,7 +815,7 @@ async def build_daemon(
     # The web API queues operator adjudications; only this writer appends them.
     uncertainty_worker = UncertaintyResolutionWorker(
         session_factory=session_factory,
-        scope=ResolutionScope(account_bootstrap.exchange_account_id, env_str),
+        scope=ResolutionScope(account_bootstrap.exchange_account_id),
         authority=operator_authorized, scope_lock=capital.scope_lock,
         clock=now_ms_utc,
         ownership=writer_lock.verify_held,
