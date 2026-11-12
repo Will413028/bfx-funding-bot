@@ -508,10 +508,10 @@ resources, then verifies the restored copy two ways:
    row names an accepted observation of its scope) and the restored clock must not be
    ahead of production's. The restored copy's bounded rows must equal its whole tables,
    so a wrong bound fails (`ledger_bound_invalid`) instead of hiding rows. A difference is
-   `ledger_digest_mismatch`; the journal names the tables (never row data). Migration
-   `a6c7e8f9b0d1` rewrote append-only rows in place (JSON `null` to SQL NULL), so a drill
-   whose `target_backup_label`/`target_time` stops before it reports
-   `ledger_digest_mismatch` by design; replaying past it, or any later backup, matches.
+   `ledger_digest_mismatch`; the journal names the tables (never row data). A scope is an
+   exchange account: the scripts never name `deployment_environment`, so the same SQL runs
+   on a copy from before migration `545b2877e9bd` (which dropped that column from every
+   live table) and on one after it.
 2. **Read-only boot check.** The image's own entry,
    `python -m bfx_funding_bot.apps.restore_boot_check`, runs in the `bfx-bot:local` image
    (the deployed one) on the internal network, as a per-run LOGIN that
@@ -519,7 +519,25 @@ resources, then verifies the restored copy two ways:
    migration head, the stamped realm, epoch `ledger` from a known writer (the Bitfinex epoch guard), and the
    ledger capital reader for every (symbol, cell) of each scope's newest accepted basis,
    which must fold a basis (or report that the newest query was still pending at the
-   restore point). It contacts no venue.
+   restore point). It contacts no venue. The drill matches the report's scopes to the
+   bounds by `exchange_account_id` alone and ignores other keys, so the target release's
+   drill reads the report of an image from before `545b2877e9bd` (one
+   `deployment_environment` per scope) as well as a later one (none).
+
+**A target older than the deployed image's migrations is refused.** The drill runs the
+boot check before it compares any rows (`restore_drill.py`: bounds, boot check, then the
+two digest streams), and the boot check refuses a copy whose `alembic_version` is not the
+image's head. So a drill whose `target_backup_label`/`target_time` stops before a
+migration the deployed image contains reports `boot_schema_head_mismatch` by design and
+compares nothing; replaying past the migration, or any later backup, passes. This holds
+for `545b2877e9bd`. The bounds are read before the boot check, so a target from before a
+migration that created or reshaped a table the bounds script reads can fail there first,
+with another code. Migration `a6c7e8f9b0d1`
+additionally rewrote append-only rows in place (JSON `null` to SQL NULL): rows restored
+from before it differ from production's, which would be `ledger_digest_mismatch` if the
+comparison were reached. (Read from the order of the code; no drill has been run against
+such a target. Record the target label if one is.)
+
 3. **Migration rehearsal** (the restore test only, not the acceptance drill; ADR
    `2026-10-08-migrations-assert-their-data-and-deploy-rehearses-them`). The candidate is
    the backend image whose `org.opencontainers.image.revision` label is the drill

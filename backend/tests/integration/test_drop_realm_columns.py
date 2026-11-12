@@ -26,7 +26,7 @@ import pytest
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.exc import DBAPIError
 
-from tests.pg_templates import DISABLE_REALM_TRIGGERS_SQL, alembic, template_at
+from tests.pg_templates import alembic, template_at
 
 pytestmark = pytest.mark.integration
 
@@ -266,7 +266,7 @@ def test_a_row_of_another_realm_refuses_the_upgrade(before: tuple[str, Engine]) 
     url, engine = before
     # A ci database whose realm trigger was switched off, in this visible statement, to plant it.
     with engine.begin() as conn:
-        conn.exec_driver_sql(DISABLE_REALM_TRIGGERS_SQL)
+        conn.exec_driver_sql("ALTER TABLE nav_peak DISABLE TRIGGER database_realm_write")
         conn.exec_driver_sql(
             "INSERT INTO nav_peak (account_id, exchange_account_id, deployment_environment, "
             f"symbol, peak, updated_at_ms) VALUES ('a', '{_A}', 'prod', 'fUST', 1, 1)")

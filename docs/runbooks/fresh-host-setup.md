@@ -92,14 +92,16 @@ docker exec --user postgres bfx-postgres psql -U <owner> -d bfx -Atc "CREATE EXT
 
 ### 1b-1. 蓋 database realm（migration 之後，以 `<owner>` 執行一次）
 
-每個資料庫只屬於一個 realm。`database_realm` 是單列、只能插入的表（migration `a7c3e9f1b2d4`），
-每張帶 `deployment_environment` 的表都有 `database_realm_write` trigger（實際清單可查：
-`SELECT tgrelid::regclass FROM pg_trigger WHERE tgname = 'database_realm_write' ORDER BY 1;`），
-寫入的 realm 與這一列不同、或這一列不存在時一律拒絕（owner 也一樣）；bot 開機時也會拒絕 `BFX_DEPLOYMENT_ENV` 與這一列不同的資料庫，任何 phase 都適用。
+每個資料庫只屬於一個 realm。`database_realm` 是單列、只能插入的表（migration `a7c3e9f1b2d4`）；
+bot 開機時拒絕 `BFX_DEPLOYMENT_ENV` 與這一列不同、或這一列不存在的資料庫，任何 phase 都適用。
+資料表沒有逐列的 realm 欄位，也沒有寫入時比對 realm 的 trigger（migration `545b2877e9bd` 拿掉）：
+拿 stamp 與設定比對的只有 bot 開機（simulated venue 開啟 store 時另外要求 stamp 是 `ci`）；
+還原 drill 的開機檢查與 `scripts/amend_capital_policy.py` 只要求 stamp 存在且是已知的值，不比對；
+webapi、operator CLI 與每週腳本不讀 stamp。
 
-- 已有資料的資料庫（例如 prod）：migration 從現有資料推導並蓋章（只有一種 realm 時），不用手動做；
-  有多種 realm 時 migration 失敗，schema 維持原狀。
-- 空的資料庫（新主機）：migration 後是未蓋章，所有 realm 寫入都被拒絕，owner 蓋章一次：
+- 已有資料的資料庫（例如 prod）：章在 `a7c3e9f1b2d4` 當時已由 migration 從現有資料推導並蓋上，不用手動做。
+- 空的資料庫（新主機）：migration 後是未蓋章，bot 拒絕開機，但 webapi 已經起來、會接受請求寫入；
+  蓋章前不要從營運 UI 或 operator CLI 送請求。owner 蓋章一次，值要等於 `BFX_DEPLOYMENT_ENV`：
 
 ```sql
 -- <realm> 是 prod（新主機）
