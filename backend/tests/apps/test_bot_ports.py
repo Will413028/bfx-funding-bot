@@ -38,7 +38,7 @@ from bfx_funding_bot.modules.ledger import BOOT_GRACE_MS, RUNTIME_GRACE_MS, Offe
 from tests.apps.walk import legacy_state
 
 ACCOUNT = UUID("550e8400-e29b-41d4-a716-446655440000")
-SCOPE = Scope(ACCOUNT, "ci")
+SCOPE = Scope(ACCOUNT)
 
 
 @pytest_asyncio.fixture

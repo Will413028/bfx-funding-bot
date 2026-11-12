@@ -1,4 +1,4 @@
-"""`sim_venue_event` on clone PostgreSQL: realm CHECK, insert-only, exact grants.
+"""`sim_venue_event` on clone PostgreSQL: insert-only, exact grants.
 
 Two builds of the database: ``worst_case`` hands every runtime role ALL on new tables
 through default privileges; ``prod_faithful`` is the production host setup
@@ -10,7 +10,6 @@ Mutations (one at a time, revert after each, run this file):
 * Drop ``immutable_sim_venue_truncate``: the TRUNCATE test fails.
 * Skip the ``REVOKE ALL ... FROM {role}`` loop for ``bfx_bot``: the exact-grant test fails
   (UPDATE and DELETE stay granted by default privileges) and so does the denied-DML test.
-* Drop ``ck_sim_venue_event_realm`` (migration and model): the ``prod`` insert succeeds.
 * Drop ``SET search_path`` from the function: the hardening test fails.
 """
 from __future__ import annotations
@@ -25,7 +24,6 @@ from sqlalchemy.exc import IntegrityError, InternalError, ProgrammingError
 from tests.pg_templates import (
     LAST_REVERSIBLE_REVISION,
     alembic,
-    disable_realm_triggers,
     stamp_realm,
     template_at,
 )
@@ -43,11 +41,13 @@ _ALL_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENC
 _ACCOUNT = "sim-account-1"
 
 
-def _row(realm: str = "ci", seq: int = 1, account: str = _ACCOUNT) -> str:
+def _row(seq: int = 1, account: str = _ACCOUNT, *, realm_column: bool = False) -> str:
+    """One event row; ``realm_column`` for a revision before 545b2877e9bd dropped the column."""
+    column, value = ("deployment_environment, ", "'ci', ") if realm_column else ("", "")
     return (
-        "INSERT INTO sim_venue_event (exchange_account_id, deployment_environment, seq, "
+        f"INSERT INTO sim_venue_event (exchange_account_id, {column}seq, "
         "event_type, schema_version, payload) VALUES "
-        f"('{account}', '{realm}', {seq}, 'wallet_funded', 1, '{{}}')"
+        f"('{account}', {value}{seq}, 'wallet_funded', 1, '{{}}')"
     )
 
 
@@ -132,24 +132,14 @@ def test_alembic_check_reports_no_drift(db: Any) -> None:
     alembic(url, "check")
 
 
-@pytest.mark.parametrize("realm", ["prod", "PROD", "", "paper", "live", "shadow"])
-def test_realm_check_rejects_every_realm_but_ci(db: Any, realm: str) -> None:
-    _, engine = db
-    disable_realm_triggers(engine)  # the database stamp refuses these first; this tests the CHECK itself
-    with pytest.raises(IntegrityError, match="ck_sim_venue_event_realm"), engine.begin() as conn:
-        conn.exec_driver_sql(_row(realm))
-    with engine.connect() as conn:
-        assert conn.scalar(text("SELECT count(*) FROM sim_venue_event")) == 0
-
-
-def test_ci_rows_are_accepted_and_scopes_are_independent(db: Any) -> None:
+def test_rows_are_accepted_and_scopes_are_independent(db: Any) -> None:
     _, engine = db
     with engine.begin() as conn:
-        conn.exec_driver_sql(_row("ci", 1))
-        conn.exec_driver_sql(_row("ci", 2))
-        conn.exec_driver_sql(_row("ci", 1, account="sim-account-2"))
+        conn.exec_driver_sql(_row(1))
+        conn.exec_driver_sql(_row(2))
+        conn.exec_driver_sql(_row(1, account="sim-account-2"))
     with pytest.raises(IntegrityError, match="pk_sim_venue_event"), engine.begin() as conn:
-        conn.exec_driver_sql(_row("ci", 2))  # the same scope and position twice
+        conn.exec_driver_sql(_row(2))  # the same scope and position twice
 
 
 @pytest.mark.parametrize(("sql", "constraint"), [
@@ -223,7 +213,7 @@ def test_bfx_bot_writes_while_the_authority_epoch_is_legacy(db: Any) -> None:
         assert conn.scalar(text(
             "SELECT authority FROM capital_authority_epoch ORDER BY epoch_seq DESC LIMIT 1")
         ) == "legacy"
-    _as("bfx_bot", engine, _row("ci"))
+    _as("bfx_bot", engine, _row())
 
 
 @pytest.mark.parametrize("role", ["bfx_webapi", "bfx_webauth"])
@@ -286,7 +276,7 @@ def test_downgrade_round_trip_and_populated_refusal(reversible_db: Any) -> None:
     alembic(url, "upgrade", LAST_REVERSIBLE_REVISION)
     stamp_realm(url, "ci")
     with engine.begin() as conn:
-        conn.exec_driver_sql(_row())
+        conn.exec_driver_sql(_row(realm_column=True))
     with pytest.raises(RuntimeError, match="refusing to drop the log"):
         alembic(url, "downgrade", _PREVIOUS)
     with engine.connect() as conn:

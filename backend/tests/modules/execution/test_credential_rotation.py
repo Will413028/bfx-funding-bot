@@ -69,7 +69,7 @@ FUNDING_ONLY = KeyPermissions(scopes={"funding": (True, True), "account": (True,
 # Every table on Base.metadata, foreign-key targets included.
 importlib.import_module("bfx_funding_bot.apps.schema")
 CONTEXT = OperatorContext(exchange_account_id=ACCOUNT, user_id=OPERATOR, role="owner",
-                          lifecycle_status="active", deployment_environment=ENV)
+                          lifecycle_status="active")
 
 
 @dataclass
@@ -129,7 +129,7 @@ async def harness(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Harness]:
             verified_at=NOW - timedelta(days=30), bitfinex_user_id=USER_ID)
         session.add(old)
         session.add(BotRunRow(run_id=run_id, exchange_account_id=ACCOUNT,
-                              deployment_environment=ENV, started_at_ms=RUN_STARTED_MS,
+                              started_at_ms=RUN_STARTED_MS,
                               host_name="test", pid=1))
         await session.flush()
         old_id = old.id
@@ -146,7 +146,7 @@ async def harness(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Harness]:
 
     new_client, restarts = FakeClient(), []
     worker = CredentialRotationWorker(
-        session_factory=factory, account_id=ACCOUNT, environment=ENV, authority=authority,
+        session_factory=factory, account_id=ACCOUNT, deployment_environment=ENV, authority=authority,
         client_factory=lambda: new_client,
         kek_loader=lambda: KEK, restart=lambda: restarts.append(1), clock=lambda: NOW_MS, scope_lock=build_scope_lock())
     worker.bind_run(run_id, RUN_STARTED_MS)
@@ -162,7 +162,7 @@ async def _queue(h: Harness, *, key: str = NEW_KEY, secret: str = NEW_SECRET) ->
         return await commands.request_credential_rotation(
             session, CONTEXT, api_key=key, api_secret=secret, label="rotated",
             reason="scheduled rotation", now_ms=NOW_MS,
-            deployment_environment=CONTEXT.deployment_environment)
+            deployment_environment=ENV)
 
 
 async def _settle(h: Harness, request_id: UUID) -> CredentialRotationRequestRow:
@@ -384,7 +384,7 @@ async def test_a_label_with_a_control_character_is_refused(harness, label: str) 
             await commands.request_credential_rotation(
                 session, CONTEXT, api_key=NEW_KEY, api_secret=NEW_SECRET, label=label,
                 reason="scheduled rotation", now_ms=NOW_MS,
-                deployment_environment=CONTEXT.deployment_environment)
+                deployment_environment=ENV)
     assert refused.value.code == "invalid_label"
 
 
@@ -409,7 +409,7 @@ async def test_the_recipient_is_published_once_and_a_failure_is_retried(harness,
             raise RuntimeError("database down")
 
     worker = CredentialRotationWorker(
-        session_factory=Broken(), account_id=ACCOUNT, environment=ENV,
+        session_factory=Broken(), account_id=ACCOUNT, deployment_environment=ENV,
         authority=h.worker.authority, client_factory=lambda: h.new_client,
         kek_loader=lambda: KEK, restart=lambda: None, clock=lambda: NOW_MS, scope_lock=build_scope_lock())
     await worker.idle()  # no run bound yet: nothing to publish
@@ -546,7 +546,7 @@ def _process_after(h: Harness, run_started_ms: int) -> CredentialRotationWorker:
     """Another worker of the same account, as a process whose run started then."""
     restarts = h.restarts
     worker = CredentialRotationWorker(
-        session_factory=h.factory, account_id=ACCOUNT, environment=ENV,
+        session_factory=h.factory, account_id=ACCOUNT, deployment_environment=ENV,
         authority=h.worker.authority, client_factory=lambda: h.new_client,
         kek_loader=lambda: KEK, restart=lambda: restarts.append(2), clock=lambda: NOW_MS, scope_lock=build_scope_lock())
     worker.bind_run(uuid4(), run_started_ms)

@@ -59,7 +59,7 @@ class UncertaintyResolutionWorker(OperatorRequestWorker[UncertaintyResolutionReq
         resolution: OperatorResolution,
     ) -> None:
         super().__init__(session_factory=session_factory, account_id=scope.account_id,
-                         environment=scope.environment, authority=authority, scope_lock=scope_lock,
+                         authority=authority, scope_lock=scope_lock,
                          clock=clock,
                          ownership=ownership, poll_interval_s=poll_interval_s)
         self.scope = scope

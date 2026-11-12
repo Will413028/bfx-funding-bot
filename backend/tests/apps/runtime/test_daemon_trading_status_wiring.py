@@ -32,7 +32,7 @@ async def _build(monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock, *, active: 
         # An operator's explicit ACTIVE: without any decision the account is
         # treated as HALTED and nothing trades.
         await TradingStateRepository(async_sessionmaker(engine, expire_on_commit=False),
-            account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci", scope_lock=build_scope_lock(),
+            account_id=TEST_EXCHANGE_ACCOUNT_ID, scope_lock=build_scope_lock(),
         ).transition("ACTIVE", cause="operator", reason="fixture: trading", actor="test")
 
     daemon, engine = await boot_live_construction(

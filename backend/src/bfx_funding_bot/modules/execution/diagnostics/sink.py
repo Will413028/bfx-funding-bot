@@ -67,12 +67,10 @@ class DiagnosticsSink:
         *,
         session_factory: async_sessionmaker[AsyncSession],
         account_id: str,
-        deployment_environment: str,
         metrics: _MetricsHook | None = None,
     ) -> None:
         self._sf = session_factory
         self._account_id = account_id
-        self._env = deployment_environment
         self._metrics = metrics
 
     async def emit(self, event: dict[str, Any]) -> None:
@@ -90,7 +88,7 @@ class DiagnosticsSink:
                 self._metrics.observe_diagnostic_event(event)
             except Exception:
                 log.debug("diagnostics_metrics_hook_failed", exc_info=True)
-        # account_id is sink-authoritative (mirror deployment_environment=self._env):
+        # account_id is sink-authoritative:
         # the real signal-engine decision event dict carries no account_id, so relying
         # on event.get(..., "default") would mis-tag every decision row. The sink
         # knows its account scope and mirrors the daemon's canonical UUID alias.
@@ -142,7 +140,6 @@ class DiagnosticsSink:
                 session.add(DiagnosticsRow(
                     account_id=account_id,
                     exchange_account_id=account_id_uuid_or_none(account_id),
-                    deployment_environment=self._env,
                     kind=kind.value,
                     payload=payload,
                     occurred_at=occurred_at,

@@ -40,12 +40,12 @@ async def allow(session, *, account_id, user) -> bool:
 
 def repository(account) -> PolicyStore:
     """The ledger's policy store of the scope (the store the worker writes through)."""
-    return build_policy_store(Scope(account, "ci"))
+    return build_policy_store(Scope(account))
 
 
 def worker(factory, account) -> CapitalPolicyRequestWorker:
     return CapitalPolicyRequestWorker(session_factory=factory, account_id=account,
-                                      environment="ci", authority=allow,
+                                      authority=allow,
                                       policy_store=repository(account),
                                       scope_lock=build_scope_lock(),
                                       clock=lambda: T0)
@@ -63,8 +63,7 @@ async def request(factory, account, action, *, symbol="fUST", by="operator", at=
     request_id = uuid4()
     async with factory.begin() as session:
         await session.execute(insert(CapitalPolicyRequestRow).values(
-            request_id=request_id, exchange_account_id=account, deployment_environment="ci",
-            symbol=symbol, action=action, reason=f"{action} for test", requested_by=by,
+            request_id=request_id, exchange_account_id=account, symbol=symbol, action=action, reason=f"{action} for test", requested_by=by,
             created_at_ms=at))
     return request_id
 
@@ -176,7 +175,7 @@ class KillSpy:
 async def test_a_kill_goes_first_and_rejects_a_waiting_enable_but_not_a_disable(migrated_db):
     factory, account = migrated_db
     await seed(factory, account, "fUST", enabled=False)
-    await TradingStateRepository(factory, account_id=account, deployment_environment="ci", scope_lock=build_scope_lock()).transition(
+    await TradingStateRepository(factory, account_id=account, scope_lock=build_scope_lock()).transition(
         "ACTIVE", cause="operator", actor="t", reason="setup", now_ms=1)
     enable = await request(factory, account, "enable", at=T0 - 20)
     disable = await request(factory, account, "disable", at=T0 - 10)
@@ -184,10 +183,8 @@ async def test_a_kill_goes_first_and_rejects_a_waiting_enable_but_not_a_disable(
     async with factory.begin() as session:
         # The kill has its own table and queue: a waiting toggle never delays it.
         await session.execute(insert(TradingControlRequestRow).values(
-            request_id=kill_id, exchange_account_id=account, deployment_environment="ci",
-            action="kill", reason="incident", requested_by="operator", created_at_ms=T0))
-    control = TradingControlWorker(session_factory=factory, account_id=account, environment="ci",
-                                   authority=allow, clock=lambda: T0, scope_lock=build_scope_lock())
+            request_id=kill_id, exchange_account_id=account, action="kill", reason="incident", requested_by="operator", created_at_ms=T0))
+    control = TradingControlWorker(session_factory=factory, account_id=account, authority=allow, clock=lambda: T0, scope_lock=build_scope_lock())
     control.kill_switch = KillSpy()
     assert await control.tick() is True
     async with factory() as session:

@@ -412,7 +412,7 @@ _ACCOUNT = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
 def _history_row(credit_id: int, opened: int, closed: int, rate: Decimal) -> FundingCreditHistoryRow:
     return FundingCreditHistoryRow(
         exchange_account_id=_ACCOUNT, kind="credit", credit_id=credit_id,
-        deployment_environment="prod", symbol="fUST", side=1, mts_create=opened,
+        symbol="fUST", side=1, mts_create=opened,
         mts_update=opened, amount=AMOUNT, status="CLOSED", rate=rate, period_days=2,
         mts_opening=opened, mts_last_payout=closed,
     )
@@ -422,17 +422,15 @@ def _ours(credit_id: int, opened: int, cell: str, rate: Decimal = RATE) -> list[
     """Trade → our offer → execution decision in `cell`, so the credit is the bot's."""
     return [
         FundingTradeRow(
-            exchange_account_id=_ACCOUNT, trade_id=credit_id, deployment_environment="prod",
-            symbol="fUST", mts_create=opened, offer_id=credit_id, amount=AMOUNT,
+            exchange_account_id=_ACCOUNT, trade_id=credit_id, symbol="fUST", mts_create=opened, offer_id=credit_id, amount=AMOUNT,
             rate=rate, period_days=2, maker=None,
         ),
         AttributionLegacyOfferCellRow(
-            exchange_account_id=_ACCOUNT, deployment_environment="prod",
-            venue_offer_id=str(credit_id), cell=cell,
+            exchange_account_id=_ACCOUNT, venue_offer_id=str(credit_id), cell=cell,
         ),
         ExecutionDecisionRow(
             decision_id=f"d{credit_id}", account_id=str(_ACCOUNT), exchange_account_id=_ACCOUNT,
-            deployment_environment="prod", reconcile_id="r", cell_id=cell, symbol="fUST",
+            reconcile_id="r", cell_id=cell, symbol="fUST",
             signal_correlation_id=f"s{credit_id}", outcome="submitted", signal_rate=rate,
             amount_usdt=AMOUNT, duration_days=2, model_evidence={}, safety_result={},
             execution_policy="p", service_version="v", config_hash="h",
@@ -461,7 +459,7 @@ async def test_build_reads_only_the_cells_own_fust_1h_series(g3_factory, monkeyp
                    *_ours(1, base - HOUR, "fUST_p2")])
         await s.commit()
 
-    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=now, deployment_environment="prod")
+    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=now)
     assert [c.cell for c in report.mr_alpha_cells] == ["fUST_p2"]
     assert report.mr_alpha_cells[0].available is False
     assert "plausible per-day band" in (report.mr_alpha_cells[0].reason or "")
@@ -484,7 +482,7 @@ async def test_build_loads_one_series_per_bot_cell(g3_factory, monkeypatch):
                    _history_row(2, base - HOUR, base + DAY, RATE), *_ours(2, base - HOUR, "fUST_a30")])
         await s.commit()
 
-    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=now, deployment_environment="prod")
+    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=now)
     assert {(c.cell, c.available) for c in report.mr_alpha_cells} == {
         ("fUST_a30", True), ("fUST_p2", True)}
     assert report.mr_alpha_coverage == 1
@@ -493,7 +491,7 @@ async def test_build_loads_one_series_per_bot_cell(g3_factory, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_build_without_bot_credits_is_insufficient_not_crash(g3_factory):
-    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=_real_now(), deployment_environment="prod")
+    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=_real_now())
     assert report.verdict.state is VerdictState.INSUFFICIENT_DATA
     assert report.verdict.mr_alpha_available is False
     assert report.mr_alpha_cells == []
@@ -511,17 +509,15 @@ async def test_build_verdict_reads_credits_through_trade_offer_and_decision(g3_f
             _history_row(466642176, CREATED, REPAID, RATE),
             _history_row(466451710, EXPIRED_OPEN, EXPIRED_CLOSE, EXPIRED_RATE),
             FundingTradeRow(
-                exchange_account_id=_ACCOUNT, trade_id=432914136, deployment_environment="prod",
-                symbol="fUST", mts_create=CREATED, offer_id=5123273052, amount=AMOUNT,
+                exchange_account_id=_ACCOUNT, trade_id=432914136, symbol="fUST", mts_create=CREATED, offer_id=5123273052, amount=AMOUNT,
                 rate=RATE, period_days=2, maker=None,
             ),
             AttributionLegacyOfferCellRow(
-                exchange_account_id=_ACCOUNT, deployment_environment="prod",
-                venue_offer_id="5123273052", cell=CELL,
+                exchange_account_id=_ACCOUNT, venue_offer_id="5123273052", cell=CELL,
             ),
             ExecutionDecisionRow(
                 decision_id="d1", account_id=str(_ACCOUNT), exchange_account_id=_ACCOUNT,
-                deployment_environment="prod", reconcile_id="r", cell_id=CELL, symbol="fUST",
+                reconcile_id="r", cell_id=CELL, symbol="fUST",
                 signal_correlation_id="scid-x", outcome="submitted", signal_rate=RATE,
                 amount_usdt=AMOUNT, duration_days=2, model_evidence={}, safety_result={},
                 execution_policy="p", service_version="v", config_hash="h",
@@ -530,7 +526,7 @@ async def test_build_verdict_reads_credits_through_trade_offer_and_decision(g3_f
         ])
         await s.commit()
 
-    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=now, deployment_environment="prod")
+    report = await build_g3_report(capital=C, session_factory=g3_factory, now_ms=now)
     fourteen_min = AMOUNT * RATE * Decimal(842_000) / MS_PER_DAY
     assert report.coverage.bot_credits == 1
     assert report.coverage.gross_by_cell == {CELL: fourteen_min}
@@ -544,4 +540,4 @@ async def test_non_uuid_account_fails_instead_of_reading_no_credits(g3_factory, 
     must fail (account_id_canonical), never silently read as 'no credits'."""
     monkeypatch.setenv("BFX_EXCHANGE_ACCOUNT_ID", "default")
     with pytest.raises(ValueError, match="must be a UUID"):
-        await build_g3_report(capital=C, session_factory=g3_factory, now_ms=REPAID, deployment_environment="prod")
+        await build_g3_report(capital=C, session_factory=g3_factory, now_ms=REPAID)

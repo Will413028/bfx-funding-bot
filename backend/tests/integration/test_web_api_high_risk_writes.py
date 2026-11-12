@@ -101,13 +101,13 @@ def before(pg_templates, pg_clone):
 
 def _trading(request_id: int, action: str) -> str:
     return (f"INSERT INTO trading_control_requests ({', '.join(TradingControlRequestRow.REQUEST_COLUMNS)}) "
-            f"VALUES ('00000000-0000-0000-0000-{request_id:012d}', '{_ACCOUNT}', 'ci', '{action}', "
+            f"VALUES ('00000000-0000-0000-0000-{request_id:012d}', '{_ACCOUNT}', '{action}', "
             "'x', 'operator', 1)")
 
 
 def _currency(request_id: int, action: str) -> str:
     return (f"INSERT INTO capital_policy_requests ({', '.join(CapitalPolicyRequestRow.REQUEST_COLUMNS)}) "
-            f"VALUES ('00000000-0000-0000-0000-{request_id:012d}', '{_ACCOUNT}', 'ci', 'fUST', "
+            f"VALUES ('00000000-0000-0000-0000-{request_id:012d}', '{_ACCOUNT}', 'fUST', "
             f"'{action}', 'x', 'operator', 1)")
 
 
@@ -178,8 +178,8 @@ def test_the_web_api_cannot_write_credentials_or_adjudications(head) -> None:
         _credential(conn, "active", 4242)
     _refused(head, "bfx_webapi",
              f"INSERT INTO {_ADJUDICATIONS} (request_id, exchange_account_id, "
-             "deployment_environment, uncertainty_id, action, requested_by, created_at_ms, "
-             f"observation_id) VALUES (gen_random_uuid(), '{_ACCOUNT}', 'ci', gen_random_uuid(), "
+             "uncertainty_id, action, requested_by, created_at_ms, "
+             f"observation_id) VALUES (gen_random_uuid(), '{_ACCOUNT}', gen_random_uuid(), "
              "'mark_not_accepted', 'operator', 1, gen_random_uuid())", "permission denied")
     _refused(head, "bfx_webapi",
              f"INSERT INTO {_CREDENTIALS} (exchange_account_id, venue, api_key, secret_ciphertext, "

@@ -84,7 +84,6 @@ async def test_member_context_is_explicit_and_role_scoped(session: AsyncSession)
     assert context.user_id == "operator-1"
     assert context.role == "viewer"
     assert context.can_write is False
-    assert context.deployment_environment == "ci"
 
 
 @pytest.mark.asyncio

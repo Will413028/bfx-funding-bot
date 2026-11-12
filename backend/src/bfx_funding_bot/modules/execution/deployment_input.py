@@ -37,7 +37,7 @@ class LedgerDeploymentInput:
     """
 
     def __init__(self, *, session_factory: async_sessionmaker[AsyncSession], account_id: UUID,
-                 environment: str, offers: LedgerManagedOffers) -> None:
+                 offers: LedgerManagedOffers) -> None:
         self._sf = session_factory
         self._scope = Scope(account_id)
         self._offers = offers

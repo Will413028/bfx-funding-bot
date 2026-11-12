@@ -43,7 +43,7 @@ class Probe(OperatorRequestWorker[TradingControlRequestRow, str]):
         async def authority(session: Any, *, account_id: UUID, user: str) -> bool:
             return authorized
 
-        super().__init__(session_factory=factory, account_id=account, environment="ci",
+        super().__init__(session_factory=factory, account_id=account,
                          authority=authority, scope_lock=build_scope_lock(),
                          clock=lambda: 5_000)
         self.behaviour = behaviour
@@ -56,8 +56,7 @@ class Probe(OperatorRequestWorker[TradingControlRequestRow, str]):
         self.calls.append(prepared)
         # A write the outcome must not keep unless the request applied.
         session.add(TradingStateRow(
-            exchange_account_id=row.exchange_account_id, deployment_environment="ci",
-            state="HALTED", cause="operator", actor=row.requested_by,
+            exchange_account_id=row.exchange_account_id, state="HALTED", cause="operator", actor=row.requested_by,
             reason=f"side effect of {row.request_id}", created_at_ms=1))
         await session.flush()
         if self.behaviour == "reject":
@@ -86,7 +85,7 @@ async def outbox(migrated_db: Any) -> Any:
 
 
 def values(account: UUID, **extra: object) -> dict[str, object]:
-    return {"request_id": uuid4(), "exchange_account_id": account, "deployment_environment": "ci",
+    return {"request_id": uuid4(), "exchange_account_id": account,
             "action": "resume", "reason": "test",
             "requested_by": "operator", "created_at_ms": 1, **extra}
 

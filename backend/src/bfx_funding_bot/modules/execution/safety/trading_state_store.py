@@ -55,32 +55,26 @@ def _sqlstate(exc: BaseException) -> str | None:
     return None
 
 
-def _scope(stmt: Select[tuple[TradingStateRow]], *, account_id: UUID,
-           environment: str) -> Select[tuple[TradingStateRow]]:
-    return stmt.where(
-        TradingStateRow.exchange_account_id == account_id,
-        TradingStateRow.deployment_environment == environment,
-    )
+def _scope(stmt: Select[tuple[TradingStateRow]], *,
+           account_id: UUID) -> Select[tuple[TradingStateRow]]:
+    return stmt.where(TradingStateRow.exchange_account_id == account_id)
 
 
-async def read_current(session: AsyncSession, *, account_id: UUID,
-                       environment: str) -> TradingState | None:
+async def read_current(session: AsyncSession, *, account_id: UUID) -> TradingState | None:
     """Latest decision for the scope, or None if none was ever recorded."""
     row = await session.scalar(
-        _scope(select(TradingStateRow), account_id=account_id, environment=environment)
+        _scope(select(TradingStateRow), account_id=account_id)
         .order_by(TradingStateRow.id.desc())
         .limit(1)
     )
     return to_state(row) if row is not None else None
 
 
-async def count_auto_resumes(session: AsyncSession, *, account_id: UUID, environment: str,
-                             now_ms: int) -> int:
+async def count_auto_resumes(session: AsyncSession, *, account_id: UUID, now_ms: int) -> int:
     """``ACTIVE/auto`` rows inside the rolling window ending at ``now_ms``."""
     count = await session.scalar(
         select(func.count()).select_from(TradingStateRow).where(
             TradingStateRow.exchange_account_id == account_id,
-            TradingStateRow.deployment_environment == environment,
             TradingStateRow.state == ACTIVE, TradingStateRow.cause == CAUSE_AUTO,
             TradingStateRow.created_at_ms > now_ms - AUTO_RESUME_WINDOW_MS)
     )
@@ -102,29 +96,27 @@ async def check_transition(
 
 
 async def append_transition(
-    session: AsyncSession, *, account_id: UUID, environment: str, state: str, cause: str,
+    session: AsyncSession, *, account_id: UUID, state: str, cause: str,
     actor: str, reason: str, now_ms: int, operator_request_id: UUID | None = None,
 ) -> TransitionResult:
     """Validate and append one transition inside the caller's transaction.
 
-    The caller must already hold the account/environment transaction lock, so
+    The caller must already hold the account's transaction lock, so
     the state read here is the one the new row supersedes. ``operator_request_id``
     names the operator request this transition applies (``trading_control_requests``,
     same scope); a restated decision writes nothing and so names nothing.
     """
-    current = await read_current(session, account_id=account_id, environment=environment)
+    current = await read_current(session, account_id=account_id)
     if restates(current, state=state, cause=cause):
         assert current is not None
         return TransitionResult(state=current, changed=False, previous=current)
     resumes = 0
     if state == ACTIVE and cause == CAUSE_AUTO:
-        resumes = await count_auto_resumes(session, account_id=account_id,
-                                           environment=environment, now_ms=now_ms)
+        resumes = await count_auto_resumes(session, account_id=account_id, now_ms=now_ms)
     await check_transition(current=current, state=state, cause=cause, actor=actor,
                            reason=reason, now_ms=now_ms, auto_resumes_in_window=resumes)
     row = TradingStateRow(
         exchange_account_id=account_id,
-        deployment_environment=environment,
         state=state,
         cause=cause,
         actor=actor,
@@ -157,21 +149,17 @@ def announce(result: TransitionResult) -> None:
 
 
 class TradingStateRepository:
-    """Scope-bound reads and writes of the trading state for one account/environment."""
+    """Scope-bound reads and writes of the trading state for one account."""
 
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         *,
         account_id: str | UUID,
-        deployment_environment: str,
         scope_lock: ScopeLock,
     ) -> None:
-        if not deployment_environment.strip():
-            raise ValueError("deployment_environment must be non-empty")
         self._sf = session_factory
         self.account_id = account_id if isinstance(account_id, UUID) else UUID(str(account_id))
-        self.environment = deployment_environment
         self._scope = Scope(self.account_id)
         # The ledger's scope lock: transitions serialise with every other money-state
         # write of the scope, and nothing outside the ledger takes the primitive (D4).
@@ -186,11 +174,9 @@ class TradingStateRepository:
         distinguishable to an operator.
         """
         if session is not None:
-            return await read_current(session, account_id=self.account_id,
-                                      environment=self.environment)
+            return await read_current(session, account_id=self.account_id)
         async with self._sf() as owned:
-            return await read_current(owned, account_id=self.account_id,
-                                      environment=self.environment)
+            return await read_current(owned, account_id=self.account_id)
 
     async def transition(
         self, state: str, *, cause: str, actor: str, reason: str,
@@ -200,8 +186,7 @@ class TradingStateRepository:
         async with self._sf.begin() as session:
             await self._scope_lock.lock(session, self._scope)
             result = await append_transition(
-                session, account_id=self.account_id, environment=self.environment,
-                state=state, cause=cause, actor=actor, reason=reason,
+                session, account_id=self.account_id, state=state, cause=cause, actor=actor, reason=reason,
                 now_ms=now_ms if now_ms is not None else int(time.time() * 1000),
             )
         announce(result)
@@ -210,8 +195,7 @@ class TradingStateRepository:
     async def history(self, *, limit: int = 20) -> list[TradingState]:
         async with self._sf() as session:
             rows = (await session.scalars(
-                _scope(select(TradingStateRow), account_id=self.account_id,
-                       environment=self.environment)
+                _scope(select(TradingStateRow), account_id=self.account_id)
                 .order_by(TradingStateRow.id.desc())
                 .limit(limit)
             )).all()

@@ -175,16 +175,14 @@ async def _seed_account(owner: async_sessionmaker[Any]) -> None:
                              "VALUES (:id, 'bitfinex', 'research-test')"), {"id": ACCOUNT})
         s.add(FundingCreditHistoryRow(
             exchange_account_id=ACCOUNT, kind="credit", credit_id=7001,
-            deployment_environment="ci", symbol="fUST", side=1, mts_create=opening,
+            symbol="fUST", side=1, mts_create=opening,
             mts_update=closed, amount=Decimal("100"), status="CLOSED", rate=RATE, period_days=2,
             mts_opening=opening, mts_last_payout=closed))
         s.add(FundingTradeRow(
-            exchange_account_id=ACCOUNT, trade_id=8001, deployment_environment="ci",
-            symbol="fUST", mts_create=opening, offer_id=9001, amount=Decimal("100"), rate=RATE,
+            exchange_account_id=ACCOUNT, trade_id=8001, symbol="fUST", mts_create=opening, offer_id=9001, amount=Decimal("100"), rate=RATE,
             period_days=2, maker=True))
         s.add(FundingInterestPaymentRow(
-            exchange_account_id=ACCOUNT, ledger_id=6001, deployment_environment="ci",
-            currency="UST", mts=closed, amount=Decimal("0.03"), balance=Decimal("570"),
+            exchange_account_id=ACCOUNT, ledger_id=6001, currency="UST", mts=closed, amount=Decimal("0.03"), balance=Decimal("570"),
             description="Margin Funding Payment on wallet funding"))
         await s.commit()
 

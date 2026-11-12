@@ -184,14 +184,13 @@ def credit_from_history(r: FundingCreditHistoryRow) -> CreditLifetime:
 
 
 async def legacy_offer_cells(
-    session: AsyncSession, account_uuid: UUID, deployment_environment: str,
+    session: AsyncSession, account_uuid: UUID,
 ) -> dict[str, frozenset[str]]:
     """Pre-switch venue offer -> its cells as the legacy authority recorded them (several
     for a conflict); ``attribution_legacy_offer_cells``."""
     t = AttributionLegacyOfferCellRow
     rows = await session.execute(select(t.venue_offer_id, t.cell).where(
         t.exchange_account_id == account_uuid,
-        t.deployment_environment == deployment_environment,
     ))
     out: dict[str, set[str]] = {}
     for offer, cell in rows.tuples():
@@ -245,7 +244,7 @@ class CreditInputs:
 
 
 async def load_credit_inputs(
-    session: AsyncSession, *, account_id: str, deployment_environment: str,
+    session: AsyncSession, *, account_id: str,
 ) -> CreditInputs | None:
     """Credits, credit -> cell and ledger payouts. None when the account has no
     ExchangeAccount UUID (the venue read models are keyed by it only).
@@ -253,20 +252,16 @@ async def load_credit_inputs(
     account_uuid = account_id_uuid_or_none(account_id)
     if account_uuid is None:
         return None
-    env = deployment_environment
 
     history = (await session.scalars(select(FundingCreditHistoryRow).where(
         FundingCreditHistoryRow.exchange_account_id == account_uuid,
-        FundingCreditHistoryRow.deployment_environment == env,
     ))).all()
     trade_rows = (await session.scalars(select(FundingTradeRow).where(
         FundingTradeRow.exchange_account_id == account_uuid,
-        FundingTradeRow.deployment_environment == env,
     ))).all()
-    legacy_cells = await legacy_offer_cells(session, account_uuid, env)
+    legacy_cells = await legacy_offer_cells(session, account_uuid)
     ledger_rows = (await session.scalars(select(FundingInterestPaymentRow).where(
         FundingInterestPaymentRow.exchange_account_id == account_uuid,
-        FundingInterestPaymentRow.deployment_environment == env,
     ))).all()
 
     scope = Scope(account_uuid)
@@ -304,15 +299,12 @@ async def load_and_compute(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     account_id: str,
-    deployment_environment: str,
     now_ms: int | None = None,
     reconcile_weeks: int = 8,
 ) -> AttributionResult:
     now = now_ms if now_ms is not None else int(time.time() * 1000)
     async with session_factory() as session:
-        inputs = await load_credit_inputs(
-            session, account_id=account_id, deployment_environment=deployment_environment,
-        )
+        inputs = await load_credit_inputs(session, account_id=account_id)
         if inputs is None:
             return AttributionResult([], [], 0, None, has_credit_history=False)
         credits = inputs.credits
@@ -394,15 +386,14 @@ async def persist_rows(
     rows: list[WeeklyCellRow],
     *,
     account_id: str,
-    deployment_environment: str,
 ) -> int:
-    """Full-recompute replace：單一 transaction 內先刪本 realm 既有 rows 再插新的。
+    """Full-recompute replace：單一 transaction 內先刪本帳號既有 rows 再插新的。
 
     本表是純 read model，故 replace 語意讓表永遠等於「以現在的 SoT 重算」。
     merge-only 只能新增/覆蓋、不能縮減：一旦某 credit 重歸 unattributed，舊
     (cell,week) row 會殘留舊 interest（read model 漏）。delete+insert 同 transaction
-    是 atomic（失敗 rollback，表不變）；空 rows 正確清空該 realm。delete 以
-    (env,account) 為界，不動其他 realm。
+    是 atomic（失敗 rollback，表不變）；空 rows 正確清空該帳號。delete 以
+    account 為界，不動其他帳號。
     """
     async with session_factory() as session:
         await session.execute(
@@ -413,7 +404,6 @@ async def persist_rows(
                     exchange_account_column=AttributionWeeklyRow.exchange_account_id,
                     legacy_account_column=AttributionWeeklyRow.account_id,
                 ),
-                AttributionWeeklyRow.deployment_environment == deployment_environment,
             )
         )
         # Insert one row at a time.  SQLite's insertmanyvalues RETURNING path
@@ -422,7 +412,6 @@ async def persist_rows(
         # small enough that this avoids a fixture-only ORM identity failure.
         for r in rows:
             session.add(AttributionWeeklyRow(
-                deployment_environment=deployment_environment,
                 account_id=account_id,
                 exchange_account_id=account_id_uuid_or_none(account_id),
                 cell=r.cell,

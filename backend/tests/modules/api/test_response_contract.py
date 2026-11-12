@@ -91,7 +91,7 @@ CREATED = datetime(2026, 10, 1, 8, 30, tzinfo=UTC)
 UPDATED = datetime(2026, 10, 2, 9, 45, tzinfo=UTC)
 
 CONTEXT = OperatorContext(exchange_account_id=ACCOUNT, user_id="user_abc", role="owner",
-                          lifecycle_status="active", deployment_environment="prod")
+                          lifecycle_status="active")
 
 
 def _credential(**columns: Any) -> ExchangeAccountCredential:
@@ -117,8 +117,7 @@ PUT_BODY = {"currency": "fUSD", "amount": {"min": 200, "max": 1000},
 
 def _trading_request(state: str = "applied") -> TradingControlRequestRow:
     return TradingControlRequestRow(
-        request_id=KILL_REQUEST, exchange_account_id=ACCOUNT, deployment_environment="prod",
-        action="kill", reason="venue incident", requested_by="user_abc",
+        request_id=KILL_REQUEST, exchange_account_id=ACCOUNT, action="kill", reason="venue incident", requested_by="user_abc",
         created_at_ms=1_760_000_000_000, state=state,
         processed_at_ms=None if state == "requested" else 1_760_000_005_000,
         outcome_reason=None)
@@ -126,8 +125,7 @@ def _trading_request(state: str = "applied") -> TradingControlRequestRow:
 
 def _currency_request(state: str = "rejected") -> CapitalPolicyRequestRow:
     return CapitalPolicyRequestRow(
-        request_id=CURRENCY_REQUEST, exchange_account_id=ACCOUNT, deployment_environment="prod",
-        symbol="fUST", action="disable", reason="pause fUST",
+        request_id=CURRENCY_REQUEST, exchange_account_id=ACCOUNT, symbol="fUST", action="disable", reason="pause fUST",
         requested_by="user_abc", created_at_ms=1_760_000_010_000, state=state,
         processed_at_ms=1_760_000_012_000, outcome_reason="policy_unchanged")
 
@@ -256,7 +254,7 @@ class _Store:
         if symbol != "fUST":
             raise PolicyRefused("policy_unreadable")
         return AppliedPolicy(
-            account_id=ACCOUNT, environment="prod", symbol=symbol, revision=5, digest="d5",
+            account_id=ACCOUNT, symbol=symbol, revision=5, digest="d5",
             revision_id=UUID(int=5),
             policy=CapitalPolicy(enabled=True, max_offer_amount=Decimal("2500"),
                                  envelope=OfferEnvelope(min_period_days=2, max_period_days=30,
@@ -316,7 +314,7 @@ async def _seed(engine: AsyncEngine) -> async_sessionmaker[Any]:
         for cell, week, realized in (("fUST_a30", 1_782_691_200_000, Decimal("6.205")),
                                      ("fUST_a30", 1_783_296_000_000, None)):
             session.add(AttributionWeeklyRow(
-                deployment_environment="prod", account_id="default", exchange_account_id=ACCOUNT,
+                account_id="default", exchange_account_id=ACCOUNT,
                 cell=cell, week_start_ms=week, week_end_ms=week + 604_800_000, n_fills=2,
                 gross_interest_usdt=Decimal("0.2"), net_interest_usdt=Decimal("0.17"),
                 capital_days=Decimal("1000"), realized_apr_net_pct=realized,
@@ -331,20 +329,20 @@ async def _seed(engine: AsyncEngine) -> async_sessionmaker[Any]:
         session.add(_trading_request())
         session.add(_currency_request())
         session.add(TradingStateRow(
-            id=9, exchange_account_id=ACCOUNT, deployment_environment="prod", state="HALTED",
+            id=9, exchange_account_id=ACCOUNT, state="HALTED",
             cause="operator", actor="user_abc", reason="venue incident",
             created_at_ms=1_760_000_004_000))
         for attempt, currency, phase, at_ms in ((1, "UST", "requested", 1_760_000_004_300),
                                                 (2, "USD", "requested", 1_760_000_004_400),
                                                 (1, "UST", "acknowledged", 1_760_000_004_500)):
             session.add(FundingCancelAllAuditRow(
-                exchange_account_id=ACCOUNT, deployment_environment="prod", trading_state_id=9,
+                exchange_account_id=ACCOUNT, trading_state_id=9,
                 attempt_id=UUID(int=0xA0 + attempt), currency=currency, phase=phase, actor="user_abc",
                 occurred_at_ms=at_ms))
             await session.flush()  # the audit's id orders the phases
         for symbol, revision in (("fUSD", 2), ("fUST", 5)):
             session.add(CapitalPolicyHeadRow(
-                exchange_account_id=ACCOUNT, deployment_environment="prod", symbol=symbol,
+                exchange_account_id=ACCOUNT, symbol=symbol,
                 revision_id=UUID(int=0xA0 + revision), revision=revision))
         await session.commit()
     return factory

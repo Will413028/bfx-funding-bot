@@ -121,7 +121,6 @@ async def test_bootstrap_loads_account_credential_and_draft(
     async with session_factory() as session:
         bootstrap = await load_account_bootstrap(
             session,
-            deployment_environment="ci",
         )
 
     assert isinstance(bootstrap, AccountBootstrap)
@@ -158,5 +157,4 @@ async def test_bootstrap_fails_closed_for_unusable_account(
         with pytest.raises(ConfigurationError, match=message):
             await load_account_bootstrap(
                 session,
-                deployment_environment="ci",
             )

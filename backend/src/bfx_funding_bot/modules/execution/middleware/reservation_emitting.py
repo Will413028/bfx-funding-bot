@@ -42,7 +42,6 @@ class ReservationEmittingMiddleware:
             bus=bus,
             uncertainty_reader=uncertainty_reader,
             safety_evaluator=safety_evaluator,
-            deployment_environment=boundary.scope.deployment_environment,
             boundary=boundary,
             managed_offers=managed_offers,
             clock=self._clock,

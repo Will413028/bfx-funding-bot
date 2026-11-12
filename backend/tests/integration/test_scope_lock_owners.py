@@ -77,18 +77,17 @@ async def test_an_operator_request_settles_only_under_the_scope_lock(migrated_db
     base worker's ``_lock`` can make it wait (a capital request would also wait inside
     ``amend_capital_policy`` and could not pin ``_lock``)."""
     factory, account = migrated_db
-    scope = Scope(account, ENV)
+    scope = Scope(account)
     request_id = uuid4()
     async with factory.begin() as session:
         await session.execute(insert(TradingControlRequestRow).values(
-            request_id=request_id, exchange_account_id=account, deployment_environment=ENV,
-            action="resume", reason="pin", requested_by="operator", created_at_ms=1))
+            request_id=request_id, exchange_account_id=account, action="resume", reason="pin", requested_by="operator", created_at_ms=1))
 
     async def allow(session, *, account_id, user) -> bool:
         return True
 
     worker = TradingControlWorker(
-        session_factory=factory, account_id=account, environment=ENV, authority=allow,
+        session_factory=factory, account_id=account, authority=allow,
         scope_lock=build_scope_lock(), clock=lambda: 2)
     assert await _waits_behind_the_scope_lock(
         factory, scope, lambda: worker.process(request_id)) == "applied"
@@ -97,7 +96,7 @@ async def test_an_operator_request_settles_only_under_the_scope_lock(migrated_db
 async def test_an_owner_amendment_waits_for_the_account_writer(migrated_db) -> None:
     """The owner's ``amend_capital_policy`` script and the bot's authorize take one lock."""
     factory, account = migrated_db
-    scope = Scope(account, ENV)
+    scope = Scope(account)
     await _seed_policy(factory, scope)
     policy = build_policy_ports(scope)  # what scripts/amend_capital_policy.py builds
 

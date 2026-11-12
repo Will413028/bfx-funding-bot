@@ -107,7 +107,7 @@ def _build_chain(
     Keep this in lockstep with bot.py's wrapped_executor composition.
     """
     probe = HealthProbe()
-    recording = Recording(environment="ci", account_id=_ACCOUNT)
+    recording = Recording(account_id=_ACCOUNT)
     executor = HeartbeatMiddleware(
         ReservationEmittingMiddleware(
             inner or _AckInner(),  # type: ignore[arg-type]

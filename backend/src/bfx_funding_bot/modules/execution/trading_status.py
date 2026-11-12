@@ -130,6 +130,7 @@ class TradingStatusService:
         account_ctx: AccountContext,
         cells: list[CellConfig],
         phase: Phase,
+        deployment_environment: str,
         attempts: SubmitAttemptRecorder,
         trading_state: _TradingStateProtocol | None = None,
         kill_switch: _KillSwitchProtocol | None = None,
@@ -142,6 +143,8 @@ class TradingStatusService:
         self._ctx = account_ctx
         self._cells = cells
         self._phase = phase
+        # What the daemon's assembly read at start: reported, never read from a row.
+        self._deployment_environment = deployment_environment
         self._attempts = attempts
         self._trading_state = trading_state
         self._kill_switch = kill_switch
@@ -156,12 +159,11 @@ class TradingStatusService:
     # ---------------------------------------------------------------- status
 
     def _authority_scope(self) -> dict[str, str | None]:
-        # Bind diagnostics to the scope actually supplying capital, not an
-        # ambient env value or phase label.
-        scope = self._exposure.scope
+        # The account is the one actually supplying capital, not a phase label; the
+        # environment is the one this daemon was assembled with.
         return {
-            "account_id": str(scope.exchange_account_id),
-            "deployment_environment": scope.deployment_environment,
+            "account_id": str(self._exposure.scope.exchange_account_id),
+            "deployment_environment": self._deployment_environment,
         }
 
     async def snapshot(self) -> dict[str, Any]:
@@ -259,11 +261,10 @@ class TradingStatusService:
         return None if result is None else not result.allowed
 
     def metric_scope(self) -> dict[str, str]:
-        """Labels binding the halt gauge to the scope actually supplying capital."""
-        scope = self._exposure.scope
+        """Labels binding the halt gauge to the account actually supplying capital."""
         return {
-            "exchange_account_id": str(scope.exchange_account_id),
-            "deployment_environment": scope.deployment_environment,
+            "exchange_account_id": str(self._exposure.scope.exchange_account_id),
+            "deployment_environment": self._deployment_environment,
         }
 
     # ------------------------------------------------------------ halt

@@ -89,13 +89,13 @@ def _context() -> AccountContext:
 
 @dataclass
 class _FakeUncertaintyReader:
-    open_scopes: set[tuple[UUID, str, str]]
+    open_scopes: set[tuple[UUID, str]]
     error: Exception | None = None
 
     async def has_open(self, session: object, scope: Scope, symbol: str) -> bool:
         if self.error is not None:
             raise self.error
-        return (scope.exchange_account_id, scope.deployment_environment, symbol) in self.open_scopes
+        return (scope.exchange_account_id, symbol) in self.open_scopes
 
     async def list_open(self, session: object, scope: Scope, symbol: str | None = None) -> tuple[()]:
         return ()
@@ -151,7 +151,7 @@ class _UncertaintyAwareEvaluator:
     reader: _FakeUncertaintyReader
 
     async def evaluate(self, decision: DecisionPayload, context: AccountContext) -> GuardResult:
-        if await self.reader.has_open(None, Scope(ACCOUNT_ID, ENVIRONMENT), decision.symbol):
+        if await self.reader.has_open(None, Scope(ACCOUNT_ID), decision.symbol):
             return GuardResult(False, "uncertainty", reason="open execution uncertainty")
         return GuardResult(True, "uncertainty")
 
@@ -175,9 +175,9 @@ def _recording(reader: _FakeUncertaintyReader) -> Recording:
     """A boundary whose committed UNKNOWN opens the reader's scope, as the real one does."""
     def opened(record: Record) -> None:
         if isinstance(record, OutcomeRecorded) and record.outcome.kind == "unknown":
-            reader.open_scopes.add((ACCOUNT_ID, ENVIRONMENT, record.attempt.symbol))
+            reader.open_scopes.add((ACCOUNT_ID, record.attempt.symbol))
 
-    return Recording(environment=ENVIRONMENT, account_id=ACCOUNT_ID, on_record=opened)
+    return Recording(account_id=ACCOUNT_ID, on_record=opened)
 
 
 def _gate(
@@ -194,7 +194,6 @@ def _gate(
         bus=DomainEventBus(),
         uncertainty_reader=reader,
         safety_evaluator=safety or _UncertaintyAwareEvaluator(reader),  # type: ignore[arg-type]
-        deployment_environment=ENVIRONMENT,
         boundary=recording.boundary(),
         managed_offers=recording.offers,
         clock=iter(clock_values).__next__,
@@ -214,7 +213,6 @@ def test_a_gate_cannot_be_built_without_a_command_boundary() -> None:
             bus=DomainEventBus(),
             uncertainty_reader=reader,
             safety_evaluator=_UncertaintyAwareEvaluator(reader),
-            deployment_environment=ENVIRONMENT,
             managed_offers=recording.offers,
         )
 
@@ -227,7 +225,6 @@ def test_a_gate_cannot_be_built_without_managed_offer_reads() -> None:
             bus=DomainEventBus(),
             uncertainty_reader=reader,
             safety_evaluator=_UncertaintyAwareEvaluator(reader),
-            deployment_environment=ENVIRONMENT,
             boundary=_recording(reader).boundary(),
         )
 
@@ -270,7 +267,7 @@ async def test_the_middleware_submits_through_its_command_gate() -> None:
 
 @pytest.mark.asyncio
 async def test_open_uncertainty_blocks_before_intent_and_venue_call() -> None:
-    reader = _FakeUncertaintyReader({(ACCOUNT_ID, ENVIRONMENT, SYMBOL)})
+    reader = _FakeUncertaintyReader({(ACCOUNT_ID, SYMBOL)})
     recording = _recording(reader)
     venue = _FakeVenue()
 
@@ -292,7 +289,7 @@ async def test_check_fails_closed_when_the_uncertainty_read_errors() -> None:
 
 @pytest.mark.asyncio
 async def test_check_scopes_uncertainty_to_the_symbol() -> None:
-    reader = _FakeUncertaintyReader({(ACCOUNT_ID, ENVIRONMENT, "fUSD")})
+    reader = _FakeUncertaintyReader({(ACCOUNT_ID, "fUSD")})
     gate = _gate(_FakeVenue(), reader, _recording(reader))
 
     await gate.check(_ready(symbol="fUST"), _context())
@@ -302,7 +299,7 @@ async def test_check_scopes_uncertainty_to_the_symbol() -> None:
 
 @pytest.mark.asyncio
 async def test_uncertainty_scope_does_not_block_another_symbol() -> None:
-    reader = _FakeUncertaintyReader({(ACCOUNT_ID, ENVIRONMENT, "fUSD")})
+    reader = _FakeUncertaintyReader({(ACCOUNT_ID, "fUSD")})
     recording = _recording(reader)
     venue = _FakeVenue(SubmitRejected("explicit_rejection"))
 
@@ -374,7 +371,7 @@ async def test_unknown_is_durable_and_blocks_next_command_without_retry() -> Non
     assert venue.txns_seen_at_call is not None
     assert [label(record) for record in venue.txns_seen_at_call[0]] == ["authorized"]
     assert [label(record) for record in recording.txns[1]] == ["unknown"]
-    assert reader.open_scopes == {(ACCOUNT_ID, ENVIRONMENT, SYMBOL)}
+    assert reader.open_scopes == {(ACCOUNT_ID, SYMBOL)}
 
     with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
         await gate.submit(_ready(decision_id="decision-2"), _context())

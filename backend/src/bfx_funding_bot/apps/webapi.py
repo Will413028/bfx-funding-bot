@@ -103,7 +103,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             async with factory() as session:
                 await assert_schema_head(session)
                 await require_ledger_authority(session)
-            app.state.read_models = build_read_models()
+            app.state.read_models = build_read_models(app.state.deployment_environment)
         except Exception as exc:
             if isinstance(exc, SchemaHeadMismatch):
                 security_event(BOOT_REFUSED, reason="schema_head_mismatch", detail=str(exc),

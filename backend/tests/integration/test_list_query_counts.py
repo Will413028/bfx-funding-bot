@@ -67,7 +67,7 @@ def _app(book: Book) -> FastAPI:
         build_uncertainties_router(),
     ):
         app.include_router(router)
-    app.state.read_models = build_read_models()
+    app.state.read_models = build_read_models("ci")
     app.dependency_overrides[require_operator] = lambda: Principal(OPERATOR, None, "admin")
     app.dependency_overrides[get_session] = restricted
     return app

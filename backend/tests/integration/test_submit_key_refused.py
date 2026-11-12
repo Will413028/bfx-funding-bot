@@ -144,8 +144,7 @@ async def test_a_submit_refused_for_the_key_exits_78_and_its_unknown_resolves_on
             resolutions = (await session.execute(select(
                 ExecutionResolutionJournalRow.actor_kind, ExecutionResolutionJournalRow.actor_id,
                 ExecutionResolutionJournalRow.action))).all()
-            state = await read_current(session, account_id=TEST_EXCHANGE_ACCOUNT_ID,
-                                       environment="ci")
+            state = await read_current(session, account_id=TEST_EXCHANGE_ACCOUNT_ID)
         assert [tuple(r) for r in resolutions] == [("system", "system:reconcile", "not_accepted")]
         # No HALTED was written on the way: the account is still ACTIVE and trades again.
         assert await _states(sim.factory) == activated

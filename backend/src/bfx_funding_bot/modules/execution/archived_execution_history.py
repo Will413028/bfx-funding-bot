@@ -40,7 +40,16 @@ EVENT_LOG = Table(
 
 
 class ArchivedExecutionHistory:
-    """The scope's ``event_log``, newest first; the cursor is the last row's ``event_seq``."""
+    """The scope's ``event_log``, newest first; the cursor is the last row's ``event_seq``.
+
+    The archive keeps its per-row ``deployment_environment`` (its rows are frozen, and
+    nothing asserted they carry one value), so the read still filters on it, by the
+    value the process's assembly read at start. None means that read found no valid
+    value: account routes refuse before any read, and a read here raises.
+    """
+
+    def __init__(self, deployment_environment: str | None) -> None:
+        self._deployment_environment = deployment_environment
 
     async def list_executions(
         self,
@@ -51,10 +60,12 @@ class ArchivedExecutionHistory:
         limit: int,
         event_type: str | None,
     ) -> ExecutionPage:
+        if self._deployment_environment is None:
+            raise RuntimeError("deployment_environment_not_configured")
         log = EVENT_LOG.c
         stmt = select(*EVENT_LOG.c).where(
             log.exchange_account_id == scope.exchange_account_id,
-            log.deployment_environment == scope.deployment_environment,
+            log.deployment_environment == self._deployment_environment,
         )
         if before is not None:
             if not before.isascii() or not before.isdigit():

@@ -105,18 +105,14 @@ class AccountCommandGate:
         bus: DomainEventBus,
         uncertainty_reader: UncertaintyReader,
         safety_evaluator: AuthoritativeSafetyEvaluator,
-        deployment_environment: str,
         boundary: CommandBoundary,
         managed_offers: ManagedOfferReader,
         clock: Callable[[], int] | None = None,
     ) -> None:
-        if not deployment_environment.strip():
-            raise ValueError("deployment_environment must be non-empty")
         self._inner = inner
         self._bus = bus
         self._uncertainty_reader = uncertainty_reader
         self._safety_evaluator = safety_evaluator
-        self._deployment_environment = deployment_environment
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._boundary = boundary
         self._offers = managed_offers
@@ -126,7 +122,7 @@ class AccountCommandGate:
         self.protection: ProtectionPort | None = None
         # Always-on venue write rate limit (T9); installed by the live daemon.
         self.throttle: CommandRateLimiter | None = None
-        self._account_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._account_locks: dict[str, asyncio.Lock] = {}
 
     @contextlib.asynccontextmanager
     async def quiesced(self, account_id: str, *, timeout_s: float) -> AsyncIterator[bool]:
@@ -139,7 +135,7 @@ class AccountCommandGate:
         Never call this while holding the same lock: it is not re-entrant.
         """
         lock = self._account_locks.setdefault(
-            (str(_canonical_account_id(account_id)), self._deployment_environment), asyncio.Lock(),
+            str(_canonical_account_id(account_id)), asyncio.Lock(),
         )
         try:
             await asyncio.wait_for(lock.acquire(), timeout=timeout_s)
@@ -175,8 +171,7 @@ class AccountCommandGate:
         context: AccountContext,
     ) -> SubmittedOrder:
         account_id = _canonical_account_id(context.account_id)
-        lock_key = (str(account_id), self._deployment_environment)
-        lock = self._account_locks.setdefault(lock_key, asyncio.Lock())
+        lock = self._account_locks.setdefault(str(account_id), asyncio.Lock())
         async with lock:
             self._admit("submit")
             return await self._submit_locked(ready, context)
@@ -201,7 +196,6 @@ class AccountCommandGate:
             attempt_id=uuid4(),
             execution_decision_id=ready.decision_id,
             account_id=account_id,
-            environment=self._deployment_environment,
             symbol=decision.symbol,
             normalized_payload=_normalized_venue_payload(decision),
             started_at_ms=intent_ms,
@@ -350,11 +344,9 @@ class AccountCommandGate:
         admission and again before every transport attempt.
         """
         boundary = self._boundary
-        if boundary.scope.deployment_environment != self._deployment_environment:
-            raise CommandGateBlocked("cancel_environment_conflict")
         if account_id != ctx.account_id or account_id != str(boundary.scope.exchange_account_id):
             raise CommandGateBlocked("cancel_account_conflict")
-        lock = self._account_locks.setdefault((account_id, self._deployment_environment), asyncio.Lock())
+        lock = self._account_locks.setdefault(account_id, asyncio.Lock())
         async with lock:
             self._admit("cancel")
             scope = boundary.scope

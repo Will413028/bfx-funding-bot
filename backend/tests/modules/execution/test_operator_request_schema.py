@@ -95,7 +95,7 @@ def test_the_causation_migration_guards_the_declared_request_columns(model) -> N
 
 def test_web_api_insert_names_only_the_granted_request_columns() -> None:
     values = request_values(
-        ResolutionScope(uuid4(), "ci"),
+        ResolutionScope(uuid4()),
         ResolutionIntent(
             uncertainty_id=uuid4(), action="mark_not_accepted", evidence_ref="obs:x",
             operator_id="operator-1",

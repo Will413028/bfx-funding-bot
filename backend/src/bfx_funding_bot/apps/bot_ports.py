@@ -165,7 +165,7 @@ def build_capital_ports(
         operator_resolution=build_operator_resolution(),
         deployment_input=LedgerDeploymentInput(
             session_factory=session_factory, account_id=scope.exchange_account_id,
-            environment=scope.deployment_environment, offers=build_ledger_managed_offers(),
+            offers=build_ledger_managed_offers(),
         ),
         observation=observation,
         uncertainty_reader=build_uncertainty_reader(session_factory),

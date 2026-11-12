@@ -16,7 +16,6 @@ async def record_config_regime(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     account_id: str,
-    deployment_environment: str,
     clamp_enabled: bool,
     reprice_enabled: bool,
     git_sha: str | None,
@@ -35,14 +34,12 @@ async def record_config_regime(
                 existing = await session.scalar(
                     select(ConfigRegimeRow).where(
                         ConfigRegimeRow.account_id == account_id,
-                        ConfigRegimeRow.deployment_environment == deployment_environment,
                         ConfigRegimeRow.recorded_at_ms == now_ms,
                     )
                 )
                 if existing is not None:
                     return
             session.add(ConfigRegimeRow(
-                deployment_environment=deployment_environment,
                 account_id=account_id,
                 exchange_account_id=exchange_account_id,
                 recorded_at_ms=now_ms,

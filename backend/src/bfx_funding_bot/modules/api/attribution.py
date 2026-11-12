@@ -75,7 +75,6 @@ def build_attribution_router() -> APIRouter:
             select(AttributionWeeklyRow)
             .where(
                 AttributionWeeklyRow.exchange_account_id == context.exchange_account_id,
-                AttributionWeeklyRow.deployment_environment == context.deployment_environment,
             )
             .order_by(AttributionWeeklyRow.cell, AttributionWeeklyRow.week_start_ms)
         )

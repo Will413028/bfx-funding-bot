@@ -130,7 +130,7 @@ async def test_resume_and_kill(book, operator_env) -> None:
     await member(book)
     await start(book)
     worker = TradingControlWorker(session_factory=book.factory, account_id=ACCOUNT,
-                                  environment="ci", authority=allow,
+                                  authority=allow,
                                   clock=lambda: WORKER_NOW, scope_lock=build_scope_lock())
     worker.kill_switch = kill = KillSwitch()
 
@@ -168,7 +168,7 @@ async def test_currency_enable_and_disable(book, operator_env) -> None:
     await member(book)
     await start(book)
     worker = CapitalPolicyRequestWorker(
-        session_factory=book.factory, account_id=ACCOUNT, environment="ci", authority=allow,
+        session_factory=book.factory, account_id=ACCOUNT, authority=allow,
         policy_store=build_policy_store(SCOPE), scope_lock=build_scope_lock(),
         clock=lambda: WORKER_NOW)
     code, queued, _ = await cli("disable", "fUST", "--reason", "pause fUST", "--no-wait")
@@ -184,7 +184,7 @@ async def test_currency_enable_and_disable(book, operator_env) -> None:
 
 async def _settle(book_) -> None:
     worker = UncertaintyResolutionWorker(
-        session_factory=book_.factory, scope=ResolutionScope(ACCOUNT, "ci"), authority=allow,
+        session_factory=book_.factory, scope=ResolutionScope(ACCOUNT), authority=allow,
         clock=lambda: WORKER_NOW, resolution=build_operator_resolution(), scope_lock=build_scope_lock())
     assert await worker.tick() is True
 

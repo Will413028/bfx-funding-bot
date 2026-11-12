@@ -63,7 +63,11 @@ class InternalFailure:
 
 @dataclass(frozen=True, slots=True)
 class SimAccount:
-    """One simulated venue account: `(exchange_account_id, deployment_environment)`."""
+    """One simulated venue account.
+
+    `deployment_environment` is the realm the process's assembly read; it is no part of
+    a stored row's identity, only refused here unless it is `SIMULATED_REALM`.
+    """
 
     exchange_account_id: str
     deployment_environment: str

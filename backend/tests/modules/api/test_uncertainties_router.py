@@ -182,7 +182,7 @@ def _worker(factory, ledger: _Ledger, *, account: UUID = ACCOUNT_ID,
     )
 
     return UncertaintyResolutionWorker(
-        session_factory=factory, scope=ResolutionScope(account, "ci"),
+        session_factory=factory, scope=ResolutionScope(account),
         authority=authority or _Authority(), clock=lambda: 5_000, resolution=ledger, scope_lock=build_scope_lock())
 
 
@@ -231,7 +231,7 @@ _BASE = f"/api/v1/exchange-accounts/{ACCOUNT_ID}"
 
 
 _OPERATOR = OperatorContext(exchange_account_id=ACCOUNT_ID, user_id="operator-1", role="owner",
-                            lifecycle_status="active", deployment_environment="ci")
+                            lifecycle_status="active")
 
 
 def _mark_not_accepted(app, evidence_ref: str, *, reason: str = "zero candidates") -> str:
@@ -477,7 +477,7 @@ async def _queue_directly(factory, *, uncertainty_id: UUID, created_at_ms: int) 
     request_id = uuid4()
     async with factory.begin() as session:
         await session.execute(insert(UncertaintyResolutionRequestRow).values(
-            request_id=request_id, exchange_account_id=ACCOUNT_ID, deployment_environment="ci",
+            request_id=request_id, exchange_account_id=ACCOUNT_ID,
             uncertainty_id=uncertainty_id, action="mark_not_accepted", observation_id=uuid4(),
             requested_by="operator-1", created_at_ms=created_at_ms,
         ))

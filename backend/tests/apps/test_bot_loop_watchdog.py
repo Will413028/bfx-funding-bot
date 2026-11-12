@@ -54,9 +54,7 @@ class _RunRecord:
     # Whether ``start`` wrote the row (``BotRunRecord.start`` swallows its own failure).
     start_succeeds: ClassVar[bool] = True
 
-    def __init__(self, session_factory: Any, *, exchange_account_id: Any,
-                 deployment_environment: str) -> None:
-        self.scope = (exchange_account_id, deployment_environment)
+    def __init__(self, session_factory: Any, *, exchange_account_id: Any) -> None:
         self.run_id = "run-1"
         self.started = False
         self.started_at_ms: int | None = None
@@ -105,7 +103,7 @@ def _fake_daemon(stop: asyncio.Event, watchdog_during_run: list[bool], *,
         tracing=None, bitfinex_http=SimpleNamespace(aclose=aclose),
         config=SimpleNamespace(phase="live", cells=[], run_duration_hours=None),
         session_factory=None, credential_rotation=credential_rotation,
-        account_bootstrap=SimpleNamespace(exchange_account_id="acct", deployment_environment="ci"),
+        account_bootstrap=SimpleNamespace(exchange_account_id="acct"),
         bound_runs=bound_runs, bind_run=bound_runs.append,
     )
 

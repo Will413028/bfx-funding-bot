@@ -36,7 +36,7 @@ pytestmark = pytest.mark.integration
 
 _BEFORE = "5b1e7c9d2a40"
 _A = UUID("00000000-0000-0000-0000-0000000000a1")
-_SCOPE = Scope(_A, "ci")
+_SCOPE = Scope(_A)
 _POLICY = CapitalPolicy(
     enabled=True, max_offer_amount=Decimal("200"),
     envelope=OfferEnvelope(min_period_days=2, max_period_days=2, max_open_offers=6,
@@ -97,10 +97,13 @@ def _has(conn, sql: str, **params) -> bool:
 
 
 def _request_sql(request_id: str = "00000000-0000-0000-0000-0000000000e1", action: str = "disable",
-                 extra: tuple[str, str] = ("", ""), by: str = "operator", symbol: str = "fUST") -> str:
+                 extra: tuple[str, str] = ("", ""), by: str = "operator", symbol: str = "fUST",
+                 realm_column: bool = False) -> str:
+    """``realm_column`` for a revision before 545b2877e9bd dropped the column."""
+    column, value = ("deployment_environment, ", "'ci', ") if realm_column else ("", "")
     return (f"INSERT INTO capital_policy_requests (request_id, exchange_account_id, "
-            f"deployment_environment, symbol, action, reason, requested_by, created_at_ms{extra[0]}) "
-            f"VALUES ('{request_id}', '{_A}', 'ci', '{symbol}', '{action}', 'x', '{by}', 1{extra[1]})")
+            f"{column}symbol, action, reason, requested_by, created_at_ms{extra[0]}) "
+            f"VALUES ('{request_id}', '{_A}', {value}'{symbol}', '{action}', 'x', '{by}', 1{extra[1]})")
 
 
 def _operator(engine) -> None:
@@ -157,7 +160,7 @@ def test_grants_are_exactly_the_outbox_split_and_the_toggle(migrated):
         assert not _has(conn, "SELECT has_any_column_privilege('bfx_bot', 'capital_policy_heads', "
                         "'INSERT')")
         for column, granted in (("revision_id", True), ("revision", True), ("symbol", False),
-                                ("exchange_account_id", False), ("deployment_environment", False)):
+                                ("exchange_account_id", False)):
             assert _has(conn, "SELECT has_column_privilege('bfx_bot', 'capital_policy_heads', :c, "
                         "'UPDATE')", c=column) is granted, column
 
@@ -222,14 +225,14 @@ def test_the_bot_applies_a_web_api_request_as_a_new_revision(migrated):
             async with web.begin() as session:
                 assert await insert_request(session, CapitalPolicyRequestRow, {
                     "request_id": request_id, "exchange_account_id": _A,
-                    "deployment_environment": "ci", "symbol": "fUST", "action": "disable",
+                    "symbol": "fUST", "action": "disable",
                     "reason": "maintenance", "requested_by": "operator", "created_at_ms": 5})
 
             async def allow(session, *, account_id, user) -> bool:
                 return user == "operator"
 
             worker = CapitalPolicyRequestWorker(
-                session_factory=bot, account_id=_A, environment="ci", authority=allow,
+                session_factory=bot, account_id=_A, authority=allow,
                 policy_store=build_policy_store(_SCOPE), scope_lock=build_scope_lock(),
                 clock=lambda: 6)
             assert await worker.tick() is True
@@ -276,9 +279,9 @@ def test_the_runtime_role_may_toggle_enabled_and_nothing_else(migrated):
         if source is None:
             source = "{}" if request is None else f'{{"request_id": "{request}"}}'
         typed = "NULL" if request is None else f"'{request}'"
-        return (f"INSERT INTO capital_policy_revisions (id, exchange_account_id, deployment_environment, "
+        return (f"INSERT INTO capital_policy_revisions (id, exchange_account_id, "
                 f"symbol, revision, schema_version, policy, digest, source, operator_request_id) VALUES "
-                f"(gen_random_uuid(), '{_A}', 'ci', 'fUST', {number}, 3, {policy_sql}, 'd', "
+                f"(gen_random_uuid(), '{_A}', 'fUST', {number}, 3, {policy_sql}, 'd', "
                 f"'{source}'::jsonb, {typed})")
 
     base = f"'{first.policy}'::jsonb"
@@ -339,7 +342,7 @@ def test_downgrade_round_trip_and_refusal(migrated_reversible):
     with engine.begin() as conn:
         # Keyed by the tailnet ID: f836fdee9bf3 on the way to head refuses a pending request
         # from an old identity.
-        conn.exec_driver_sql(_request_sql(by=W3_OPERATOR))
+        conn.exec_driver_sql(_request_sql(by=W3_OPERATOR, realm_column=True))
     pre_switch_url(url)  # a switched database refuses a downgrade through f6a7b8c9d0e1
     result = _alembic_cli(url, "downgrade", _BEFORE)
     assert result.returncode != 0

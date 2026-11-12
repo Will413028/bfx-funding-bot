@@ -55,7 +55,7 @@ def _enabled_tracing(exporter: InMemorySpanExporter) -> DaemonTracing:
     )
 
 
-_SCOPE = Scope(uuid4(), "ci")
+_SCOPE = Scope(uuid4())
 
 
 def _ctx() -> AccountContext:
@@ -266,7 +266,7 @@ async def test_cycle_wrapper_passes_scope_and_result_identity():
 
     from bfx_funding_bot.modules.ledger import CycleResult, Scope
 
-    scope = Scope(uuid4(), "ci")
+    scope = Scope(uuid4())
     result = CycleResult("fenced")
     sink = AsyncMock()
     sink.run.return_value = result

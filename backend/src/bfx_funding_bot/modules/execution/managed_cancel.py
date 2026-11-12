@@ -35,7 +35,7 @@ class SweepResult:
 
 class ManagedOfferSweep:
     def __init__(self, *, session_factory: async_sessionmaker[AsyncSession], account_id: UUID,
-                 environment: str, canceller: CancelPort, ctx: AccountContext,
+                 canceller: CancelPort, ctx: AccountContext,
                  offers: ManagedOfferReader) -> None:
         self._sf = session_factory
         self._scope = Scope(account_id)

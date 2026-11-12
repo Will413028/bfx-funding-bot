@@ -1,8 +1,8 @@
 """The simulated venue's durable event log (`sim_venue_event`), insert-only.
 
 Independent of the bot's tables on purpose: no foreign key to `exchange_accounts`, and the
-venue never reads ledger journals. The realm CHECK makes a `prod` row impossible by
-construction in every database the one migration chain reaches (ADR 2026-10-03 D1). The
+venue never reads ledger journals. A row carries no realm of its own: the store refuses a
+database whose realm stamp is not the simulated one (`_internal/store_sql.py`). The
 insert-only triggers, the revoked default privileges and the `bfx_bot` SELECT/INSERT grant
 live in the migration, because SQLAlchemy metadata cannot express them.
 """

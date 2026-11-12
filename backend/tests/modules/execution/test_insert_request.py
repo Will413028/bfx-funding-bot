@@ -24,7 +24,7 @@ _ACCOUNT = uuid4()
 
 
 def _trading(**extra: object) -> dict[str, object]:
-    return {"request_id": uuid4(), "exchange_account_id": _ACCOUNT, "deployment_environment": "ci",
+    return {"request_id": uuid4(), "exchange_account_id": _ACCOUNT,
             "action": "resume", "reason": "test", "requested_by": "operator",
             "created_at_ms": 1, **extra}
 
@@ -76,7 +76,7 @@ async def test_a_refusal_other_than_the_slot_raises(session: Any) -> None:
 
 
 def _rotation(**extra: object) -> dict[str, object]:
-    return {"request_id": uuid4(), "exchange_account_id": _ACCOUNT, "deployment_environment": "ci",
+    return {"request_id": uuid4(), "exchange_account_id": _ACCOUNT,
             "recipient_id": uuid4(), "replaces_credential_id": uuid4(),
             "sealed_credential": b"\x00" * 80, "label": "", "reason": "rotate",
             "requested_by": "operator", "created_at_ms": 1, **extra}

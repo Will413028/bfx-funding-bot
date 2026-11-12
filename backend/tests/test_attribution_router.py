@@ -18,18 +18,19 @@ from bfx_funding_bot.modules.live_validation.tables import AttributionWeeklyRow
 from tests.ingress_support import attach_ingress
 
 _ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
+_OTHER_ACCOUNT_ID = UUID("650e8400-e29b-41d4-a716-446655440000")
 _WEEKLY_PATH = f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/attribution/weekly"
 
 
 def _row(
     cell: str = "fUST_p2",
     week: int = 1_782_691_200_000,
-    env: str = "prod",
     account: str = "default",
+    exchange_account_id: UUID = _ACCOUNT_ID,
 ) -> AttributionWeeklyRow:
     return AttributionWeeklyRow(
-        deployment_environment=env, account_id=account,
-        exchange_account_id=_ACCOUNT_ID, cell=cell,
+        account_id=account,
+        exchange_account_id=exchange_account_id, cell=cell,
         week_start_ms=week, week_end_ms=week + 604_800_000, n_fills=2,
         gross_interest_usdt=Decimal("0.2"), net_interest_usdt=Decimal("0.17"),
         capital_days=Decimal("1000"), realized_apr_net_pct=Decimal("6.205"),
@@ -62,9 +63,9 @@ async def app_client(sqlite_engine, monkeypatch):
         )
         s.add(_row())
         s.add(_row(cell="fUST_a30"))
-        # different realm — must never leak into the default-realm response
-        # (its own week, so the row stays distinct without the realm in the key)
-        s.add(_row(cell="fUST_p2", env="canary", week=1_783_296_000_000))
+        # another account's row must never leak into this account's response
+        s.add(_row(cell="fUST_p2", account="other", exchange_account_id=_OTHER_ACCOUNT_ID,
+                   week=1_783_296_000_000))
         await s.commit()
 
     app = FastAPI()
@@ -112,16 +113,16 @@ def test_weekly_cell_filter(app_client):
     assert [d["cell"] for d in resp.json()["data"]] == ["fUST_a30"]
 
 
-def test_weekly_excludes_other_realm(app_client):
-    """Rows from a different deployment_environment/account_id must never
-    leak into the default-realm response — otherwise the FE weekly chart
+def test_weekly_excludes_other_account(app_client):
+    """Rows of another account must never
+    leak into this account's response — otherwise the FE weekly chart
     (Task 7) would plot duplicate points per cell/week."""
     resp = app_client.get(_WEEKLY_PATH)
     data = resp.json()["data"]
     assert len(data) == 2
     assert all(d["cell"] in ("fUST_a30", "fUST_p2") for d in data)
-    # both default-realm rows for fUST_p2/fUST_a30 present exactly once each —
-    # the canary-realm fUST_p2 row seeded in app_client is excluded.
+    # both of this account's rows for fUST_p2/fUST_a30 present exactly once each —
+    # the other account's fUST_p2 row seeded in app_client is excluded.
     cells = [d["cell"] for d in data]
     assert cells.count("fUST_p2") == 1
     assert cells.count("fUST_a30") == 1

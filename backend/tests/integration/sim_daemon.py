@@ -52,7 +52,7 @@ from tests.apps.runtime.account_test_helpers import (
 from tests.apps.runtime.test_daemon_wiring import _write_cells_yaml
 
 _IDS = itertools.count(1)
-SCOPE = Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci")
+SCOPE = Scope(TEST_EXCHANGE_ACCOUNT_ID)
 CELL = "fUST_a30"
 T0 = 1_704_067_200_000  # 2024-01-01T00:00Z, a UTC midnight, far from the wall clock
 HOUR = 3_600_000
@@ -173,7 +173,7 @@ class SimEnv:
         )
 
         await TradingStateRepository(
-            self.factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci", scope_lock=build_scope_lock(),
+            self.factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, scope_lock=build_scope_lock(),
         ).transition("ACTIVE", cause="operator", actor="test", reason="simulated run",
                      now_ms=self.clock.now)
 

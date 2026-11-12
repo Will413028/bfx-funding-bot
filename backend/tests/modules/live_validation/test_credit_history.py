@@ -150,7 +150,7 @@ class _FakeRest:
 def _sync(rest: _FakeRest, sf: async_sessionmaker, now: int) -> CreditHistorySync:
     return CreditHistorySync(
         rest=rest, ctx=_Ctx(), session_factory=sf,  # type: ignore[arg-type]
-        exchange_account_id=ACCOUNT, deployment_environment="live", symbols=["fUST"],
+        exchange_account_id=ACCOUNT, symbols=["fUST"],
         clock=lambda: now,
     )
 

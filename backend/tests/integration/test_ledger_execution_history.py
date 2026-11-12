@@ -117,7 +117,7 @@ async def _client(
     app = FastAPI()
     app.state.deployment_environment = ENVIRONMENT
     app.include_router(build_projections_router())
-    app.state.read_models = read_models or build_read_models()
+    app.state.read_models = read_models or build_read_models("ci")
     app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")
     app.dependency_overrides[get_session] = restricted
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
@@ -333,7 +333,7 @@ async def _archive_client(book: Book, monkeypatch: pytest.MonkeyPatch) -> httpx.
     await _plant_archive(book, ("ORDER_FILL", 99_999), environment="canary")
     unused = object()
     return await _client(book, monkeypatch, ReadModels(
-        unused, unused, ArchivedExecutionHistory(), unused))  # type: ignore[arg-type]
+        unused, unused, ArchivedExecutionHistory(ENVIRONMENT), unused))  # type: ignore[arg-type]
 
 
 async def test_the_archive_pages_newest_first_within_its_scope(book, monkeypatch) -> None:

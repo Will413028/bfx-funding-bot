@@ -83,7 +83,7 @@ class _Session:
 def _reads() -> CapitalStatusReads:
     return CapitalStatusReads(
         authority=_NoCapital(),  # type: ignore[arg-type]
-        scope=Scope(UUID(int=1), "ci"),
+        scope=Scope(UUID(int=1)),
         session_factory=lambda: _Session(),  # type: ignore[arg-type,return-value]
         clock=lambda: 1_000,
     )
@@ -178,6 +178,7 @@ def _service(
     )
     return TradingStatusService(
         chain=chain,
+        deployment_environment="ci",
         exposure=_reads(),
         account_ctx=_ctx(),
         cells=cells if cells is not None else [_cell("fUST")],
@@ -429,7 +430,7 @@ async def test_dry_run_emits_no_safety_trigger() -> None:
     )
     svc = TradingStatusService(
         chain=chain, exposure=_reads(), account_ctx=_ctx(), cells=[_cell("fUST")],
-        phase=Phase.SHADOW, attempts=SubmitAttemptRecorder(),
+        phase=Phase.SHADOW, deployment_environment="ci", attempts=SubmitAttemptRecorder(),
     )
     await svc.dry_run()
     await svc.snapshot()

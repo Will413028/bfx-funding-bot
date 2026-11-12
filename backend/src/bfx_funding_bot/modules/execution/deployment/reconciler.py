@@ -265,9 +265,11 @@ class DeploymentReconciler:
                 applied = await self._capital.read_policy(session, scope, symbol)
                 if isinstance(applied, CapitalBlocked):
                     return False
-                state = await read_current(session, account_id=scope.exchange_account_id,
-                                           environment=scope.deployment_environment)
+                state = await read_current(session, account_id=scope.exchange_account_id)
         except Exception:
+            # Not "stopped" (see above), but never silent: a programming error here once
+            # left a halted currency's offers standing without a trace.
+            log.warning("deployment_stop_state_unreadable symbol=%s", symbol, exc_info=True)
             return False
         halted = state is not None and state.state == HALTED
         if applied.policy.enabled and not halted:

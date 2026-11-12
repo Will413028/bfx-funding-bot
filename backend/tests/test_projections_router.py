@@ -36,7 +36,7 @@ _OFFERS_PATH = f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/offers"
 _EXECUTIONS_PATH = f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/executions"
 
 
-_SCOPE = Scope(_ACCOUNT_ID, _ENV)
+_SCOPE = Scope(_ACCOUNT_ID)
 
 
 class _Reads:

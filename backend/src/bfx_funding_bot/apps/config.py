@@ -44,8 +44,8 @@ def require_simulated_realm(phase: str, realm: str) -> None:
     a realm added later is refused until it is allowed here; fake fills in prod would
     corrupt real-money data. ci is the simulated venue's ``SIMULATED_REALM``, not imported
     because only apps/venue.py and apps/schema.py may import that module
-    (tests/architecture/test_simulated_venue_composition.py). The sim_venue_event CHECK (realm 'ci') is the
-    database's own authority.
+    (tests/architecture/test_simulated_venue_composition.py). The venue's store checks the database's
+    own realm stamp when it opens.
     """
     if phase == "shadow" and realm != DeploymentEnvironment.CI:
         raise ValueError(

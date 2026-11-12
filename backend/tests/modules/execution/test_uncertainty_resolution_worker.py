@@ -11,7 +11,7 @@ from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
 )
 from bfx_funding_bot.modules.ledger.wiring import build_operator_resolution, build_scope_lock
 
-SCOPE = ResolutionScope(UUID("550e8400-e29b-41d4-a716-446655440000"), "ci")
+SCOPE = ResolutionScope(UUID("550e8400-e29b-41d4-a716-446655440000"))
 
 
 @pytest.mark.asyncio

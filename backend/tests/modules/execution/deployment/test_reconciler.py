@@ -110,7 +110,7 @@ def _simulated_capital(ledger, *, cell_exposure=None, totals=None, reserves=None
             available = min(max(D("0"), total - exposure + reserve), ledger.available_balance(symbol))
             snapshot = CapitalSnapshot(available, D("0"), max(total + reserve, available),
                                        cell_exposure.get(cell_id, D("0")))
-            applied = AppliedPolicy(scope.account_id, scope.environment, symbol, 1,
+            applied = AppliedPolicy(scope.account_id, symbol, 1,
                                     "explicit-test-policy", UUID(int=1), policy)
             return CapitalAvailable(applied, snapshot, evaluate_capital(policy, snapshot), D("0"),
                                     "1", {})
@@ -131,7 +131,7 @@ def _capital_ports(capital, *, offers=None, uncertainty=None, scope=None, sessio
         "capital": capital,
         "offers": offers if offers is not None else capital,
         "uncertainty": uncertainty if uncertainty is not None else capital,
-        "scope": scope if scope is not None else Scope(UUID(int=7), "test"),
+        "scope": scope if scope is not None else Scope(UUID(int=7)),
         "session_factory": (session_factory if session_factory is not None
                             else capital.session_factory),
     }
@@ -334,7 +334,7 @@ class _AuditContexts:
         from bfx_funding_bot.modules.execution.audit.model import AuditContext
 
         return AuditContext(
-            account_id="default", deployment_environment="test", reconcile_id=reconcile_id,
+            account_id="default", reconcile_id=reconcile_id,
             cell_id=cell_id, symbol=candidate.symbol,
             signal_correlation_id=str(candidate.signal_correlation_id),
             service_version="test", config_hash="test",
@@ -1206,7 +1206,7 @@ class _RecordingCapital:
         self.reads.append(scope)
         policy = CapitalPolicy(enabled=True, max_cell_fraction=D("0.5"),
                                max_offer_amount=self._ceilings.get(scope.symbol))
-        applied = AppliedPolicy(scope.account_id, scope.environment, scope.symbol, 1, "digest",
+        applied = AppliedPolicy(scope.account_id, scope.symbol, 1, "digest",
                                 UUID(int=1), policy)
         snapshot = CapitalSnapshot(D("1000"), D("0"), D("1000"), self._exposures[scope.cell_id])
         view = CapitalAvailable(applied, snapshot, evaluate_capital(policy, snapshot), D("0"), "1")
@@ -1275,9 +1275,9 @@ async def test_each_active_cell_reads_its_own_capital_and_sends_the_allocation(m
 
     # Every cell reads its own symbol and cell, once.
     assert sorted(capital.reads, key=lambda scope: scope.cell_id) == [
-        CapitalScope(UUID(int=7), "test", "fUSD", "fUSD_a30"),
-        CapitalScope(UUID(int=7), "test", "fUST", "fUST_a30"),
-        CapitalScope(UUID(int=7), "test", "fUST", "fUST_p2"),
+        CapitalScope(UUID(int=7), "fUSD", "fUSD_a30"),
+        CapitalScope(UUID(int=7), "fUST", "fUST_a30"),
+        CapitalScope(UUID(int=7), "fUST", "fUST_p2"),
     ]
     # One allocation per symbol, over exactly that symbol's views as read, at the
     # venue's submit minimum for that symbol.

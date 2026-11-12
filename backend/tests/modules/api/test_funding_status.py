@@ -38,7 +38,7 @@ async def test_funding_status_preserves_decimals_only_for_both_matching_scopes(s
     app.include_router(build_funding_status_router(reader=read))
     app.dependency_overrides[require_operator] = lambda: Principal("fixture", None, "admin")
     app.dependency_overrides[require_account_member] = lambda: ExchangeAccountContext(
-        exchange_account_id=account, deployment_environment="prod", user_id="fixture", role="owner",
+        exchange_account_id=account, user_id="fixture", role="owner",
         lifecycle_status="active")
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get(f"/api/v1/exchange-accounts/{account}/funding-status")

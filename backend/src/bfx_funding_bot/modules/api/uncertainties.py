@@ -26,7 +26,12 @@ from bfx_funding_bot.modules.api.account_scope import (
     command_error,
     require_account_member,
 )
-from bfx_funding_bot.modules.api.deps import ReadModels, get_read_models, get_session
+from bfx_funding_bot.modules.api.deps import (
+    ReadModels,
+    configured_deployment_environment,
+    get_read_models,
+    get_session,
+)
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.api.schemas import Envelope, ResponseModel
 from bfx_funding_bot.modules.execution import operator_commands as commands
@@ -150,7 +155,8 @@ def _resolution_context(detail: UncertaintyDetail) -> UncertaintyResolutionConte
     )
 
 
-def _response(detail: UncertaintyDetail, scope: Scope) -> UncertaintyResponse:
+def _response(detail: UncertaintyDetail, scope: Scope,
+              deployment_environment: str | None) -> UncertaintyResponse:
     row = detail.view
     state = row.state
     if state not in {"open", "resolved"}:
@@ -166,7 +172,8 @@ def _response(detail: UncertaintyDetail, scope: Scope) -> UncertaintyResponse:
         evidence_summary=commands.evidence_summary(row.evidence),
         blocked_scope=BlockedScope(
             exchange_account_id=str(scope.exchange_account_id),
-            environment=scope.deployment_environment,
+            # What the app's assembly read at start; the account dependency refused None.
+            environment=deployment_environment or "",
             symbol=row.symbol,
         ),
         resolved_by_operator_id=row.resolved_by_operator_id,
@@ -214,6 +221,7 @@ def build_uncertainties_router() -> APIRouter:
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
         models: ReadModels = Depends(get_read_models),  # noqa: B008
+        deployment_environment: str | None = Depends(configured_deployment_environment),
     ) -> Envelope[list[UncertaintyResponse]]:
         try:
             details = await commands.list_uncertainties(
@@ -221,7 +229,7 @@ def build_uncertainties_router() -> APIRouter:
                 state=state, limit=limit)
         except OperatorCommandError as exc:
             raise command_error(exc, context=context) from exc
-        return Envelope(data=_rendered(lambda: [_response(d, context.scope) for d in details]))
+        return Envelope(data=_rendered(lambda: [_response(d, context.scope, deployment_environment) for d in details]))
 
     @router.get("/exchange-accounts/{exchange_account_id}/uncertainties/{uncertainty_id}")
     async def get_account_uncertainty(
@@ -229,6 +237,7 @@ def build_uncertainties_router() -> APIRouter:
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
         session: AsyncSession = Depends(get_session),  # noqa: B008
         models: ReadModels = Depends(get_read_models),  # noqa: B008
+        deployment_environment: str | None = Depends(configured_deployment_environment),
     ) -> Envelope[UncertaintyResponse]:
         try:
             detail = await commands.get_uncertainty(
@@ -236,7 +245,7 @@ def build_uncertainties_router() -> APIRouter:
                 uncertainty_id)
         except OperatorCommandError as exc:
             raise command_error(exc, context=context) from exc
-        return Envelope(data=_rendered(lambda: _response(detail, context.scope)))
+        return Envelope(data=_rendered(lambda: _response(detail, context.scope, deployment_environment)))
 
     @router.get(
         "/exchange-accounts/{exchange_account_id}/uncertainty-resolution-requests/{request_id}"

@@ -101,7 +101,7 @@ _LEDGER_AND_PROJECTIONS = (
     "execution_decisions",
 )
 _REQUEST_COLUMNS = (
-    "request_id", "exchange_account_id", "deployment_environment", "uncertainty_id", "action",
+    "request_id", "exchange_account_id", "uncertainty_id", "action",
     "observation_id", "venue_offer_id", "decision", "reason", "requested_by", "created_at_ms",
 )
 _WORKER_COLUMNS = ("state", "processed_at_ms", "outcome_reason")
@@ -235,9 +235,9 @@ def test_outbox_grants_are_column_scoped_per_role(migrated) -> None:
 
 
 _REQUEST_SQL = f"""INSERT INTO uncertainty_resolution_requests(
-    request_id,exchange_account_id,deployment_environment,uncertainty_id,action,
+    request_id,exchange_account_id,uncertainty_id,action,
     observation_id,requested_by,created_at_ms)
-    VALUES (:id,'{_SEEDED_ACCOUNT}','ci',:u,'mark_not_accepted','{_SEEDED_OBSERVATION}','op',1000)"""
+    VALUES (:id,'{_SEEDED_ACCOUNT}',:u,'mark_not_accepted','{_SEEDED_OBSERVATION}','op',1000)"""
 
 
 def test_request_is_immutable_and_its_outcome_terminal(ledger_db) -> None:  # noqa: F811
@@ -250,8 +250,8 @@ def test_request_is_immutable_and_its_outcome_terminal(ledger_db) -> None:  # no
         conn.execute(text(_REQUEST_SQL), {"id": first, "u": uncertainty})
     denied = (
         ("bfx_operator", "INSERT INTO uncertainty_resolution_requests(request_id,exchange_account_id,"
-         "deployment_environment,uncertainty_id,action,observation_id,requested_by,"
-         f"created_at_ms,state) VALUES ('{uuid4()}','{_SEEDED_ACCOUNT}','ci',"
+         "uncertainty_id,action,observation_id,requested_by,"
+         f"created_at_ms,state) VALUES ('{uuid4()}','{_SEEDED_ACCOUNT}',"
          f"'{uuid4()}','mark_not_accepted','{_SEEDED_OBSERVATION}','op',1000,'applied')"),
         ("bfx_webapi", _REQUEST_SQL.replace(":id", f"'{uuid4()}'").replace(":u", f"'{uuid4()}'")),
         ("bfx_webapi", "UPDATE uncertainty_resolution_requests SET state='rejected'"),
@@ -331,8 +331,7 @@ def _url(ledger_db_) -> str:
 
 
 _CONTEXT = OperatorContext(exchange_account_id=LEDGER_SCOPE.exchange_account_id,
-                           user_id="operator-1", role="owner", lifecycle_status="active",
-                           deployment_environment="ci")
+                           user_id="operator-1", role="owner", lifecycle_status="active")
 
 
 async def _queue_as_operator(operator, uncertainty_id: UUID, ref: str) -> str:
@@ -389,7 +388,7 @@ def test_the_cli_queues_the_web_api_shows_and_only_the_account_writer_applies(
             app = FastAPI()
             app.state.deployment_environment = "ci"
             app.include_router(build_uncertainties_router())
-            app.state.read_models = build_read_models()
+            app.state.read_models = build_read_models("ci")
             app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")
             app.dependency_overrides[get_session] = restricted_session
             base = f"/api/v1/exchange-accounts/{account}"
@@ -406,7 +405,7 @@ def test_the_cli_queues_the_web_api_shows_and_only_the_account_writer_applies(
                 assert await _journal_rows(owner) == 0  # queued, not applied
 
                 worker = UncertaintyResolutionWorker(
-                    session_factory=bot, scope=ResolutionScope(account, "ci"),
+                    session_factory=bot, scope=ResolutionScope(account),
                     authority=operator_authorized, clock=lambda: 3000,
                     resolution=build_operator_resolution(), scope_lock=build_scope_lock())
                 assert await worker.tick() is True
@@ -495,7 +494,7 @@ def test_revoked_operator_request_is_rejected_by_the_account_writer(
         account = LEDGER_SCOPE.exchange_account_id
         bot_engine = _restricted_engine(url, "bfx_bot")
         bot = async_sessionmaker(bot_engine, expire_on_commit=False)
-        scope = ResolutionScope(account, "ci")
+        scope = ResolutionScope(account)
         observation_id = UUID(ref.rsplit(":", 1)[1])
         try:
             async def queue(created_at_ms: int) -> UUID:
@@ -503,8 +502,8 @@ def test_revoked_operator_request_is_rejected_by_the_account_writer(
                 async with owner.begin() as session:
                     await session.execute(text(
                         "INSERT INTO uncertainty_resolution_requests(request_id,exchange_account_id,"
-                        "deployment_environment,uncertainty_id,action,observation_id,"
-                        "requested_by,created_at_ms) VALUES (:id,:account,'ci',:u,"
+                        "uncertainty_id,action,observation_id,"
+                        "requested_by,created_at_ms) VALUES (:id,:account,:u,"
                         "'mark_not_accepted',:o,'operator-1',:at)"
                     ), {"id": request_id, "account": account, "u": uncertainty_id,
                         "o": observation_id, "at": created_at_ms})

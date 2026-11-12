@@ -38,7 +38,7 @@ from bfx_funding_bot.modules.ledger import CapitalAvailable
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
 from ..test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture re-export
-from .stacks import ACCOUNT, CELL, ENVIRONMENT, NOW, SCOPE, Stack, build_stack, seed_account
+from .stacks import ACCOUNT, CELL, NOW, SCOPE, Stack, build_stack, seed_account
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -108,7 +108,7 @@ async def _rig(stack: Stack, order: SubmittedOrder | None, *, journal=None) -> _
     async with stack.factory.begin() as session:
         session.add(ExecutionDecisionRow(
             decision_id=decision_id, account_id=str(ACCOUNT), exchange_account_id=ACCOUNT,
-            deployment_environment=ENVIRONMENT, reconcile_id="gate", cell_id=CELL,
+            reconcile_id="gate", cell_id=CELL,
             symbol="fUST", signal_correlation_id=str(correlation), outcome="ready",
             signal_rate=Decimal("0.0001"), applied_rate=Decimal("0.0001"),
             amount_usdt=AMOUNT, duration_days=2, model_evidence={}, safety_result={},
@@ -140,8 +140,7 @@ async def _rig(stack: Stack, order: SubmittedOrder | None, *, journal=None) -> _
     # The gate's own bus is the capturing one too: a submit publishes nothing on it.
     gate = AccountCommandGate(
         venue, bus=bus, uncertainty_reader=Reader(),
-        safety_evaluator=_Allow(), deployment_environment=ENVIRONMENT,
-        clock=lambda: NOW, boundary=boundary, managed_offers=stack.offers,
+        safety_evaluator=_Allow(), clock=lambda: NOW, boundary=boundary, managed_offers=stack.offers,
     )
     ctx = AccountContext(str(ACCOUNT), Credentials("mock", "mock"), Decimal("0"))
     return _Rig(gate, venue, ready, ctx, seen, stack)

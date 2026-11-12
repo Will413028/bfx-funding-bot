@@ -93,7 +93,7 @@ async def boundary(stack: Stack):
     async with stack.factory.begin() as session:
         session.add(ExecutionDecisionRow(
             decision_id=decision_id, account_id=str(ACCOUNT), exchange_account_id=ACCOUNT,
-            deployment_environment=ENVIRONMENT, reconcile_id="gate", cell_id=CELL,
+            reconcile_id="gate", cell_id=CELL,
             symbol="fUST", signal_correlation_id=str(correlation), outcome="ready",
             signal_rate=Decimal("0.0001"), applied_rate=Decimal("0.0001"),
             amount_usdt=Decimal(AMOUNT), duration_days=2, model_evidence={}, safety_result={},
@@ -113,7 +113,7 @@ async def boundary(stack: Stack):
     venue = Venue()
     gate = AccountCommandGate(
         venue, bus=DomainEventBus(), uncertainty_reader=_NoneOpen(), safety_evaluator=_Allow(),
-        deployment_environment=ENVIRONMENT, clock=lambda: NOW,
+        clock=lambda: NOW,
         boundary=stack.boundary(LedgerCommandEffects(DomainEventBus())),
         managed_offers=stack.offers,
     )
@@ -161,8 +161,7 @@ async def test_expired_decision_is_durable_not_sent(stack, delay, expiring):
         audit=ExecutionDecisionRecorder(factory), readiness=_Readiness()).prepare(
             candidate, decision_id=str(uuid4()), reconcile_id="test", snapshot=snap,
             price=price, fill_evidence=None, safety=GuardResult(True, "test"),
-            audit_context=AuditContext(account_id=str(ACCOUNT), deployment_environment=ENVIRONMENT,
-                reconcile_id="test", cell_id=CELL, symbol="fUST",
+            audit_context=AuditContext(account_id=str(ACCOUNT), reconcile_id="test", cell_id=CELL, symbol="fUST",
                 signal_correlation_id=str(candidate.signal_correlation_id), service_version="test",
                 config_hash="test", strategy="mean_reversion"))
     assert isinstance(ready, ReadyToSubmit)

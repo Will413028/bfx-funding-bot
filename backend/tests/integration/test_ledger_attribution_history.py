@@ -56,8 +56,7 @@ def _trade(trade_id: int, offer_id: int, amount: Decimal, at: int) -> FundingTra
 
 
 async def weekly(factory: Any) -> AttributionResult:
-    return await load_and_compute(factory, account_id=ACCOUNT, deployment_environment="ci",
-                                  now_ms=NOW)
+    return await load_and_compute(factory, account_id=ACCOUNT, now_ms=NOW)
 
 
 def numbers(result: AttributionResult) -> dict[str, Any]:

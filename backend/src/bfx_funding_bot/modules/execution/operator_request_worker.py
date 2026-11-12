@@ -96,7 +96,6 @@ class OperatorRequestWorker[RowT, PreparedT](ABC):
         *,
         session_factory: async_sessionmaker[AsyncSession],
         account_id: UUID,
-        environment: str,
         authority: OperatorAuthority,
         scope_lock: ScopeLock,
         clock: Callable[[], int] | None = None,
@@ -105,7 +104,6 @@ class OperatorRequestWorker[RowT, PreparedT](ABC):
     ) -> None:
         self.session_factory = session_factory
         self.account_id = account_id
-        self.environment = environment
         self.ledger_scope = Scope(account_id)
         # The ledger's lock, the one every money-state write of this scope is under;
         # nothing outside the ledger takes the primitive (ADR 2026-10-19 D4).
@@ -191,8 +189,7 @@ class OperatorRequestWorker[RowT, PreparedT](ABC):
         return await self._settle(request_id, prepared=prepared)
 
     def _scoped(self, stmt: Any) -> Any:
-        return stmt.where(self.model.exchange_account_id == self.account_id,
-                          self.model.deployment_environment == self.environment)
+        return stmt.where(self.model.exchange_account_id == self.account_id)
 
     async def _oldest_pending(self) -> UUID | None:
         query = self._scoped(select(self.model.request_id)).where(
