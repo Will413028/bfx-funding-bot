@@ -12,7 +12,7 @@ Everything is read in the caller's one REPEATABLE READ READ ONLY transaction, so
 the basis, the tail and the clock come from one snapshot. Every statement is
 bounded by a key or by the basis:
 
-1. latest query of the scope (``ix_ledger_observation_query_scope_revision``,
+1. latest query of the scope (``uq_ledger_observation_query_scope_revision`` backward,
    LIMIT 1) -> its observation (unique ``query_id``) -> its basis (unique
    ``observation_id``). The basis is never chosen by time: a newer query
    without an accepted basis makes the read ``snapshot_query_pending`` (or

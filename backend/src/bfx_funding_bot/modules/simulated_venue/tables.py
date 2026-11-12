@@ -31,7 +31,6 @@ class SimVenueEventRow(Base):
     __tablename__ = SIM_VENUE_EVENT_TABLE
 
     exchange_account_id: Mapped[str] = mapped_column(Text, nullable=False)
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     # 1-based position in the scope's log; the primary key makes a second writer on the
     # same position fail instead of overwrite (optimistic concurrency).
     seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -45,9 +44,7 @@ class SimVenueEventRow(Base):
 
     __table_args__ = (
         PrimaryKeyConstraint(
-            "exchange_account_id", "deployment_environment", "seq", name="pk_sim_venue_event"),
-        CheckConstraint(
-            "deployment_environment = 'ci'", name="ck_sim_venue_event_realm"),
+            "exchange_account_id", "seq", name="pk_sim_venue_event"),
         CheckConstraint("seq >= 1", name="ck_sim_venue_event_seq"),
         CheckConstraint("exchange_account_id <> ''", name="ck_sim_venue_event_account"),
         CheckConstraint("schema_version >= 1", name="ck_sim_venue_event_version"),

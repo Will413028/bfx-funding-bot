@@ -42,7 +42,7 @@ class CapitalPolicyRequestRow(Base):
 
     __tablename__ = "capital_policy_requests"
     REQUEST_COLUMNS: ClassVar[tuple[str, ...]] = (
-        "request_id", "exchange_account_id", "deployment_environment", "symbol", "action",
+        "request_id", "exchange_account_id", "symbol", "action",
         "reason", "requested_by", "created_at_ms",
     )
     WORKER_COLUMNS: ClassVar[tuple[str, ...]] = ("state", "processed_at_ms", "outcome_reason")
@@ -59,7 +59,6 @@ class CapitalPolicyRequestRow(Base):
                    name="fk_capital_policy_requests_account"),
         nullable=False,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     action: Mapped[str] = mapped_column(Text, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
@@ -86,13 +85,13 @@ class CapitalPolicyRequestRow(Base):
         # One waiting request per currency and action: a pending enable never
         # makes a disable wait for a 409, and the worker applies them in order.
         Index("uq_capital_policy_requests_pending", "exchange_account_id",
-              "deployment_environment", "symbol", "action", unique=True,
+              "symbol", "action", unique=True,
               postgresql_where=text("state = 'requested'"),
               sqlite_where=text("state = 'requested'")),
         Index("ix_capital_policy_requests_queue", "exchange_account_id",
-              "deployment_environment", "state", "created_at_ms"),
+              "state", "created_at_ms"),
         # What a revision's composite foreign key references.
-        UniqueConstraint("request_id", "exchange_account_id", "deployment_environment", "symbol",
+        UniqueConstraint("request_id", "exchange_account_id", "symbol",
                          name="uq_capital_policy_requests_scope"),
     )
 

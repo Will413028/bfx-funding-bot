@@ -103,7 +103,6 @@ class CapitalPolicyRevisionRow(Base):
     exchange_account_id: Mapped[UUID] = mapped_column(
         Uuid, ForeignKey("exchange_accounts.id", ondelete="RESTRICT"), nullable=False,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     revision: Mapped[int] = mapped_column(Integer, nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -116,13 +115,13 @@ class CapitalPolicyRevisionRow(Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "exchange_account_id", "deployment_environment", "symbol", "revision",
+            "exchange_account_id", "symbol", "revision",
             name="uq_capital_policy_revision_scope",
         ),
         ForeignKeyConstraint(
-            ["operator_request_id", "exchange_account_id", "deployment_environment", "symbol"],
+            ["operator_request_id", "exchange_account_id", "symbol"],
             ["capital_policy_requests.request_id", "capital_policy_requests.exchange_account_id",
-             "capital_policy_requests.deployment_environment", "capital_policy_requests.symbol"],
+             "capital_policy_requests.symbol"],
             ondelete="RESTRICT", name="fk_capital_policy_revisions_operator_request",
         ),
         # A request is applied by at most one revision.
@@ -138,7 +137,6 @@ class CapitalPolicyHeadRow(Base):
     exchange_account_id: Mapped[UUID] = mapped_column(
         Uuid, ForeignKey("exchange_accounts.id", ondelete="RESTRICT"), primary_key=True,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, primary_key=True)
     symbol: Mapped[str] = mapped_column(Text, primary_key=True)
     revision_id: Mapped[UUID] = mapped_column(
         Uuid, ForeignKey("capital_policy_revisions.id", ondelete="RESTRICT"), nullable=False,
@@ -174,7 +172,6 @@ class CapitalCommandClockRow(Base):
         ForeignKey("exchange_accounts.id", ondelete="RESTRICT"),
         primary_key=True,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, primary_key=True)
     revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     __table_args__ = (CheckConstraint("revision >= 0", name="ck_capital_command_clock_revision"),)
 
@@ -183,26 +180,18 @@ class LedgerObservationQueryRow(Base):
     __tablename__ = "ledger_observation_query"
     query_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
     exchange_account_id: Mapped[UUID] = _account()
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     query_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     started_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     start_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
     __table_args__ = (
         UniqueConstraint(
             "exchange_account_id",
-            "deployment_environment",
             "query_revision",
             name="uq_ledger_observation_query_scope_revision",
         ),
         CheckConstraint(
             "query_revision > 0 AND started_at_ms >= 0 AND start_revision >= 0",
             name="ck_ledger_observation_query_nonnegative",
-        ),
-        Index(
-            "ix_ledger_observation_query_scope_revision",
-            "exchange_account_id",
-            "deployment_environment",
-            text("query_revision DESC"),
         ),
     )
 
@@ -217,7 +206,6 @@ class LedgerObservationRow(Base):
         unique=True,
     )
     exchange_account_id: Mapped[UUID] = _account()
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     query_finished_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     confirmation_finished_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -299,7 +287,6 @@ class LedgerObservationRow(Base):
         Index(
             "ix_ledger_observation_scope_finished",
             "exchange_account_id",
-            "deployment_environment",
             text("query_finished_at_ms DESC"),
             "id",
         ),
@@ -501,7 +488,6 @@ class VenueOfferMirrorRow(Base):
         ForeignKey("exchange_accounts.id", ondelete="RESTRICT"),
         primary_key=True,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, primary_key=True)
     venue_offer_id: Mapped[str] = mapped_column(Text, primary_key=True)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     amount_original: Mapped[Decimal | None] = mapped_column(Numeric)
@@ -540,7 +526,6 @@ class VenueOfferMirrorRow(Base):
         Index(
             "ix_venue_offer_mirror_live",
             "exchange_account_id",
-            "deployment_environment",
             "symbol",
             postgresql_where=text("present_in_latest_accepted_snapshot"),
         ),
@@ -554,7 +539,6 @@ class VenueCreditMirrorRow(Base):
         ForeignKey("exchange_accounts.id", ondelete="RESTRICT"),
         primary_key=True,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, primary_key=True)
     venue_credit_id: Mapped[str] = mapped_column(Text, primary_key=True)
     source_kind: Mapped[str] = mapped_column(Text, primary_key=True)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
@@ -594,7 +578,6 @@ class VenueCreditMirrorRow(Base):
         Index(
             "ix_venue_credit_mirror_live",
             "exchange_account_id",
-            "deployment_environment",
             "symbol",
             postgresql_where=text("present_in_latest_accepted_snapshot"),
         ),
@@ -611,7 +594,6 @@ class SubmissionAttemptJournalRow(Base):
         unique=True,
     )
     exchange_account_id: Mapped[UUID] = _account()
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     cell_id: Mapped[str] = mapped_column(Text, nullable=False)
     attempt_seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -654,7 +636,6 @@ class SubmissionAttemptJournalRow(Base):
     __table_args__ = (
         UniqueConstraint(
             "exchange_account_id",
-            "deployment_environment",
             "attempt_seq",
             name="uq_submission_attempt_scope_seq",
         ),
@@ -715,7 +696,6 @@ class QuarantineOpeningRow(Base):
     __tablename__ = "quarantine_opening"
     quarantine_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
     exchange_account_id: Mapped[UUID] = _account()
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     intended_amount: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     opened_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -746,7 +726,6 @@ class QuarantineOpeningRow(Base):
         Index(
             "ix_quarantine_opening_scope_revision",
             "exchange_account_id",
-            "deployment_environment",
             "opened_revision",
         ),
     )
@@ -786,7 +765,6 @@ class ExecutionResolutionJournalRow(Base):
         PG_UUID(as_uuid=True), ForeignKey("quarantine_opening.quarantine_id", ondelete="RESTRICT")
     )
     exchange_account_id: Mapped[UUID] = _account()
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     action: Mapped[str] = mapped_column(Text, nullable=False)
     venue_offer_id: Mapped[str | None] = mapped_column(Text)
@@ -846,11 +824,10 @@ class ExecutionResolutionJournalRow(Base):
         # ck_execution_resolution_subject leaves exactly one non-NULL.
         *(
             ForeignKeyConstraint(
-                ["operator_request_id", "exchange_account_id", "deployment_environment", subject],
+                ["operator_request_id", "exchange_account_id", subject],
                 [
                     "uncertainty_resolution_requests.request_id",
                     "uncertainty_resolution_requests.exchange_account_id",
-                    "uncertainty_resolution_requests.deployment_environment",
                     "uncertainty_resolution_requests.uncertainty_id",
                 ],
                 ondelete="RESTRICT",
@@ -861,7 +838,6 @@ class ExecutionResolutionJournalRow(Base):
         Index(
             "ix_execution_resolution_scope_resolved",
             "exchange_account_id",
-            "deployment_environment",
             text("resolved_at_ms DESC"),
             text("id DESC"),
         ),
@@ -877,7 +853,6 @@ class AcceptedCapitalBasisRow(Base):
     __tablename__ = "accepted_capital_basis"
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
     exchange_account_id: Mapped[UUID] = _account()
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     observation_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False, unique=True)
     accepted: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     accept_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -901,7 +876,6 @@ class AcceptedCapitalBasisRow(Base):
         Index(
             "ix_accepted_capital_basis_scope_accepted",
             "exchange_account_id",
-            "deployment_environment",
             text("accepted_at_ms DESC"),
         ),
     )
@@ -1074,7 +1048,7 @@ LEDGER_TABLES = (
 )
 
 
-_SCOPE_COLUMNS = frozenset({"exchange_account_id", "deployment_environment"})
+_SCOPE_COLUMNS = frozenset({"exchange_account_id"})
 
 
 def _ledger_tables() -> tuple[Table, ...]:
@@ -1084,7 +1058,7 @@ def _ledger_tables() -> tuple[Table, ...]:
 def _scope_parents() -> dict[str, tuple[str, str, str] | None]:
     """How each scoped ledger table reaches its scope, derived from the table metadata.
 
-    ``None``: the table carries ``exchange_account_id`` and ``deployment_environment``.
+    ``None``: the table carries ``exchange_account_id``.
     ``(fk column, parent table, parent column)``: a child, joined through the foreign key of
     its first column (primary key first) whose foreign key leads to a scoped table (directly, or through a scoped
     child whose own link column that foreign key targets). A ledger table that cannot be
@@ -1118,7 +1092,7 @@ def _scope_parents() -> dict[str, tuple[str, str, str] | None]:
     return {name: parents[name] for name in by_name}
 
 
-# Every ledger table scoped by (account, environment), in ``LEDGER_TABLES`` order.
+# Every ledger table scoped by account, in ``LEDGER_TABLES`` order.
 SCOPE_PARENT: dict[str, tuple[str, str, str] | None] = _scope_parents()
 # The tables that carry the scope themselves (no child row exists without one of these).
 SCOPE_ROOT_TABLES = tuple(

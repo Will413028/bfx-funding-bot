@@ -4,7 +4,7 @@ Every read runs on the caller's session and is bounded by keys, the live
 mirror, or the latest accepted basis -- never by history:
 
 1. latest accepted basis: ``previous_basis`` (query revision DESC via
-   ``ix_ledger_observation_query_scope_revision`` -> unique
+   ``uq_ledger_observation_query_scope_revision`` backward -> unique
    ``ledger_observation.query_id`` -> unique ``accepted_capital_basis.observation_id``,
    LIMIT 1).
 2. its ``unresolved`` attempts (``accepted_capital_basis_attempt`` PK prefix

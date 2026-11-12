@@ -8,7 +8,7 @@ def test_diagnostics_table_registered() -> None:
 
 def test_diagnostics_columns() -> None:
     cols = Base.metadata.tables["diagnostics"].columns
-    for name in ("id", "account_id", "deployment_environment", "kind",
+    for name in ("id", "account_id", "kind",
                  "payload", "occurred_at", "recorded_at"):
         assert name in cols, name
     assert cols["id"].primary_key is True
