@@ -54,7 +54,7 @@ NOW_MS = 1756961300000
 def _bounds():
     ledger = evidence._ledger
     lines = ["schema\t180000\thead-a", *(f"table\t{name}" for name in ledger.LEDGER_TABLES),
-             f"scope\t{ACCOUNT}\tprod\t5\t5\t4\t3\t1\t7", "epoch\t2\tledger",
+             f"scope\t{ACCOUNT}\t5\t5\t4\t3\t1\t7", "epoch\t2\tledger",
              "inconsistent\tclock_behind\t0", "inconsistent\tvenue_offer_mirror_orphans\t0",
              "inconsistent\tvenue_credit_mirror_orphans\t0"]
     return ledger.parse_bounds("\n".join(lines) + "\n")
