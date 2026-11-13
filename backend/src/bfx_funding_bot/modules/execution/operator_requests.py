@@ -63,7 +63,7 @@ async def insert_request(session: AsyncSession, model: Any, values: Mapping[str,
     ``model.REQUEST_COLUMNS``, and an ORM flush would also send the worker's
     columns. ``ON CONFLICT DO NOTHING`` on the request's pending index
     (``model.pending_index``) is the only refusal answered with False; any other
-    (a CHECK, a foreign key, the realm guard, a duplicate id) raises. Takes no
+    (a CHECK, a foreign key, a duplicate id) raises. Takes no
     account lock -- that lock serialises the daemon's writer, and the web API
     must never stall reconcile or submit.
     """

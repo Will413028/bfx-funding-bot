@@ -2,7 +2,7 @@
 
 This runbook provisions and measures the PostgreSQL offsite disaster-recovery
 foundation. It does not authorize a production restore, a resume, or a
-Bitfinex request. Keep the account/environment halt and full-account reconcile
+Bitfinex request. Keep the account halt and full-account reconcile
 policy in force throughout the procedure.
 
 ## Acceptance boundary
