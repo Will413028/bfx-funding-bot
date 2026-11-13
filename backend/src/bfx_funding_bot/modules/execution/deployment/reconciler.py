@@ -488,10 +488,7 @@ class DeploymentReconciler:
                 )
                 if (
                     isinstance(price, PriceDecision)
-                    and self._execution_policy in {
-                        ExecutionPolicy.OPTIMIZER_SHADOW,
-                        ExecutionPolicy.OPTIMIZER_LIVE,
-                    }
+                    and self._execution_policy is ExecutionPolicy.OPTIMIZER_LIVE
                 ):
                     # Evidence is estimated per candidate price: the exact-period
                     # book price gates the submit, the signal price competes in the
@@ -530,28 +527,19 @@ class DeploymentReconciler:
                         optimization, price, fill_evidence,
                     )
                     if isinstance(optimization, OptimizationResult):
-                        if self._execution_policy is ExecutionPolicy.OPTIMIZER_LIVE:
-                            gate_price = PriceDecision(
-                                rate=optimization.selected.rate,
-                                branch=price.branch,
-                                evidence=price.evidence,
-                            )
-                            # The submit gate must see the evidence of the price it
-                            # is about to send, not the book price's.
-                            if optimization.selected.fill_evidence is not None:
-                                fill_evidence = optimization.selected.fill_evidence
-                    elif self._execution_policy is ExecutionPolicy.OPTIMIZER_LIVE:
+                        gate_price = PriceDecision(
+                            rate=optimization.selected.rate,
+                            branch=price.branch,
+                            evidence=price.evidence,
+                        )
+                        # The submit gate must see the evidence of the price it
+                        # is about to send, not the book price's.
+                        if optimization.selected.fill_evidence is not None:
+                            fill_evidence = optimization.selected.fill_evidence
+                    elif not isinstance(fill_evidence, FillModelUnavailable):
                         # Never reinterpret a failed optimizer as an implicit signal
                         # fallback.  Valid fill evidence remains visible in audit.
-                        if not isinstance(fill_evidence, FillModelUnavailable):
-                            optimizer_block_reason = BlockReason.OPTIMIZER_UNAVAILABLE
-                    else:
-                        await self._emit_shadow_optimizer_unavailable(
-                            decision=decision,
-                            cell_id=cell_id,
-                            reconcile_id=reconcile_id,
-                            reason=_optimizer_reason(optimization, fill_evidence),
-                        )
+                        optimizer_block_reason = BlockReason.OPTIMIZER_UNAVAILABLE
                 outcome = await self._execution_gate.prepare(
                     decision,
                     decision_id=decision_id,
@@ -766,40 +754,6 @@ class DeploymentReconciler:
             fill_evidence=fill_evidence,
             fee_rate=self._optimizer_fee_rate,
         )
-
-    async def _emit_shadow_optimizer_unavailable(
-        self,
-        *,
-        decision: DecisionPayload,
-        cell_id: str,
-        reconcile_id: str,
-        reason: str,
-    ) -> None:
-        emit_execution_event = getattr(self._event_sink, "emit_execution_event", None)
-        if not callable(emit_execution_event):
-            return
-        try:
-            event_kwargs = {
-                "level": "warn",
-                "decision_id": str(decision.signal_correlation_id),
-                "reconcile_id": reconcile_id,
-                "symbol": decision.symbol,
-                "cell": cell_id,
-                "policy": self._execution_policy.value,
-                "outcome": "no_recommendation",
-                "reason_code": reason,
-                "evidence": {"optimizer_outcome": "no_recommendation"},
-            }
-            if reason in {
-                "fill_model_missing",
-                "fill_model_low_confidence",
-                "fill_model_scope_mismatch",
-                "fill_model_unversioned",
-            }:
-                await emit_execution_event("funding.fill_model.unavailable", **event_kwargs)
-            await emit_execution_event("funding.optimizer.no_recommendation", **event_kwargs)
-        except Exception:
-            log.debug("shadow_optimizer_event_emit_failed", exc_info=True)
 
     async def _emit_submit(
         self,

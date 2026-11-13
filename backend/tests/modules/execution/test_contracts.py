@@ -131,7 +131,6 @@ def test_no_port_below_the_gate_takes_a_reservation_reference() -> None:
 def test_execution_contract_enum_values_are_stable() -> None:
     assert [policy.value for policy in contracts.ExecutionPolicy] == [
         "book_guarded",
-        "optimizer_shadow",
         "optimizer_live",
     ]
     assert [outcome.value for outcome in contracts.DecisionOutcome] == [

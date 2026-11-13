@@ -276,10 +276,12 @@ async def test_optimizer_live_typed_missing_model_evidence_is_blocked_and_audite
     """The optimizer-live gate must not convert a model outage into a signal fallback."""
     candidate = make_candidate()
     audit = _Audit()
+    events = _ExecutionEvents()
     gate = ExecutionGate(
         policy=ExecutionPolicy.OPTIMIZER_LIVE,
         audit=audit,
         readiness=_Readiness(),
+        events=events,
     )
 
     result = await gate.prepare(
@@ -296,32 +298,11 @@ async def test_optimizer_live_typed_missing_model_evidence_is_blocked_and_audite
     assert isinstance(result, BlockedExecution)
     assert result.reason is BlockReason.FILL_MODEL_MISSING
     assert audit.last.reason_code is BlockReason.FILL_MODEL_MISSING
-
-
-async def test_optimizer_shadow_keeps_book_guarded_rate_when_model_is_unavailable() -> None:
-    """Shadow telemetry is observational and cannot change the submitted price."""
-    candidate = make_candidate()
-    audit = _Audit()
-    gate = ExecutionGate(
-        policy=ExecutionPolicy.OPTIMIZER_SHADOW,
-        audit=audit,
-        readiness=_Readiness(),
-    )
-
-    result = await gate.prepare(
-        candidate,
-        decision_id="decision-shadow-model-missing",
-        reconcile_id="reconcile-1",
-        snapshot=make_snapshot(),
-        price=make_price(),
-        fill_evidence=FillModelUnavailable("missing"),
-        safety=GuardResult(True, "risk"),
-        audit_context=make_audit_context(candidate),
-    )
-
-    assert isinstance(result, ReadyToSubmit)
-    assert result.decision.offer_rate == Decimal("0.00021")
-    assert audit.last.model_evidence == {"unavailable_reason": "fill_model_missing"}
+    assert [name for name, _ in events.events] == [
+        "funding.execution.eligibility",
+        "funding.execution.blocked",
+        "funding.fill_model.unavailable",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -430,32 +411,6 @@ async def test_typed_unavailable_reason_is_preserved_for_live_and_audit(
     assert isinstance(result, BlockedExecution)
     assert result.reason.value == f"fill_model_{reason}"
     assert audit.last.model_evidence == {"unavailable_reason": f"fill_model_{reason}"}
-
-
-async def test_shadow_preserves_typed_unavailable_reason_without_blocking() -> None:
-    candidate = make_candidate()
-    audit = _Audit()
-    gate = ExecutionGate(
-        policy=ExecutionPolicy.OPTIMIZER_SHADOW,
-        audit=audit,
-        readiness=_Readiness(),
-    )
-
-    result = await gate.prepare(
-        candidate,
-        decision_id="decision-shadow-scope-mismatch",
-        reconcile_id="reconcile-1",
-        snapshot=make_snapshot(),
-        price=make_price(),
-        fill_evidence=FillModelUnavailable(reason="scope_mismatch"),
-        safety=GuardResult(True, "risk"),
-        audit_context=make_audit_context(candidate),
-    )
-
-    assert isinstance(result, ReadyToSubmit)
-    assert audit.last.model_evidence == {
-        "unavailable_reason": "fill_model_scope_mismatch",
-    }
 
 
 @dataclass(frozen=True)

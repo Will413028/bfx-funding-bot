@@ -65,7 +65,6 @@ def _set_required_config_env(
     monkeypatch.setenv("BFX_DEPLOYMENT_ENV", deployment_environment)
     if policy in {
         ExecutionPolicy.BOOK_GUARDED.value,
-        ExecutionPolicy.OPTIMIZER_SHADOW.value,
         ExecutionPolicy.OPTIMIZER_LIVE.value,
     }:
         monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
@@ -205,18 +204,19 @@ def test_optimizer_live_exposes_artifact_and_decimal_fee_rate(
     assert config.optimizer_fee_rate == Decimal("0.15")
 
 
-def test_optimizer_shadow_allows_missing_model_and_fee_for_observation_only(
+def test_the_removed_optimizer_shadow_policy_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _set_required_config_env(monkeypatch, phase="simulated", policy="optimizer_shadow")
-    monkeypatch.delenv("BFX_FILL_MODEL_ARTIFACT", raising=False)
-    monkeypatch.delenv("BFX_OPTIMIZER_FEE_RATE", raising=False)
-    yaml_path = _write_yaml(tmp_path, _valid_yaml())
-
-    config = _load(cells_yaml_path=yaml_path)
-
-    assert config.fill_model_artifact is None
-    assert config.optimizer_fee_rate is None
+    """``optimizer_shadow`` was removed (ADR 2026-11-08 remove the shadow realm, followup 2).
+    Mutation: add ``OPTIMIZER_SHADOW`` back to ``ExecutionPolicy``."""
+    _set_required_config_env(monkeypatch, phase="simulated", policy="book_guarded")
+    monkeypatch.setenv("BFX_EXECUTION_POLICY", "optimizer_shadow")
+    with pytest.raises(
+        ValueError,
+        match=r"BFX_EXECUTION_POLICY must be one of book_guarded, optimizer_live, "
+              r"got 'optimizer_shadow'",
+    ):
+        _load(cells_yaml_path=_write_yaml(tmp_path, _valid_yaml()))
 
 
 def test_load_config_happy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
