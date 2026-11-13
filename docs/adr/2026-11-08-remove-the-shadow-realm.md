@@ -57,4 +57,4 @@ Followup 第三項已由 owner 決定：每列的 `deployment_environment` 欄�
 
 ## Amendment (2026-11-13): phase 改名完成
 
-Followup 第一項已做：phase `shadow` 改名為 `simulated`（`Phase.SIMULATED`、`BFX_PHASE=simulated`）。舊名不留別名，`BFX_PHASE=shadow` 在 `load_config` 以「must be simulated or live」拒絕；沒有部署設定過它（`deploy/vm/live.env` 是 `live`）。D2／D4 內文的「simulated phase」即此值。
+Followup 第一項已做：phase `shadow` 改名為 `simulated`（`Phase.SIMULATED`、`BFX_PHASE=simulated`）。舊名不留別名，`BFX_PHASE=shadow` 在 `load_config` 以「must be simulated or live」拒絕；現行部署沒有設定它（`deploy/vm/live.env` 是 `live`）。D2／D4 內文的「simulated phase」即此值。

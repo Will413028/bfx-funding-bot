@@ -745,7 +745,7 @@ Halt 2 DR 收據）已由 ADR 2026-09-25 的 release flow 取代並刪除，資�
 production 使用 prod，ci 僅供測試。phase simulated（simulated venue）禁止 prod（模擬不可污染真錢資料）；simulated venue 的 store 開啟時讀 `database_realm`，stamp 不是 `ci` 就拒絕（`simulated_venue/_internal/store_sql.py` 的 `_check_database_realm`）。
 違規 `ValueError` fail-fast；webapi 必須明確設定與 daemon 相同的 realm。
 
-**Cells**：`cells.yaml`（shadow，多對跨 fUSD/fUST 與 p2/p30/a30）；本輪
+**Cells**：`cells.yaml`（多對跨 fUSD/fUST 與 p2/p30/a30）；本輪
 `cells.live.yaml` 只有兩個 armed mean_reversion fUST cells（a30/p2），fUSD
 保持 dark；RatePercentile 與 p30 不在 live set。研究用的
 `cells.experimental-p14.yaml` 鎖定 AdaptivePeriod `p_mid=7`、`p_long=14`、`t1=0.5`、
