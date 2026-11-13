@@ -18,7 +18,7 @@ import bfx_funding_bot.modules.execution.uncertainty_tables  # noqa: F401
 from bfx_funding_bot.core.authority import AuthorityMismatch
 from bfx_funding_bot.core.database_realm import DatabaseRealmMismatch, DatabaseRealmRow
 from bfx_funding_bot.core.db import Base, make_async_engine_from_url, make_session_factory
-from bfx_funding_bot.modules.ledger import Scope
+from bfx_funding_bot.modules.ledger import PolicyRefused, Scope
 from bfx_funding_bot.modules.ledger.wiring import build_policy_store
 from bfx_funding_bot.modules.trading import CapitalPolicy
 from scripts import amend_capital_policy as script
@@ -136,6 +136,24 @@ async def test_every_known_realm_reads_the_epoch_against_the_ledger_alone(
     with pytest.raises(AuthorityMismatch):
         await script.run(_args())
     assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_report_names_the_stamped_realm_and_the_digest_covers_it(database) -> None:
+    """The owner sees which database the dry run read before confirming its digest, and a
+    digest taken against one realm does not apply on another.
+
+    Mutation: leave ``realm`` out of the report and the first assertion fails.
+    """
+    first = await script.run(_args())
+    assert first["realm"] == "ci"
+    async with database.begin() as session:
+        await session.execute(text("UPDATE database_realm SET realm = 'prod'"))
+    other = await script.run(_args())
+    assert other["realm"] == "prod"
+    assert other["amendment_digest"] != first["amendment_digest"]
+    with pytest.raises(PolicyRefused, match="amendment_changed"):
+        await script.run(_args(apply_digest=first["amendment_digest"], reason="wrong database"))
 
 
 @pytest.mark.asyncio

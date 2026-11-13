@@ -40,9 +40,8 @@ async def _app(migrated_db, monkeypatch, *, role="owner"):
     async with factory.begin() as session:
         session.add(ExchangeAccountMembership(exchange_account_id=account, user_id="operator", role=role))
     app = attach_ingress(FastAPI(), BFX_OPERATOR_TAILNET_USER_ID="operator")
-    app.state.deployment_environment = "ci"
     app.state.session_factory = factory
-    app.state.read_models = build_read_models("ci")
+    app.state.read_models = build_read_models()
     app.include_router(build_trading_control_router())
     return app, factory, account
 
@@ -383,14 +382,15 @@ async def test_a_currency_without_an_applied_policy_is_policy_unavailable(migrat
 
 
 @pytest.mark.asyncio
-async def test_membership_is_judged_before_the_deployment_environment(migrated_db, monkeypatch):
-    """A non-member learns nothing about the host: 404 even when the environment is unset."""
+async def test_account_routes_need_no_deployment_environment(migrated_db, monkeypatch):
+    """The web API reads no BFX_DEPLOYMENT_ENV: a member is served without it (this
+    answered 503 ``deployment_environment_not_configured`` before), a non-member gets 404."""
+    monkeypatch.delenv("BFX_DEPLOYMENT_ENV", raising=False)
     app, _factory, account = await _app(migrated_db, monkeypatch)
-    app.state.deployment_environment = None  # the lifespan found no valid value
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
         other = await client.post(f"/api/v1/exchange-accounts/{uuid4()}/trading-control/kill",
                                   json={"reason": "x"}, headers=AUTH)
         own = await client.post(f"/api/v1/exchange-accounts/{account}/trading-control/kill",
                                 json={"reason": "x"}, headers=AUTH)
     assert (other.status_code, other.json()["detail"]) == (404, "not_found")
-    assert (own.status_code, own.json()["detail"]) == (503, "deployment_environment_not_configured")
+    assert own.status_code == 202, own.text

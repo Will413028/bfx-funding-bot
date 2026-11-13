@@ -62,16 +62,6 @@ async def get_session(request: Request) -> AsyncIterator[AsyncSession]:
             raise
 
 
-def configured_deployment_environment(request: Request) -> str | None:
-    """What the app's assembly read at start; None when the environment named no valid one.
-
-    A plain attribute read: an app that serves account routes without setting
-    ``app.state.deployment_environment`` is a wiring bug and fails loudly.
-    """
-    value: str | None = request.app.state.deployment_environment
-    return value
-
-
 @dataclass(frozen=True, slots=True)
 class ReadModels:
     """The read-side ports of the capital authority this process booted under."""

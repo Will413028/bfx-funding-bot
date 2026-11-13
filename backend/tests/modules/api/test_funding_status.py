@@ -10,7 +10,7 @@ from tests.ingress_support import attach_ingress
 from tests.modules.api.test_response_contract import funding_dry_run, funding_snapshot
 
 
-@pytest.mark.parametrize("scope_error", [None, "account", "realm", "missing_realm"])
+@pytest.mark.parametrize("scope_error", [None, "account", "missing_account"])
 @pytest.mark.parametrize("scope_endpoint", ["/admin/trading-status", "/admin/dry-evaluate"])
 async def test_funding_status_preserves_decimals_only_for_both_matching_scopes(scope_error, scope_endpoint):
     from bfx_funding_bot.modules.api.funding_status import build_funding_status_router
@@ -27,14 +27,11 @@ async def test_funding_status_preserves_decimals_only_for_both_matching_scopes(s
         if path == scope_endpoint:
             if scope_error == "account":
                 value["account_id"] = str(uuid4())
-            elif scope_error == "realm":
-                value["deployment_environment"] = "ci"
-            elif scope_error == "missing_realm":
-                value.pop("deployment_environment")
+            elif scope_error == "missing_account":
+                value.pop("account_id")
         return value
 
     app = FastAPI()
-    app.state.deployment_environment = "prod"
     app.include_router(build_funding_status_router(reader=read))
     app.dependency_overrides[require_operator] = lambda: Principal("fixture", None, "admin")
     app.dependency_overrides[require_account_member] = lambda: ExchangeAccountContext(

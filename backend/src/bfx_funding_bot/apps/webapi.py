@@ -26,7 +26,6 @@ from bfx_funding_bot.core.settings import (
     IngressSettings,
     deployment_environment_label,
     load_settings,
-    require_deployment_environment,
 )
 from bfx_funding_bot.modules.api.api_keys import build_api_keys_router
 from bfx_funding_bot.modules.api.attribution import build_attribution_router
@@ -75,13 +74,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         security_event(BOOT_REFUSED, reason="ingress_settings_invalid", level=logging.CRITICAL)
         raise
-    # Read once, here; account routes get it from app.state (modules.api.deps). Without a
-    # valid value they answer 503 after the membership check, as before.
-    try:
-        app.state.deployment_environment = require_deployment_environment()
-    except ValueError as exc:
-        logging.error("deployment_environment_not_configured: %s; account routes answer 503", exc)
-        app.state.deployment_environment = None
     try:
         settings = load_settings()
         configure_logging("webapi", level=settings.log_level)
@@ -103,7 +95,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             async with factory() as session:
                 await assert_schema_head(session)
                 await require_ledger_authority(session)
-            app.state.read_models = build_read_models(app.state.deployment_environment)
+            app.state.read_models = build_read_models()
         except Exception as exc:
             if isinstance(exc, SchemaHeadMismatch):
                 security_event(BOOT_REFUSED, reason="schema_head_mismatch", detail=str(exc),

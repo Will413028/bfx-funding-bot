@@ -192,7 +192,7 @@ class BotEnv:
         self.venue = venue
         self.alerts = alerts_sent
         self.daemons: list[Any] = []
-        self.reads = build_read_models("ci")
+        self.reads = build_read_models()
 
     async def build(self) -> Any:
         """A bot process: composed, not yet booted. Its deployment is a recorder."""

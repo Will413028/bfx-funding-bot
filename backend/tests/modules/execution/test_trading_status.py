@@ -267,7 +267,7 @@ async def test_installed_guards_are_listed(monkeypatch: pytest.MonkeyPatch) -> N
 @pytest.mark.asyncio
 async def test_symbols_report_the_capital_authority_answer_and_no_legacy_tiers() -> None:
     snap = await _service(cells=[_cell("fUST")]).snapshot()
-    assert snap["deployment_environment"] == "ci"
+    assert snap["account_id"] == str(UUID(int=1)) and "deployment_environment" not in snap
     assert snap["symbols"]["fUST"] == {
         "capital_available": False, "reason": "test_no_capital_answer",
     }

@@ -91,7 +91,7 @@ from .bot_e2e import CELL, POLICY, SCOPE, AllowGuard, ledger_db  # noqa: F401 - 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 ACCOUNT_ID = str(TEST_EXCHANGE_ACCOUNT_ID)
-SIM = SimAccount(ACCOUNT_ID, "ci")
+SIM = SimAccount(ACCOUNT_ID)
 CAPITAL_SCOPE = CapitalScope(TEST_EXCHANGE_ACCOUNT_ID, "fUST", CELL)
 CONSERVED = {"baseline", "conserved"}
 INJECTED = (FaultKind.UNKNOWN_PLACED_LOST, FaultKind.UNKNOWN_NOT_PLACED_LOST,

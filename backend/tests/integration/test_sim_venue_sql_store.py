@@ -77,7 +77,7 @@ from .test_trading_state_migration import _reset
 pytestmark = pytest.mark.integration
 
 D = Decimal
-OTHER = SimAccount("aaaaaaaa-bbbb-4ccc-8ddd-000000000002", "ci")
+OTHER = SimAccount("aaaaaaaa-bbbb-4ccc-8ddd-000000000002")
 
 
 def _prepare(url: str) -> None:
@@ -192,7 +192,7 @@ async def test_open_accepts_the_ci_realm(pg_templates: Any, pg_clone: Any) -> No
     engine = _engine(_database_stamped(pg_templates, pg_clone, "ci"))
     try:
         store = await SqlVenueEventStore.open(engine)
-        own = SimAccount(ACCOUNT.exchange_account_id, "ci")
+        own = SimAccount(ACCOUNT.exchange_account_id)
         await store.append(own, 0, _funded(1))
         assert len(await store.load(own)) == 1
     finally:

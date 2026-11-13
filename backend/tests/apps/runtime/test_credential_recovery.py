@@ -409,7 +409,7 @@ async def test_an_applied_rotation_in_recovery_mode_ends_the_run(engine, sent) -
         return True
 
     worker = CredentialRotationWorker(
-        session_factory=factory, account_id=ACCOUNT, deployment_environment="ci", authority=authority,
+        session_factory=factory, account_id=ACCOUNT, authority=authority,
         client_factory=_NewKeyClient,
         kek_loader=lambda: KEK, restart=restart,
         clock=lambda: T0, poll_interval_s=0.01, scope_lock=build_scope_lock())
@@ -424,7 +424,7 @@ async def test_an_applied_rotation_in_recovery_mode_ends_the_run(engine, sent) -
             session, OperatorContext(exchange_account_id=ACCOUNT, user_id="operator-1",
                                      role="owner", lifecycle_status="active"),
             api_key=NEW_KEY, api_secret=NEW_SECRET, label="rotated", reason="key revoked",
-            now_ms=T0, deployment_environment="ci")
+            now_ms=T0)
     async def settled() -> str | None:
         async with factory() as session:
             state = await session.scalar(text(

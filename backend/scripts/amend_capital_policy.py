@@ -46,14 +46,15 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         factory = make_session_factory(engine)
         async with factory() as session:
             # An unstamped or unknown realm refuses, and so does a database not on the ledger.
-            await read_database_realm(session)
+            # The script takes no environment setting: the report names the stamp it read.
+            realm = await read_database_realm(session)
             await require_ledger_authority(session)
         policy = build_policy_ports(Scope(args.exchange_account_id))
         async with factory() as session:
             report = await amend_capital_policy(
                 session, store=policy.store, scope_lock=policy.scope_lock, symbol=args.symbol,
                 changes=_changes(args), apply_digest=args.apply_digest,
-                origin=None if args.reason is None else {"reason": args.reason})
+                origin=None if args.reason is None else {"reason": args.reason}, realm=realm)
             if report["status"] == "applied":
                 await session.commit()
             else:

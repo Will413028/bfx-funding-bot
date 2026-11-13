@@ -22,7 +22,6 @@ from pydantic import ConfigDict, ValidationError
 
 from bfx_funding_bot.core.secret_files import read_secret
 from bfx_funding_bot.modules.api.account_scope import ExchangeAccountContext, require_account_member
-from bfx_funding_bot.modules.api.deps import configured_deployment_environment
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.api.schemas import Envelope, ResponseModel, field_paths
 
@@ -100,7 +99,6 @@ class DryRunSymbol(_Forwarded):
 
 class DryRun(_Forwarded):
     account_id: str
-    deployment_environment: str
     symbols: dict[str, DryRunSymbol]
 
 
@@ -108,7 +106,6 @@ class FundingStatus(_Forwarded):
     """``/admin/trading-status`` with the dry run of ``/admin/dry-evaluate`` under ``dry_run``."""
 
     account_id: str
-    deployment_environment: str
     halt: HaltStatus
     symbols: dict[str, CapitalUnavailable | CapitalAvailable]
     configured_cells: list[ConfiguredCell]
@@ -139,12 +136,9 @@ def build_funding_status_router(*,
     @router.get("/funding-status", response_model_exclude_unset=True)
     async def funding_status(
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
-        # Not None here: the account dependency above refused that case.
-        deployment_environment: str | None = Depends(configured_deployment_environment),
     ) -> Envelope[FundingStatus]:
         def require_scope(value: dict[str, Any]) -> None:
-            if (value.get("account_id") != str(context.exchange_account_id)
-                    or value.get("deployment_environment") != deployment_environment):
+            if value.get("account_id") != str(context.exchange_account_id):
                 raise RuntimeError("daemon_scope_mismatch")
 
         try:

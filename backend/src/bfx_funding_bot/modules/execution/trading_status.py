@@ -143,7 +143,7 @@ class TradingStatusService:
         self._ctx = account_ctx
         self._cells = cells
         self._phase = phase
-        # What the daemon's assembly read at start: reported, never read from a row.
+        # What the daemon's assembly read at start: only the halt gauge's label.
         self._deployment_environment = deployment_environment
         self._attempts = attempts
         self._trading_state = trading_state
@@ -159,12 +159,8 @@ class TradingStatusService:
     # ---------------------------------------------------------------- status
 
     def _authority_scope(self) -> dict[str, str | None]:
-        # The account is the one actually supplying capital, not a phase label; the
-        # environment is the one this daemon was assembled with.
-        return {
-            "account_id": str(self._exposure.scope.exchange_account_id),
-            "deployment_environment": self._deployment_environment,
-        }
+        # The account is the one actually supplying capital, not a phase label.
+        return {"account_id": str(self._exposure.scope.exchange_account_id)}
 
     async def snapshot(self) -> dict[str, Any]:
         symbols = {s: await self._capital_status(self._exposure, s)

@@ -214,7 +214,6 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
         *,
         session_factory: async_sessionmaker[AsyncSession],
         account_id: UUID,
-        deployment_environment: str,
         authority: OperatorAuthority,
         scope_lock: ScopeLock,
         client_factory: Callable[[], KeyClient],
@@ -228,9 +227,6 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
                          authority=authority, scope_lock=scope_lock,
                          clock=clock,
                          ownership=ownership, poll_interval_s=poll_interval_s)
-        # Binds the sealed payload (HKDF info): the value the assembly read, the same one
-        # the operator's process sealed with.
-        self._deployment_environment = deployment_environment
         # A client on its own nonce gate per verification: the new key's nonces must not
         # interleave with the key in use, which keeps the daemon's shared gate.
         self.client_factory = client_factory
@@ -355,8 +351,8 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
             return Refused(RECIPIENT_KEY_STALE)
         try:
             opened = open_sealed(row.sealed_credential, private_key=self._recipient[1].private_half,
-                                 context=SealContext(self.account_id, self._deployment_environment,
-                                                     row.recipient_id, row.request_id))
+                                 context=SealContext(self.account_id, row.recipient_id,
+                                                     row.request_id))
         except SealedPayloadError:
             return Refused(SEALED_PAYLOAD_INVALID)
         # Retired credentials are terminal; the active one is no rotation.

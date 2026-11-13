@@ -308,9 +308,8 @@ async def test_the_router_serves_the_ledger_read_model_as_the_web_api_role(
             yield session
 
     app = FastAPI()
-    app.state.deployment_environment = "ci"
     app.include_router(build_uncertainties_router())
-    app.state.read_models = build_read_models("ci")
+    app.state.read_models = build_read_models()
     app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")
     app.dependency_overrides[get_session] = restricted
     base = f"/api/v1/exchange-accounts/{account}/uncertainties"

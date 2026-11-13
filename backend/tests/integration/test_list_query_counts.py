@@ -61,13 +61,12 @@ def _app(book: Book) -> FastAPI:
             yield session
 
     app = FastAPI()
-    app.state.deployment_environment = "ci"
     for router in (
         build_router(), build_api_keys_router(), build_projections_router(),
         build_uncertainties_router(),
     ):
         app.include_router(router)
-    app.state.read_models = build_read_models("ci")
+    app.state.read_models = build_read_models()
     app.dependency_overrides[require_operator] = lambda: Principal(OPERATOR, None, "admin")
     app.dependency_overrides[get_session] = restricted
     return app

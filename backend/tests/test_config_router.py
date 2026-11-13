@@ -57,7 +57,6 @@ async def app_client(sqlite_engine, monkeypatch):
         await seed.commit()
 
     app = FastAPI()
-    app.state.deployment_environment = "ci"
     app.include_router(build_config_router())
 
     async def _fake_operator():

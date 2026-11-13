@@ -182,7 +182,7 @@ def funding_snapshot() -> dict[str, Any]:
     policy = {"enabled": True, "reserve_amount": "100", "allocation_mode": "all_available",
               "max_cell_fraction": "0.70", "max_offer_amount": None, "envelope": None}
     return {
-        "phase": "live", "account_id": str(ACCOUNT), "deployment_environment": "prod",
+        "phase": "live", "account_id": str(ACCOUNT),
         "configured_cells": [{"symbol": "fUST", "cell": "fUST_a30", "strategy": "mean_reversion",
                               "period": "a30"}],
         "process_started_at": "2026-10-01T08:00:00+00:00",
@@ -210,7 +210,7 @@ def funding_snapshot() -> dict[str, Any]:
 def funding_dry_run() -> dict[str, Any]:
     """``/admin/dry-evaluate`` as the daemon serves it."""
     return {
-        "account_id": str(ACCOUNT), "deployment_environment": "prod", "would_submit_any": False,
+        "account_id": str(ACCOUNT), "would_submit_any": False,
         "symbols": {"fUST": {
             "would_submit": False, "blocked_by": "manual_kill",
             "cells": {"fUST_a30": {"would_submit": False, "blocked_by": "manual_kill"}},
@@ -284,7 +284,6 @@ def build_app(funding_reader: Any = None, *, empty: bool = False) -> FastAPI:
         return funding_snapshot() if path == "/admin/trading-status" else funding_dry_run()
 
     app = FastAPI()
-    app.state.deployment_environment = "prod"
     install_response_shape_handler(app)
     app.include_router(build_router())
     app.include_router(build_api_keys_router())

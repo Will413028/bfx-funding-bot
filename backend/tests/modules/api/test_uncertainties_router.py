@@ -206,7 +206,6 @@ async def uncertainty_app(sqlite_engine, monkeypatch):
 
     ledger = _Ledger()
     app = FastAPI()
-    app.state.deployment_environment = "ci"
     app.include_router(build_uncertainties_router())
     app.state.read_models = ReadModels(ledger, ledger, object(), object())  # type: ignore[arg-type]
 
@@ -290,7 +289,7 @@ def test_uncertainty_read_exposes_the_evidence_ports_resolution_context(
         "unavailableReason": None,
     }
     assert data["blockedScope"] == {
-        "exchangeAccountId": str(ACCOUNT_ID), "environment": "ci", "symbol": "fUST"}
+        "exchangeAccountId": str(ACCOUNT_ID), "symbol": "fUST"}
     listed = client.get(f"{_BASE}/uncertainties", params={"state": "open"}).json()["data"]
     assert [row["uncertaintyId"] for row in listed] == [str(UNCERTAINTY_ID)]
     assert listed[0]["resolutionContext"] == data["resolutionContext"]

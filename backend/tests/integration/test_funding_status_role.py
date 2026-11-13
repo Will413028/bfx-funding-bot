@@ -29,19 +29,19 @@ async def test_status_membership_uses_only_existing_restricted_webapi_grants(pg_
         await session.flush()
         session.add(ExchangeAccountMembership(exchange_account_id=account, user_id="fixture", role="owner"))
     calls = []
-    daemon_realm = "ci"
+    daemon_account: str | None = str(account)
     scoped_endpoint = "/admin/trading-status"
     async def reader(path):
         calls.append(path)
-        scope = {"account_id": str(account), "deployment_environment": "ci"}
+        scope = {"account_id": str(account)}
         value = (funding_snapshot() if path == "/admin/trading-status" else funding_dry_run()) | scope
         if path == "/admin/trading-status":
             value["symbols"]["fUST"] = {"capital_available": False, "reason": "policy_unavailable"}
         if path == scoped_endpoint:
-            if daemon_realm is None:
-                value.pop("deployment_environment")
+            if daemon_account is None:
+                value.pop("account_id")
             else:
-                value["deployment_environment"] = daemon_realm
+                value["account_id"] = daemon_account
         return value
     async def restricted_session():
         async with factory() as session:
@@ -50,7 +50,6 @@ async def test_status_membership_uses_only_existing_restricted_webapi_grants(pg_
             assert not await session.scalar(text("SELECT has_table_privilege(current_user,'capital_policy_heads','SELECT')"))
             yield session
     app = FastAPI()
-    app.state.deployment_environment = "ci"
     app.include_router(build_funding_status_router(reader=reader))
     app.dependency_overrides[require_operator] = lambda: Principal("fixture", None, "admin")
     app.dependency_overrides[get_session] = restricted_session
@@ -62,8 +61,8 @@ async def test_status_membership_uses_only_existing_restricted_webapi_grants(pg_
         assert denied.status_code == 404
         assert calls == ["/admin/trading-status", "/admin/dry-evaluate"]
         for scoped_endpoint in ("/admin/trading-status", "/admin/dry-evaluate"):
-            for realm in ("prod", None):
-                daemon_realm = realm
+            for answered in (str(other), None):
+                daemon_account = answered
                 calls.clear()
                 mismatch = await client.get(f"/api/v1/exchange-accounts/{account}/funding-status")
                 assert mismatch.status_code == 503

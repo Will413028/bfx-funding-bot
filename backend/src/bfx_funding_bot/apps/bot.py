@@ -742,7 +742,7 @@ async def build_daemon(
         rotation_http = venue_wiring.auth_http
         credential_rotation = CredentialRotationWorker(
             session_factory=session_factory, account_id=UUID(account_id),
-            deployment_environment=env_str, authority=operator_authorized,
+            authority=operator_authorized,
             scope_lock=capital.scope_lock,
             client_factory=lambda: BitfinexAuthREST(http=rotation_http,
                                                     auth_gate=AuthRequestGate()),

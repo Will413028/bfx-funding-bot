@@ -23,14 +23,11 @@ from bfx_funding_bot.core import authority as authority_module
 from bfx_funding_bot.core.schema_head import SchemaHeadMismatch
 from bfx_funding_bot.modules.api.deps import ReadModels, get_read_models
 from bfx_funding_bot.modules.api.uncertainties import _request_model
-from bfx_funding_bot.modules.execution.archived_execution_history import (
-    ArchivedExecutionHistory,
-)
 from bfx_funding_bot.modules.ledger import Scope
 
 
 def test_build_read_models_are_the_ledgers() -> None:
-    models = build_read_models("ci")
+    models = build_read_models()
     assert type(models.operator_reads).__name__ == "LedgerOperatorReads"
     assert type(models.operator_evidence).__name__ == "LedgerOperatorEvidence"
     # Read only: the policy port has no ``apply_policy`` and no resolution port is held.
@@ -77,14 +74,11 @@ async def test_lifespan_stores_the_authority_and_its_read_models(monkeypatch) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("configured", "stored"), [("ci", "ci"), (None, None), ("staging", None)])
-async def test_lifespan_reads_the_deployment_environment_once(
-        monkeypatch, configured: str | None, stored: str | None) -> None:
-    """Account routes take the value from ``app.state``; an unset or unknown one is stored
-    as None (they answer 503 after the membership check) and does not stop the boot.
-
-    Mutation: drop the assignment in the lifespan and the "ci" case fails.
-    """
+@pytest.mark.parametrize("configured", [None, "staging"])
+async def test_lifespan_boots_without_a_deployment_environment(
+        monkeypatch, configured: str | None) -> None:
+    """The web API needs no BFX_DEPLOYMENT_ENV: unset or unknown, it boots with its read
+    models and keeps no environment on ``app.state`` for a route to depend on."""
     async def authority(_session: object) -> str:
         return "migration b1c2d3e4f5a6 genesis"
 
@@ -99,7 +93,8 @@ async def test_lifespan_reads_the_deployment_environment_once(
     monkeypatch.setattr(webapi, "assert_schema_head", _at_head)
     app = FastAPI()
     async with webapi.lifespan(app):
-        assert app.state.deployment_environment == stored
+        assert type(app.state.read_models.operator_reads).__name__ == "LedgerOperatorReads"
+        assert not hasattr(app.state, "deployment_environment")
 
 
 @pytest.mark.asyncio
@@ -144,22 +139,12 @@ async def test_lifespan_checks_the_schema_head_first(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_archive_read_refuses_without_a_deployment_environment() -> None:
-    """Account routes refuse first (503); a read that still got here raises, never
-    filters the archive by nothing."""
-    history = ArchivedExecutionHistory(None)
-    with pytest.raises(RuntimeError, match="deployment_environment_not_configured"):
-        await history.list_executions(
-            None, Scope(uuid4()), before=None, limit=1, event_type=None)  # type: ignore[arg-type]
-
-
-@pytest.mark.asyncio
 async def test_get_read_models_is_a_503_until_booted() -> None:
     absent = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
     with pytest.raises(HTTPException) as refused:
         await get_read_models(absent)  # type: ignore[arg-type]
     assert (refused.value.status_code, refused.value.detail) == (503, "db_not_configured")
-    models = build_read_models("ci")
+    models = build_read_models()
     booted = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(read_models=models)))
     assert await get_read_models(booted) is models  # type: ignore[arg-type]
     assert isinstance(models, ReadModels)

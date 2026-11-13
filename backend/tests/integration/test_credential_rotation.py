@@ -190,7 +190,7 @@ async def bot(db):
         return user in authorized
 
     worker = CredentialRotationWorker(
-        session_factory=factory, account_id=ACCOUNT, deployment_environment="ci", authority=authority,
+        session_factory=factory, account_id=ACCOUNT, authority=authority,
         client_factory=lambda: client,
         kek_loader=lambda: KEK, restart=lambda: restarts.append(1), clock=lambda: NOW_MS, scope_lock=build_scope_lock())
     worker.bind_run(db.run_id, RUN_STARTED_MS)
@@ -343,7 +343,7 @@ async def test_a_request_sealed_to_a_previous_boot_is_stale(db, operator_env, bo
     _, queued, _ = await rotate()
     # The bot restarted: the new run has its own key pair, the old private key is gone.
     restarted = CredentialRotationWorker(
-        session_factory=bot.factory, account_id=ACCOUNT, deployment_environment="ci",
+        session_factory=bot.factory, account_id=ACCOUNT,
         authority=bot.worker.authority, client_factory=lambda: bot.client,
         kek_loader=lambda: KEK, restart=lambda: None, clock=lambda: NOW_MS, scope_lock=build_scope_lock())
     restarted.bind_run(db.run_id, RUN_STARTED_MS)

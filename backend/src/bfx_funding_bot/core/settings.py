@@ -24,9 +24,9 @@ VALID_DEPLOYMENT_ENVIRONMENTS = frozenset(KNOWN_REALMS)
 def require_deployment_environment(environ: Mapping[str, str] | None = None) -> str:
     """The process's data-isolation environment: explicit and known, or ``ValueError``.
 
-    A missing value must never silently select ``prod``. Each assembly point (the bot's
-    ``load_config``, the web API's lifespan, the operator CLI's and each script's ``main``)
-    calls this once and passes the value down; ``modules`` and the rest of ``core`` never
+    A missing value must never silently select ``prod``. Only the bot needs it: its
+    ``load_config`` calls this once, the boot compares the value with the database's realm
+    stamp, and it labels the bot's telemetry. ``modules`` and the rest of ``core`` never
     read it themselves (tests/architecture/test_env_read_once.py). The only other reader is
     ``deployment_environment_label`` below.
     """

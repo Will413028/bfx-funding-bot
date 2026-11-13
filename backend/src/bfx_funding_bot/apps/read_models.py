@@ -19,14 +19,10 @@ from bfx_funding_bot.modules.ledger.read import (
 )
 
 
-def build_read_models(deployment_environment: str | None) -> ReadModels:
-    """The web API boots only on the ``ledger`` authority (``apps/authority_support.py``).
-
-    ``deployment_environment`` is what the lifespan read (None without a valid value);
-    only the archived event log's read uses it.
-    """
+def build_read_models() -> ReadModels:
+    """The web API boots only on the ``ledger`` authority (``apps/authority_support.py``)."""
     return ReadModels(
         build_operator_reads(), build_operator_evidence(),
-        build_execution_history(ArchivedExecutionHistory(deployment_environment)),
+        build_execution_history(ArchivedExecutionHistory()),
         build_policy_reader,
     )

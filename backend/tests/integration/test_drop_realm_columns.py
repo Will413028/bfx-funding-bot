@@ -280,6 +280,43 @@ def test_a_row_of_another_realm_refuses_the_upgrade(before: tuple[str, Engine]) 
             "AND column_name = 'deployment_environment'")) == 1
 
 
+def test_an_archived_event_of_another_realm_refuses_the_upgrade(
+        before: tuple[str, Engine]) -> None:
+    """The archive read drops its realm filter in this release (D7), so the upgrade refuses
+    an event log holding any realm but the stamp's; the archived rows are only read.
+
+    Mutation: drop ``_refuse_other_realms_in_the_read_archive`` from the upgrade and this fails.
+    """
+    url, engine = before
+    # Planted past the freeze and the realm trigger (replica mode skips both), visibly.
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET LOCAL session_replication_role = replica")
+        conn.execute(text(
+            "INSERT INTO legacy_archive.event_log (account_id, exchange_account_id, "
+            "deployment_environment, event_type, venue_offer_id, cid, payload, occurred_at_ms) "
+            "VALUES ('account', :account, 'prod', 'ORDER_FILL', 'legacy-1', 7, '{}', 1)"),
+            {"account": _A})
+    digests = _archive_digests(engine)
+    with pytest.raises(RuntimeError, match=r"1 rows of legacy_archive\.event_log carry a realm"):
+        alembic(url, "upgrade", _REVISION)
+    assert _version(engine) == _BEFORE and _archive_digests(engine) == digests
+
+
+def test_an_archived_event_of_the_stamped_realm_is_kept(before: tuple[str, Engine]) -> None:
+    url, engine = before
+    with engine.begin() as conn:
+        conn.exec_driver_sql("SET LOCAL session_replication_role = replica")
+        conn.execute(text(
+            "INSERT INTO legacy_archive.event_log (account_id, exchange_account_id, "
+            "deployment_environment, event_type, venue_offer_id, cid, payload, occurred_at_ms) "
+            "VALUES ('account', :account, 'ci', 'ORDER_FILL', 'legacy-1', 7, '{}', 1)"),
+            {"account": _A})
+    digests = _archive_digests(engine)
+    alembic(url, "upgrade", _REVISION)
+    assert _archive_digests(engine) == digests
+    assert digests["legacy_archive.event_log"][0] == 1
+
+
 def test_a_statement_of_the_previous_version_cannot_run(before: tuple[str, Engine]) -> None:
     """The advisory-lock keys lost the environment in this release, so a program of the
     previous version takes a different key and no longer excludes the new one. What keeps

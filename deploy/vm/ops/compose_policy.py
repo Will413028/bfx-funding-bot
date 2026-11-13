@@ -147,8 +147,7 @@ FORBIDDEN_KEYS = ("build", "cap_add", "privileged", "volumes", "tmpfs", "devices
                   "userns_mode", "cgroup", "network_mode", "expose", "extra_hosts", "sysctls")
 WEEKLY_PROJECT = "bfx-weekly-report"
 WEEKLY_SERVICE = "weekly-report"
-WEEKLY_ENV = ("DATABASE_URL", "BFX_EXCHANGE_ACCOUNT_ID", "BFX_DEPLOYMENT_ENV",
-              "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION")
+WEEKLY_ENV = ("DATABASE_URL", "BFX_EXCHANGE_ACCOUNT_ID", "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION")
 WEEKLY_TMPFS = ["/tmp:rw,noexec,nosuid,size=64m"]
 WEEKLY_REPORTS = {"type": "bind", "source": "/home/ubuntu/bfx/reports", "target": "/reports"}
 PUBLIC_SITE_PROJECT = "bfx-public-site"
@@ -168,7 +167,6 @@ OPERATOR_ENTRYPOINT = ["/app/.venv/bin/python", "-m", "bfx_funding_bot.apps.oper
 # environment key -> the variable the wrapper must supply (a `${VAR:?...}` reference)
 OPERATOR_INTERPOLATED = {
     "BFX_OPERATOR_TAILNET_IDENTITY": "BFX_OPERATOR_TAILNET_IDENTITY",
-    "BFX_DEPLOYMENT_ENV": "BFX_DEPLOYMENT_ENV",
     "BFX_IMAGE_DIGEST": "BFX_BACKEND_DIGEST",
     "BFX_SOURCE_REVISION": "BFX_SOURCE_REVISION",
 }

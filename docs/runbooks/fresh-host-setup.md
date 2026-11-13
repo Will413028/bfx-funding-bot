@@ -97,11 +97,13 @@ bot 開機時拒絕 `BFX_DEPLOYMENT_ENV` 與這一列不同、或這一列不存
 資料表沒有逐列的 realm 欄位，也沒有寫入時比對 realm 的 trigger（migration `545b2877e9bd` 拿掉）：
 拿 stamp 與設定比對的只有 bot 開機（simulated venue 開啟 store 時另外要求 stamp 是 `ci`）；
 還原 drill 的開機檢查與 `scripts/amend_capital_policy.py` 只要求 stamp 存在且是已知的值，不比對；
-webapi、operator CLI 與每週腳本不讀 stamp。
+webapi、operator CLI 與每週腳本不讀 stamp，也不需要 `BFX_DEPLOYMENT_ENV`（webapi 有設的話只當 Sentry 的標籤）：
+它們連到哪個資料庫只由各自的 `DATABASE_URL` 決定。`scripts/amend_capital_policy.py` 的 dry-run 報告會印出讀到的 stamp（`realm`），
+套用前看一眼是不是預期的資料庫。
 
 - 已有資料的資料庫（例如 prod）：章在 `a7c3e9f1b2d4` 當時已由 migration 從現有資料推導並蓋上，不用手動做。
 - 空的資料庫（新主機）：migration 後是未蓋章，bot 拒絕開機，但 webapi 已經起來、會接受請求寫入；
-  蓋章前不要從營運 UI 或 operator CLI 送請求。owner 蓋章一次，值要等於 `BFX_DEPLOYMENT_ENV`：
+  蓋章前不要從營運 UI 或 operator CLI 送請求。owner 蓋章一次，值要等於 bot 的 `BFX_DEPLOYMENT_ENV`（`deploy/vm/live.env`）：
 
 ```sql
 -- <realm> 是 prod（新主機）
@@ -200,7 +202,7 @@ printf "SET log_statement='none'; SET log_min_error_statement='panic'; CREATE RO
 |---|---|---|
 | `secrets/bot/DATABASE_URL` | `bfx_bot` | bot 的其他秘密檔（`BFX_ADMIN_TOKEN`、`BFX_ADMIN_READ_TOKEN`、`BFX_VAULT_KEK`、`TELEGRAM_BOT_TOKEN`）同目錄；非秘密設定在 `bot.env`（範本 `deploy/vm/bot.env.example`） |
 | `secrets/webapi/DATABASE_URL` | `bfx_webapi` | 同目錄還有 `BFX_ADMIN_READ_TOKEN`（與 bot 的同值，`openssl rand -hex 32`）。`webapi.env` 放開機必填的入口設定（缺任一個 webapi 拒絕開機）：`BFX_OPERATOR_TAILNET_USER_ID`（operator 的 tailnet user id，`tailscale whois --json <operator 裝置的 tailnet IP>` 的 `UserProfile.ID`；也是 operator membership 的 `user_id`）、`BFX_WEBAPI_ALLOWED_HOSTS=<ops-host>`、`BFX_FE_SENTRY_DSN`（與 repository variable `NEXT_PUBLIC_SENTRY_DSN` 同值）。webapi **不可**有 `BFX_ADMIN_TOKEN` 或 `BFX_VAULT_KEK`（env 的 key 或秘密檔都不行），看到任一個（即使值是空的）就拒絕開機（halt token 與 KEK 只給 bot） |
-| `operator.env` | `bfx_operator` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`（照抄 `bot.env`）；誰在操作不寫這裡：`bfx-op` 每次以 `tailscale whois` 取得呼叫者的 tailnet user id 當 `requested_by`，CLI 只接受該帳戶的 member；`BFX_DEPLOYMENT_ENV` 不寫這裡，由 `bfx-op` 從部署中版本的 `live.env` 傳入；compose 檔 `deploy/vm/ops/docker-compose.operator.yml`，只由 `sudo bfx-op` 啟動（[operations §10](operations.md#10-operator-clibfx-op)）。不在 bfx-deploy 的部署前檢查裡：`bfx-op` 每次呼叫時檢查 root 0600 |
+| `operator.env` | `bfx_operator` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`（照抄 `bot.env`）；誰在操作不寫這裡：`bfx-op` 每次以 `tailscale whois` 取得呼叫者的 tailnet user id 當 `requested_by`，CLI 只接受該帳戶的 member；CLI 不讀 `BFX_DEPLOYMENT_ENV`；compose 檔 `deploy/vm/ops/docker-compose.operator.yml`，只由 `sudo bfx-op` 啟動（[operations §10](operations.md#10-operator-clibfx-op)）。不在 bfx-deploy 的部署前檢查裡：`bfx-op` 每次呼叫時檢查 root 0600 |
 | `research.env` | `bfx_research` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`（照抄 `bot.env`），只有這兩個 key。每週報告的 runner（`bfx_weekly_report.py`）每次執行時檢查 root 0600，不存在就拒跑、不會退回 `bot.env`；研究用一次性容器也讀它（[research-one-shot-jobs](research-one-shot-jobs.md)） |
 | `migrate.env` | `<owner>` | 只有 bfx-deploy 的 migration 與 operator one-shot 使用 |
 

@@ -13,7 +13,9 @@ In order, all in the revision's transaction:
    upgrade; any row in an unstamped database refuses with its own message. Tables come from
    ``pg_catalog`` and the probe is one statement, so the answer is from one snapshot. This is
    also why every narrowed key below can be rebuilt: two rows differing only by realm cannot
-   exist.
+   exist. The same is asserted of ``legacy_archive.event_log``, read only: it is the one
+   archive table the application reads (``modules/execution/archived_execution_history.py``),
+   and from this release that read no longer filters on the realm (plan step 4e-2, D7).
 2. Record a digest of every archive table (``legacy_archive``, ``release_archive``).
 3. Drop ``database_realm_write`` on the 31 live tables and the 12 ``legacy_archive`` tables
    (only the trigger; ``archive_frozen`` and the archived rows are untouched, the archive keeps
@@ -508,6 +510,18 @@ def _digest(qualified: str) -> str:
             f"'hex') AS h FROM {qualified} t) r")
 
 
+def _refuse_other_realms_in_the_read_archive() -> None:
+    """The web API's archive read stops filtering on the realm, so no other may be there."""
+    foreign = op.get_bind().execute(text(
+        "SELECT count(*) FROM legacy_archive.event_log WHERE deployment_environment "
+        "IS DISTINCT FROM (SELECT realm FROM public.database_realm)")).scalar() or 0
+    if foreign:
+        raise RuntimeError(
+            f"refuse: {foreign} rows of legacy_archive.event_log carry a realm other than the "
+            "database_realm stamp (or the database is not stamped); the archive read no longer "
+            "filters on it")
+
+
 def _archive_digests() -> dict[str, tuple[int, str]]:
     bind = op.get_bind()
     tables = bind.execute(text(_ARCHIVE_TABLES), {"archives": list(ARCHIVE_SCHEMAS)}).scalars()
@@ -567,6 +581,7 @@ def _assert_end_state(before: dict[str, tuple[int, str]]) -> None:
 
 def upgrade() -> None:
     _refuse_other_realms()
+    _refuse_other_realms_in_the_read_archive()
     before = _archive_digests()
 
     for table in LIVE_TABLES:

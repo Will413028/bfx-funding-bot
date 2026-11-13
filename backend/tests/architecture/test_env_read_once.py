@@ -17,5 +17,6 @@ READ = re.compile(r"BFX_DEPLOYMENT_ENV|require_deployment_environment|deployment
 def test_modules_and_core_do_not_read_the_deployment_environment() -> None:
     readers = sorted(str(path.relative_to(SRC)) for path in SRC.rglob("*.py")
                      if READ.search(path.read_text()))
-    assert readers == ["apps/bot.py", "apps/config.py", "apps/operator_cli.py",
-                       "apps/webapi.py", "core/settings.py"]
+    # The bot compares it with the database's stamp; the bot and the web API label their
+    # telemetry with it. The operator CLI reads none.
+    assert readers == ["apps/bot.py", "apps/config.py", "apps/webapi.py", "core/settings.py"]

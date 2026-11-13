@@ -10,7 +10,6 @@ from decimal import Decimal
 import pytest
 
 from bfx_funding_bot.modules.simulated_venue import (
-    SIMULATED_REALM,
     ConcurrentAppendError,
     FaultKind,
     FaultPlan,
@@ -46,13 +45,12 @@ D = Decimal
 
 # -- realm and epoch guards -------------------------------------------------
 
-def test_realm_prod_and_unknown_realms_are_refused_at_construction() -> None:
-    assert SimAccount("a", SIMULATED_REALM).deployment_environment == "ci"
-    for realm in ("prod", "PROD", "shadow", "paper", ""):
-        with pytest.raises(RealmRefusedError):
-            SimAccount("a", realm)
+def test_an_account_without_an_id_is_refused_at_construction() -> None:
+    # The realm is refused elsewhere: by the configuration (require_simulated_realm) and by
+    # the store against the database's stamp (test_sim_venue_sql_store.py).
+    assert SimAccount("a").exchange_account_id == "a"
     with pytest.raises(ValueError):
-        SimAccount("", "ci")
+        SimAccount("")
 
 
 @pytest.mark.parametrize("epoch", ["legacy", "", "Ledger", "unknown"])
@@ -181,7 +179,7 @@ async def test_a_second_writer_on_the_same_scope_fails_instead_of_overwriting() 
 
 async def test_memory_store_enforces_expected_seq_and_isolates_scopes() -> None:
     store = InMemoryVenueEventStore()
-    a, b = SimAccount("a", "ci"), SimAccount("b", "ci")
+    a, b = SimAccount("a"), SimAccount("b")
     from bfx_funding_bot.modules.simulated_venue.events import WalletFunded
     event = WalletFunded("UST", D("1"), T0)
     await store.append(a, 0, [event])
@@ -191,7 +189,7 @@ async def test_memory_store_enforces_expected_seq_and_isolates_scopes() -> None:
         await store.append(a, 2, [event])
     await store.append(b, 0, [event, event])
     assert len(await store.load(a)) == 1 and len(await store.load(b)) == 2
-    assert await store.load(SimAccount("zzz", "ci")) == ()
+    assert await store.load(SimAccount("zzz")) == ()
 
 
 # -- clock ---------------------------------------------------------------------

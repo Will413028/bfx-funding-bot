@@ -84,6 +84,7 @@ async def amend_capital_policy(
     session: AsyncSession, *, store: PolicyStore, scope_lock: ScopeLock,
     symbol: str, changes: PolicyChanges, apply_digest: str | None,
     origin: Mapping[str, str] | None = None, operator_request_id: UUID | None = None,
+    realm: str | None = None,
 ) -> dict[str, Any]:
     """Return the dry-run report, or apply exactly that report. The caller commits.
 
@@ -92,6 +93,10 @@ async def amend_capital_policy(
     why). A revision that applies an operator request names it in its typed
     ``operator_request_id``; who asked and why are the request's own columns,
     reached through that foreign key, and are never copied into ``source``.
+
+    ``realm`` is the database's stamp as the owner's script read it: shown in the report
+    and covered by its digest, so a digest confirmed against one database does not apply
+    on another. Callers inside the bot, already bound to their database at boot, pass none.
     """
     if operator_request_id is not None and origin:
         raise ValueError("a revision applying an operator request records no origin of its own")
@@ -109,6 +114,8 @@ async def amend_capital_policy(
         "new_policy": policy_payload(amended),
         "new_schema_version": policy_schema_version(amended), "resumed": False,
     }
+    if realm is not None:
+        report["realm"] = realm
     if amended == applied.policy:
         report["status"] = "unchanged"
         return report

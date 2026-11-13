@@ -298,7 +298,6 @@ def build_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, obj
         "BFX_EXCHANGE_ACCOUNT_ID=00000000-0000-4000-8000-000000000001\n")
     state = tmp_path / "state"
     (state / "releases" / rev).mkdir(parents=True)
-    shutil.copy(ROOT / "deploy/vm/live.env", state / "releases" / rev / "live.env")
     row = weekly.bfx_deploy.LedgerRow(id=1, attempt_id="a", source_revision=rev, backend_digest=digest,
                                       outcome="deployed", migrations_applied=False)
 
@@ -321,7 +320,7 @@ def build_host(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, obj
 
 def _build_args(host: dict[str, object]) -> object:
     return site.argparse.Namespace(
-        runtime_dir=host["runtime"], state_dir=host["state"],
+        runtime_dir=host["runtime"],
         backend_repository="ghcr.io/will413028/bfx-funding-bot-backend",
         postgres_container="bfx-postgres", db_user="bfx", db_name="bfx")
 
@@ -342,7 +341,7 @@ def test_build_runs_the_deployed_digest_with_the_weekly_jobs_env(
     assert build_host["build_dir"].is_dir()
     # Exactly the weekly job's keys: nothing of the unit's own environment rides along.
     assert set(env) == set(weekly.bfx_deploy._base_env()) | {
-        *weekly.SECRET_KEYS, *weekly.LIVE_KEYS, "BFX_BACKEND_IMAGE", "BFX_BACKEND_DIGEST",
+        *weekly.SECRET_KEYS, "BFX_BACKEND_IMAGE", "BFX_BACKEND_DIGEST",
         "BFX_SOURCE_REVISION"}
     runtime = build_host["runtime"]
     assert build_host["checked"][:2] == [runtime / "public-site.env", runtime / site.TOKEN_FILE]
