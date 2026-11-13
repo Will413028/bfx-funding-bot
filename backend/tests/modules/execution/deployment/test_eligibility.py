@@ -276,10 +276,12 @@ async def test_optimizer_live_typed_missing_model_evidence_is_blocked_and_audite
     """The optimizer-live gate must not convert a model outage into a signal fallback."""
     candidate = make_candidate()
     audit = _Audit()
+    events = _ExecutionEvents()
     gate = ExecutionGate(
         policy=ExecutionPolicy.OPTIMIZER_LIVE,
         audit=audit,
         readiness=_Readiness(),
+        events=events,
     )
 
     result = await gate.prepare(
@@ -296,6 +298,11 @@ async def test_optimizer_live_typed_missing_model_evidence_is_blocked_and_audite
     assert isinstance(result, BlockedExecution)
     assert result.reason is BlockReason.FILL_MODEL_MISSING
     assert audit.last.reason_code is BlockReason.FILL_MODEL_MISSING
+    assert [name for name, _ in events.events] == [
+        "funding.execution.eligibility",
+        "funding.execution.blocked",
+        "funding.fill_model.unavailable",
+    ]
 
 
 @pytest.mark.parametrize(

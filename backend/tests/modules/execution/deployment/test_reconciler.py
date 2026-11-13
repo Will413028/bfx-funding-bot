@@ -742,6 +742,31 @@ async def test_optimizer_live_structural_evidence_is_blocked_without_submit() ->
     assert audit.last.failed_dependency == "optimizer"
 
 
+async def test_optimizer_live_missing_fill_model_blocks_with_its_own_reason() -> None:
+    """An unavailable fill model keeps its typed reason; it is not relabelled as an
+    optimizer failure. Mutation: make the reconciler's ``elif not isinstance(fill_evidence,
+    FillModelUnavailable)`` a plain ``else``."""
+    audit = _Audit()
+    rec, executor, _safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(_ask_snapshot()),
+        audit=audit,
+        gate_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        execution_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        fill_model_provider=_FillModelProvider(FillModelUnavailable("missing")),
+        optimizer_fee_rate=D("0.15"),
+        optimizer_horizon_h=1,
+    )
+
+    await rec.deploy()
+
+    assert executor.submitted == []
+    assert audit.last.outcome is ExecutionDecisionOutcome.BLOCKED
+    assert audit.last.reason_code is BlockReason.FILL_MODEL_MISSING
+    assert audit.last.failed_dependency == "fill_model"
+
+
 async def test_optimizer_reconciler_passes_exact_period_taker_candidate() -> None:
     """TAKER is a real exact-period candidate and is never relabeled as maker."""
     audit = _Audit()
