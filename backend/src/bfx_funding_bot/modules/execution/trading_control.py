@@ -29,12 +29,14 @@ from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.execution.capital_tables import CapitalPolicyRequestRow
+from bfx_funding_bot.modules.execution.operator_request_worker import (
+    OperatorRequestWorker,
+    Outcome,
+)
 from bfx_funding_bot.modules.execution.operator_requests import (
     APPLIED,
     REJECTED,
     REQUESTED,
-    OperatorRequestWorker,
-    Outcome,
     RequestRejected,
 )
 from bfx_funding_bot.modules.execution.safety.tables import (
@@ -48,6 +50,8 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     HALTED,
     IllegalTradingTransition,
     TransitionResult,
+)
+from bfx_funding_bot.modules.execution.safety.trading_state_store import (
     announce,
     append_transition,
     read_current,
@@ -123,8 +127,7 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
         """
         assert self.kill_switch is not None
         async with self.session_factory() as session:
-            current = await read_current(session, account_id=self.account_id,
-                                         environment=self.environment)
+            current = await read_current(session, account_id=self.account_id)
             # Fast path only: an ACTIVE account also fails the resume check below.
             if current is None or current.state != HALTED:
                 return None
@@ -137,8 +140,7 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
             if kill is None or kill.processed_at_ms is None:
                 return None
             states = select(TradingStateRow.id).where(
-                TradingStateRow.exchange_account_id == self.account_id,
-                TradingStateRow.deployment_environment == self.environment)
+                TradingStateRow.exchange_account_id == self.account_id)
             # Ordered by id, not time: a resume may share the kill's millisecond.
             halted_id = await session.scalar(states.where(
                 TradingStateRow.operator_request_id == kill.request_id))
@@ -157,7 +159,6 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
                 FundingCancelAllAuditRow.currency, FundingCancelAllAuditRow.phase,
             ).where(
                 FundingCancelAllAuditRow.exchange_account_id == self.account_id,
-                FundingCancelAllAuditRow.deployment_environment == self.environment,
                 FundingCancelAllAuditRow.occurred_at_ms >= kill.processed_at_ms,
             ).order_by(FundingCancelAllAuditRow.id))).tuples().all()
         last: dict[str, str] = dict(audit)  # each currency's latest phase
@@ -201,7 +202,7 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
         now = self.clock()
         if row.action == "kill":
             result = await append_transition(
-                session, account_id=self.account_id, environment=self.environment, state=HALTED,
+                session, account_id=self.account_id, state=HALTED,
                 cause=CAUSE_OPERATOR, actor=row.requested_by, reason=f"kill: {row.reason}",
                 now_ms=now, operator_request_id=row.request_id)
             # Whatever else was waiting was asked before the stop; none of it
@@ -209,7 +210,6 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
             superseded = (await session.execute(
                 update(TradingControlRequestRow).where(
                     TradingControlRequestRow.exchange_account_id == self.account_id,
-                    TradingControlRequestRow.deployment_environment == self.environment,
                     TradingControlRequestRow.state == REQUESTED,
                     TradingControlRequestRow.request_id != row.request_id,
                 ).values(state=REJECTED, processed_at_ms=now, outcome_reason="superseded_by_kill")
@@ -220,7 +220,6 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
             superseded = [*superseded, *(await session.execute(
                 update(CapitalPolicyRequestRow).where(
                     CapitalPolicyRequestRow.exchange_account_id == self.account_id,
-                    CapitalPolicyRequestRow.deployment_environment == self.environment,
                     CapitalPolicyRequestRow.state == REQUESTED,
                     CapitalPolicyRequestRow.action == "enable",
                 ).values(state=REJECTED, processed_at_ms=now, outcome_reason="superseded_by_kill")
@@ -229,12 +228,11 @@ class TradingControlWorker(OperatorRequestWorker[TradingControlRequestRow, None]
                 log.warning("trading_control_superseded_by_kill kill=%s superseded=%s",
                             row.request_id, [str(r) for r in superseded])
             return result, "HALTED; venue cancel-all follows (funding_cancel_all_audit)"
-        current = await read_current(session, account_id=self.account_id,
-                                     environment=self.environment)
+        current = await read_current(session, account_id=self.account_id)
         if current is not None and current.state == ACTIVE:
             raise RequestRejected("already_active")
         result = await append_transition(
-            session, account_id=self.account_id, environment=self.environment, state=ACTIVE,
+            session, account_id=self.account_id, state=ACTIVE,
             cause=CAUSE_OPERATOR, actor=row.requested_by, reason=f"resumed: {row.reason}",
             now_ms=now, operator_request_id=row.request_id)
         return result, "resumed"

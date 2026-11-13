@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import event, text
@@ -46,11 +47,11 @@ from bfx_funding_bot.modules.ledger import (
 )
 from bfx_funding_bot.modules.ledger._internal import capital_reader
 from bfx_funding_bot.modules.ledger._internal.clock import holds_scope_lock, lock_scope
+from bfx_funding_bot.modules.ledger.read import build_operator_reads
 from bfx_funding_bot.modules.ledger.wiring import (
     build_capital_authority,
     build_ledger_journal,
     build_managed_offer_reader,
-    build_operator_reads,
     build_scope_lock,
     build_uncertainty_reader,
 )
@@ -64,7 +65,7 @@ from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture re-expor
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 NOW = 100
 MAX_AGE = 1000
-CAPITAL = CapitalScope(SCOPE.exchange_account_id, SCOPE.deployment_environment, "fUST", "a30")
+CAPITAL = CapitalScope(SCOPE.exchange_account_id, "fUST", "a30")
 RR = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"
 WAIT_S = 0.5
 
@@ -129,7 +130,7 @@ async def test_locked_read_refuses_a_repeatable_read_session_even_under_the_lock
 
 async def test_the_lock_of_another_scope_does_not_count(book) -> None:
     await _ready(book)
-    other = type(SCOPE)(book.scope.exchange_account_id, "other-env")
+    other = type(SCOPE)(uuid4())
     async with book.factory.begin() as session:
         await lock_scope(session, other)
         assert not await holds_scope_lock(session, SCOPE)

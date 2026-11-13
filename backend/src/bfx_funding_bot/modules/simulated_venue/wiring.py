@@ -12,18 +12,18 @@ from bfx_funding_bot.modules.simulated_venue.contracts import (
     SimAccount,
     SimulatedVenueConfig,
     VenueEventStore,
-    VenueObserver,
 )
 
 
 async def build_simulated_venue(
     *, account: SimAccount, config: SimulatedVenueConfig, store: VenueEventStore,
     feed: MarketFeed, clock_ms: Callable[[], int],
-    faults: FaultPlan | None = None, observer: VenueObserver | None = None,
+    faults: FaultPlan | None = None,
 ) -> SimulatedVenue:
     """Open the venue over its store, refusing any database that is not on `ledger`.
 
-    `account` already refuses realm `prod`. The authority epoch is reported by the store,
+    The realm is refused elsewhere: by the configuration (`require_simulated_realm`) and by
+    `SqlVenueEventStore` against the database's stamp. The authority epoch is reported by the store,
     which reads it on its own connection to the database it writes to; the caller has no
     way to pass one in. Faults are off unless a plan is given.
     """
@@ -35,5 +35,5 @@ async def build_simulated_venue(
         )
     return await SimulatedVenue.open(
         account=account, config=config, store=store, feed=feed, clock_ms=clock_ms,
-        faults=faults, observer=observer,
+        faults=faults,
     )

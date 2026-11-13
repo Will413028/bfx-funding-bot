@@ -58,6 +58,7 @@ from bfx_funding_bot.modules.ledger import (
     UncertaintyView,
     observation_evidence_ref,
 )
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 
 ACCOUNT_ID = UUID("550e8400-e29b-41d4-a716-446655440000")
 OTHER_ACCOUNT_ID = UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
@@ -175,14 +176,14 @@ class _Authority:
 
 def _worker(factory, ledger: _Ledger, *, account: UUID = ACCOUNT_ID,
             authority: _Authority | None = None):
-    from bfx_funding_bot.modules.execution.uncertainty_requests import (
-        ResolutionScope,
+    from bfx_funding_bot.modules.execution.uncertainty_requests import ResolutionScope
+    from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
         UncertaintyResolutionWorker,
     )
 
     return UncertaintyResolutionWorker(
-        session_factory=factory, scope=ResolutionScope(account, "ci"),
-        authority=authority or _Authority(), clock=lambda: 5_000, resolution=ledger)
+        session_factory=factory, scope=ResolutionScope(account),
+        authority=authority or _Authority(), clock=lambda: 5_000, resolution=ledger, scope_lock=build_scope_lock())
 
 
 def _apply_queued(app, *, authority: _Authority | None = None) -> bool:
@@ -193,7 +194,6 @@ def _apply_queued(app, *, authority: _Authority | None = None) -> bool:
 
 @pytest_asyncio.fixture
 async def uncertainty_app(sqlite_engine, monkeypatch):
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     async with sqlite_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
@@ -207,7 +207,7 @@ async def uncertainty_app(sqlite_engine, monkeypatch):
     ledger = _Ledger()
     app = FastAPI()
     app.include_router(build_uncertainties_router())
-    app.state.read_models = ReadModels(ledger, ledger, ledger, object(), object())  # type: ignore[arg-type]
+    app.state.read_models = ReadModels(ledger, ledger, object(), object())  # type: ignore[arg-type]
 
     async def _operator() -> Principal:
         return Principal(user_id="operator-1", email="operator@example.com", role="admin")
@@ -230,7 +230,7 @@ _BASE = f"/api/v1/exchange-accounts/{ACCOUNT_ID}"
 
 
 _OPERATOR = OperatorContext(exchange_account_id=ACCOUNT_ID, user_id="operator-1", role="owner",
-                            lifecycle_status="active", deployment_environment="ci")
+                            lifecycle_status="active")
 
 
 def _mark_not_accepted(app, evidence_ref: str, *, reason: str = "zero candidates") -> str:
@@ -289,7 +289,7 @@ def test_uncertainty_read_exposes_the_evidence_ports_resolution_context(
         "unavailableReason": None,
     }
     assert data["blockedScope"] == {
-        "exchangeAccountId": str(ACCOUNT_ID), "environment": "ci", "symbol": "fUST"}
+        "exchangeAccountId": str(ACCOUNT_ID), "symbol": "fUST"}
     listed = client.get(f"{_BASE}/uncertainties", params={"state": "open"}).json()["data"]
     assert [row["uncertaintyId"] for row in listed] == [str(UNCERTAINTY_ID)]
     assert listed[0]["resolutionContext"] == data["resolutionContext"]
@@ -476,7 +476,7 @@ async def _queue_directly(factory, *, uncertainty_id: UUID, created_at_ms: int) 
     request_id = uuid4()
     async with factory.begin() as session:
         await session.execute(insert(UncertaintyResolutionRequestRow).values(
-            request_id=request_id, exchange_account_id=ACCOUNT_ID, deployment_environment="ci",
+            request_id=request_id, exchange_account_id=ACCOUNT_ID,
             uncertainty_id=uncertainty_id, action="mark_not_accepted", observation_id=uuid4(),
             requested_by="operator-1", created_at_ms=created_at_ms,
         ))
@@ -485,8 +485,9 @@ async def _queue_directly(factory, *, uncertainty_id: UUID, created_at_ms: int) 
 
 def _unrecordable(monkeypatch, request_id: str) -> None:
     """The worker's apply of ``request_id`` yields an outcome its row cannot hold."""
-    from bfx_funding_bot.modules.execution.operator_requests import APPLIED, Outcome
-    from bfx_funding_bot.modules.execution.uncertainty_requests import (
+    from bfx_funding_bot.modules.execution.operator_request_worker import Outcome
+    from bfx_funding_bot.modules.execution.operator_requests import APPLIED
+    from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
         UncertaintyResolutionWorker,
     )
 
@@ -523,7 +524,7 @@ def test_a_request_whose_outcome_cannot_be_written_does_not_block_the_queue(
 
 def test_worker_skips_a_request_it_cannot_even_mark_failed(uncertainty_app, monkeypatch) -> None:
     """If the fallback write also fails, the worker moves on rather than spin."""
-    from bfx_funding_bot.modules.execution.uncertainty_requests import (
+    from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
         UncertaintyResolutionWorker,
     )
 
@@ -587,7 +588,7 @@ def test_authorized_operator_request_is_applied_after_the_authority_check(
 def test_shared_operator_authority_refuses_an_empty_user_before_asking_the_database() -> None:
     from unittest.mock import AsyncMock
 
-    from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
+    from bfx_funding_bot.modules.execution.operator_request_worker import operator_authorized
 
     session = AsyncMock()
     assert asyncio.run(operator_authorized(session, account_id=ACCOUNT_ID, user="")) is False
@@ -601,7 +602,7 @@ def test_shared_operator_authority_ignores_the_configured_operator(
     """Membership is the only authority (9d-1): the configured id and role no longer gate."""
     from unittest.mock import AsyncMock
 
-    from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
+    from bfx_funding_bot.modules.execution.operator_request_worker import operator_authorized
 
     monkeypatch.delenv("BFX_PHASE", raising=False)
     monkeypatch.setenv("BFX_OPERATOR_USER_ID", configured)
@@ -615,7 +616,7 @@ def test_shared_operator_authority_ignores_the_configured_operator(
 def test_shared_operator_authority_defers_to_the_database_verdict(monkeypatch) -> None:
     from unittest.mock import AsyncMock
 
-    from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
+    from bfx_funding_bot.modules.execution.operator_request_worker import operator_authorized
 
     monkeypatch.delenv("BFX_PHASE", raising=False)
     monkeypatch.setenv("BFX_OPERATOR_USER_ID", "operator-1")

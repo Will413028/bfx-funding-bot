@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from hashlib import sha256
@@ -19,10 +20,12 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
-from bfx_funding_bot.core.telemetry import Phase
+from bfx_funding_bot.external.bitfinex.credentials import HasCredentials
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
+from bfx_funding_bot.external.bitfinex.order_port import OfferRequest
 from bfx_funding_bot.external.bitfinex.submit_outcomes import (
+    SubmitOutcome,
     SubmitOutcomeKind,
     SubmitOutcomeUnknown,
     SubmitRejected,
@@ -37,12 +40,10 @@ from bfx_funding_bot.modules.execution.contracts import (
     ExecutionPolicy,
     GuardResult,
     ReadyToSubmit,
-    ReservationRef,
 )
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
-    SubmittedOrder,
 )
 from bfx_funding_bot.modules.ledger import (
     Coverage,
@@ -52,7 +53,7 @@ from bfx_funding_bot.modules.ledger import (
     UnknownTerms,
     match_unknown,
 )
-from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from tests.modules.execution.fake_boundary import (  # noqa: F401  (fixture)
     AttemptAuthorized,
     OutcomeRecorded,
@@ -124,9 +125,9 @@ class FaultEvidence:
     retry_count: int
     normalized_payload_hash: str | None
     unknown_exposure_usdt: Decimal | None
-    unknown_scope: tuple[UUID, str, str] | None
+    unknown_scope: tuple[UUID, str] | None
     adjacent_scope_allowed: bool
-    uncertainty_reader_calls: tuple[tuple[UUID, str, str], ...]
+    uncertainty_reader_calls: tuple[tuple[UUID, str], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +139,7 @@ class MultipleCandidateEvidence:
     candidate_ids: tuple[str, ...]
     unknown_exposure_usdt: Decimal
     candidate_exposure_usdt: Decimal
-    unknown_scope: tuple[UUID, str, str]
+    unknown_scope: tuple[UUID, str]
 
 
 class FakeBitfinexTransport(httpx.AsyncBaseTransport):
@@ -177,18 +178,13 @@ class FakeBitfinexTransport(httpx.AsyncBaseTransport):
         raise AssertionError(f"unsupported transport mode: {self._scenario.response_mode}")
 
 
-class _EventSink:
-    async def emit(self, event: dict[str, Any]) -> None:
-        del event
-
-
-def _recording(open_scopes: set[tuple[UUID, str, str]], environment: str) -> Recording:
+def _recording(open_scopes: set[tuple[UUID, str]]) -> Recording:
     """A boundary whose committed UNKNOWN opens the symbol's uncertainty scope."""
     def opened(record: Record) -> None:
         if isinstance(record, OutcomeRecorded) and record.outcome.kind == "unknown":
-            open_scopes.add((record.scope.exchange_account_id, environment, record.attempt.symbol))
+            open_scopes.add((record.scope.exchange_account_id, record.attempt.symbol))
 
-    return Recording(environment=environment, account_id=_ACCOUNT_ID, on_record=opened)
+    return Recording(account_id=_ACCOUNT_ID, on_record=opened)
 
 
 def _authorized(recording: Recording) -> list[AttemptAuthorized]:
@@ -203,12 +199,12 @@ def _unknowns(recording: Recording) -> list[OutcomeRecorded]:
 
 
 class _UncertaintyReader:
-    def __init__(self, open_scopes: set[tuple[UUID, str, str]]) -> None:
+    def __init__(self, open_scopes: set[tuple[UUID, str]]) -> None:
         self._open_scopes = open_scopes
-        self.calls: list[tuple[UUID, str, str]] = []
+        self.calls: list[tuple[UUID, str]] = []
 
     async def has_open(self, session: object, scope: Scope, symbol: str) -> bool:
-        key = (scope.exchange_account_id, scope.deployment_environment, symbol)
+        key = (scope.exchange_account_id, symbol)
         self.calls.append(key)
         return key in self._open_scopes
 
@@ -219,12 +215,11 @@ class _UncertaintyReader:
 class _SafetyEvaluator:
     """The chain's UncertaintyGuard: an open scope for this account and symbol refuses."""
 
-    def __init__(self, reader: _UncertaintyReader, environment: str) -> None:
+    def __init__(self, reader: _UncertaintyReader) -> None:
         self._reader = reader
-        self._environment = environment
 
     async def evaluate(self, decision: DecisionPayload, context: AccountContext) -> GuardResult:
-        scope = Scope(UUID(context.account_id), self._environment)
+        scope = Scope(UUID(context.account_id))
         if await self._reader.has_open(None, scope, decision.symbol):
             return GuardResult(False, "uncertainty", reason="open execution uncertainty")
         return GuardResult(allowed=True, guard_name="fault_matrix")
@@ -243,18 +238,14 @@ class _TypedOutcomeExecutor:
 
     async def submit(
         self,
-        ready: ReadyToSubmit,
-        context: AccountContext,
+        offer: OfferRequest,
+        account: HasCredentials,
         *,
-        reservation_ref: ReservationRef,
-    ) -> SubmittedOrder:
-        del ready, context
+        pre_send: Callable[[], bool] | None = None,
+    ) -> SubmitOutcome:
+        del offer, account, pre_send
         self.calls += 1
-        return SubmittedOrder(
-            venue_offer_id=None,
-            outcome=self.outcome,
-            reservation_ref=reservation_ref,
-        )
+        return self.outcome
 
 
 def _ready(*, decision_id: str, symbol: str = "fUST") -> ReadyToSubmit:
@@ -333,27 +324,21 @@ def _complete_evidence(terms: UnknownTerms, offers: tuple[Offer, ...]) -> MatchE
 
 async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
     """Run UNKNOWN persistence, two-candidate reconcile, then the blocked retry."""
-    environment = "ci"
-    open_scopes: set[tuple[UUID, str, str]] = set()
-    recording = _recording(open_scopes, environment)
+    open_scopes: set[tuple[UUID, str]] = set()
+    recording = _recording(open_scopes)
     reader = _UncertaintyReader(open_scopes)
     transport = FakeBitfinexTransport(ACCEPT_DROP)
     async with httpx.AsyncClient(transport=transport) as http:
         executor = BitfinexLiveExecutor(
             http=http,
-            event_sink=_EventSink(),
-            bus=DomainEventBus(),
-            phase=Phase.SHADOW,
-            strategy=StrategyName.RATE_PERCENTILE,
             configured_symbols=frozenset({"fUST"}),
-            cell="fault-cell",
             auth_gate=AuthRequestGate(lambda: 1),
         )
         gate = AccountCommandGate(
             executor,
+            bus=DomainEventBus(),
             uncertainty_reader=reader,
-            safety_evaluator=_SafetyEvaluator(reader, environment),
-            deployment_environment=environment,
+            safety_evaluator=_SafetyEvaluator(reader),
             boundary=recording.boundary(),
             managed_offers=recording.offers,
             clock=iter(range(100, 200)).__next__,
@@ -390,15 +375,14 @@ async def run_multiple_candidate_reconcile() -> MultipleCandidateEvidence:
                 candidates[venue_offer_id].amount_remaining
                 for venue_offer_id in matched.candidate_venue_offer_ids
             ),
-            unknown_scope=(unknown.scope.exchange_account_id, environment, attempt.symbol),
+            unknown_scope=(unknown.scope.exchange_account_id, attempt.symbol),
         )
 
 
 async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
     """Run one real executor/gate submit without any automatic retry path."""
-    open_scopes: set[tuple[UUID, str, str]] = set()
-    environment = "ci"
-    recording = _recording(open_scopes, environment)
+    open_scopes: set[tuple[UUID, str]] = set()
+    recording = _recording(open_scopes)
     uncertainty_reader = _UncertaintyReader(open_scopes)
     transport = FakeBitfinexTransport(scenario)
     http = httpx.AsyncClient(transport=transport)
@@ -408,19 +392,14 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
         else:
             inner = BitfinexLiveExecutor(
                 http=http,
-                event_sink=_EventSink(),
-                bus=DomainEventBus(),
-                phase=Phase.SHADOW,
-                strategy=StrategyName.RATE_PERCENTILE,
                 configured_symbols=frozenset({"fUST"}),
-                cell="fault-cell",
                 auth_gate=AuthRequestGate(lambda: 1),
             )
         gate = AccountCommandGate(
             inner,  # type: ignore[arg-type]
+            bus=DomainEventBus(),
             uncertainty_reader=uncertainty_reader,
-            safety_evaluator=_SafetyEvaluator(uncertainty_reader, "ci"),
-            deployment_environment="ci",
+            safety_evaluator=_SafetyEvaluator(uncertainty_reader),
             boundary=recording.boundary(),
             managed_offers=recording.offers,
             clock=iter(range(100, 200)).__next__,
@@ -432,7 +411,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
             result = await gate.submit(ready, context)
             outcome_kind = result.outcome_kind.value
             # Full raw response is never valid evidence, even if a venue echoes a secret.
-            assert _API_SECRET not in str(result.raw_response)
+            assert _API_SECRET not in str(getattr(result.outcome, "raw_response", None))
         except BaseException as exc:
             assert scenario.process_crash_at in {"after_intent", "during_send"}
             # The gate turns it into process fencing; the crash is the cause.
@@ -457,22 +436,9 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
             assert unknown.attempt.amount == Decimal("150")
             assert unknown.scope.exchange_account_id == _ACCOUNT_ID
             assert unknown.attempt.symbol == "fUST"
-            assert (_ACCOUNT_ID, environment, "fUST") in open_scopes
+            assert (_ACCOUNT_ID, "fUST") in open_scopes
             await gate.check(_ready(decision_id=f"fault-{scenario.name}-other-symbol", symbol="fUSD"), context)
             await gate.check(_ready(decision_id=f"fault-{scenario.name}-other-account"), _context(_ADJACENT_ACCOUNT_ID))
-            other_environment_gate = AccountCommandGate(
-                inner,  # type: ignore[arg-type]
-                uncertainty_reader=uncertainty_reader,
-                safety_evaluator=_SafetyEvaluator(uncertainty_reader, "staging"),
-                deployment_environment="staging",
-                boundary=_recording(open_scopes, "staging").boundary(),
-                managed_offers=recording.offers,
-                clock=iter(range(300, 400)).__next__,
-            )
-            await other_environment_gate.check(
-                _ready(decision_id=f"fault-{scenario.name}-other-environment"),
-                context,
-            )
             adjacent_scope_allowed = True
         else:
             adjacent_scope_allowed = False
@@ -492,7 +458,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
             ),
             unknown_exposure_usdt=(unknown.attempt.amount if unknown is not None else None),
             unknown_scope=(
-                (unknown.scope.exchange_account_id, environment, unknown.attempt.symbol)
+                (unknown.scope.exchange_account_id, unknown.attempt.symbol)
                 if unknown is not None
                 else None
             ),
@@ -526,12 +492,11 @@ async def test_fault_matrix_never_automatically_retries_ambiguous_submit(
         assert evidence.uncertainty_state == "open"
         assert evidence.journal_labels == ("authorized", "unknown")
         assert evidence.unknown_exposure_usdt == Decimal("150")
-        assert evidence.unknown_scope == (_ACCOUNT_ID, "ci", "fUST")
+        assert evidence.unknown_scope == (_ACCOUNT_ID, "fUST")
         assert evidence.adjacent_scope_allowed is True
-        assert (_ACCOUNT_ID, "ci", "fUST") in evidence.uncertainty_reader_calls
-        assert (_ACCOUNT_ID, "ci", "fUSD") in evidence.uncertainty_reader_calls
-        assert (_ADJACENT_ACCOUNT_ID, "ci", "fUST") in evidence.uncertainty_reader_calls
-        assert (_ACCOUNT_ID, "staging", "fUST") in evidence.uncertainty_reader_calls
+        assert (_ACCOUNT_ID, "fUST") in evidence.uncertainty_reader_calls
+        assert (_ACCOUNT_ID, "fUSD") in evidence.uncertainty_reader_calls
+        assert (_ADJACENT_ACCOUNT_ID, "fUST") in evidence.uncertainty_reader_calls
     assert evidence.venue_object_count == int(scenario.side_effect_visible)
 
 
@@ -547,7 +512,7 @@ async def test_multiple_candidate_reconcile_stays_unknown_and_preserves_exposure
     assert evidence.retry_count == 0
     assert evidence.unknown_exposure_usdt == Decimal("150")
     assert evidence.candidate_exposure_usdt == Decimal("300")
-    assert evidence.unknown_scope == (_ACCOUNT_ID, "ci", "fUST")
+    assert evidence.unknown_scope == (_ACCOUNT_ID, "fUST")
 
 
 @pytest.mark.asyncio
@@ -562,15 +527,15 @@ async def test_durable_outcome_reason_redacts_credentials_and_authorization(
     outcome: SubmitOutcomeUnknown | SubmitRejected,
     kind: str,
 ) -> None:
-    open_scopes: set[tuple[UUID, str, str]] = set()
-    recording = _recording(open_scopes, "ci")
+    open_scopes: set[tuple[UUID, str]] = set()
+    recording = _recording(open_scopes)
     executor = _TypedOutcomeExecutor(outcome)
     reader = _UncertaintyReader(open_scopes)
     gate = AccountCommandGate(
         executor,
+        bus=DomainEventBus(),
         uncertainty_reader=reader,
-        safety_evaluator=_SafetyEvaluator(reader, "ci"),
-        deployment_environment="ci",
+        safety_evaluator=_SafetyEvaluator(reader),
         boundary=recording.boundary(),
         managed_offers=recording.offers,
         clock=iter(range(100, 200)).__next__,

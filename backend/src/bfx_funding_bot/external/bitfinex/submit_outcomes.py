@@ -122,9 +122,15 @@ class SubmitOutcomeUnknown:
     # timeout or a reset, which is exactly the distinction that matters.
     venue_error_code: int | None = None
     venue_error_message: str | None = None
+    # The HTTP status of the response, when there was one.
+    http_status: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "reason", _require_reason(self.reason))
+        if self.http_status is not None and (
+            isinstance(self.http_status, bool) or not isinstance(self.http_status, int)
+        ):
+            raise TypeError("http_status must be an int")
         if self.venue_error_code is not None and (
             isinstance(self.venue_error_code, bool)
             or not isinstance(self.venue_error_code, int)
@@ -199,7 +205,6 @@ class SubmissionAttemptPayload:
 
     execution_decision_id: str
     account_id: UUID | str
-    environment: str
     symbol: str
     normalized_payload: Mapping[str, Any]
     attempt_id: UUID | str | None = None
@@ -223,8 +228,6 @@ class SubmissionAttemptPayload:
         except (TypeError, ValueError, AttributeError) as exc:
             raise ValueError("account_id must be a canonical UUID") from exc
         object.__setattr__(self, "account_id", canonical_account_id)
-        if not self.environment.strip():
-            raise ValueError("environment must be non-empty")
         if not self.symbol.strip():
             raise ValueError("symbol must be non-empty")
         if self.started_at_ms < 0:
@@ -249,7 +252,6 @@ class SubmissionAttemptPayload:
                 (
                     self.execution_decision_id,
                     str(canonical_account_id),
-                    self.environment,
                     self.symbol,
                     expected_digest,
                 )
@@ -304,7 +306,6 @@ class SubmissionAttemptPayload:
             "attempt_id": str(self.attempt_id),
             "execution_decision_id": self.execution_decision_id,
             "account_id": str(self.account_id),
-            "environment": self.environment,
             "symbol": self.symbol,
             "normalized_payload": _thaw_value(self.normalized_payload),
             "payload_sha256": self.payload_sha256,
@@ -471,6 +472,7 @@ def _unknown(
     *,
     transport_started: bool,
     parsed_body: Any = None,
+    http_status: int | None = None,
 ) -> SubmitOutcomeUnknown:
     venue = venue_error(parsed_body)
     return SubmitOutcomeUnknown(
@@ -479,12 +481,11 @@ def _unknown(
         raw_response_digest=(response_digest(parsed_body) if parsed_body is not None else None),
         venue_error_code=None if venue is None else venue[0],
         venue_error_message=None if venue is None else venue[1],
+        http_status=http_status,
     )
 
 
-def key_refused_on_submit(
-    outcome: object, *, http_status: int | None = None,
-) -> VenueCredentialRejectedError | None:
+def key_refused_on_submit(outcome: object) -> VenueCredentialRejectedError | None:
     """The venue refusing the key on a submit, as the error the periodic reconcile raises for
     a refused read (the daemon exits 78 and boots into credential recovery mode), or None.
 
@@ -495,6 +496,7 @@ def key_refused_on_submit(
     may echo a credential, and the code alone names the refusal."""
     if not isinstance(outcome, SubmitOutcomeUnknown) or outcome.venue_error_code != ERR_AUTH_FAIL:
         return None
+    http_status = outcome.http_status
     return VenueCredentialRejectedError(
         http_status if http_status is not None and http_status >= 400 else 500,
         "venue refused the key on a funding offer submit",
@@ -543,7 +545,8 @@ def classify_submit_response(
                     parsed_body, status="HTTP_500", reason=reason,
                 ),
             )
-        return _unknown("http_5xx", transport_started=True, parsed_body=parsed_body)
+        return _unknown("http_5xx", transport_started=True, parsed_body=parsed_body,
+                        http_status=http_status)
 
     rejection_reason = _structured_rejection_reason(parsed_body)
     if 200 <= http_status < 300:
@@ -567,7 +570,8 @@ def classify_submit_response(
                 ),
             )
         reason = "malformed_response" if isinstance(parsed_body, list) else "unrecognized_response"
-        return _unknown(reason, transport_started=True, parsed_body=parsed_body)
+        return _unknown(reason, transport_started=True, parsed_body=parsed_body,
+                        http_status=http_status)
 
     if (
         400 <= http_status < 500
@@ -583,4 +587,5 @@ def classify_submit_response(
             ),
         )
 
-    return _unknown("unrecognized_response", transport_started=True, parsed_body=parsed_body)
+    return _unknown("unrecognized_response", transport_started=True, parsed_body=parsed_body,
+                    http_status=http_status)

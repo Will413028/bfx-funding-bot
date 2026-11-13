@@ -42,12 +42,16 @@ class FundingCandleRow(Base):
 
 
 class FundingCandleRevisionRow(Base):
-    """Append-only evidence of writes refused against an already-final candle.
+    """Evidence of writes refused against an already-final candle, one row per refused value.
 
     Knowledge-time record: `observed_at_ms` is when the venue told us something
     different, which is exactly what the pre-2026-07-27 in-place upsert destroyed
     (no timestamp survived, so a 4.5-year-old distortion could only be proven from
     7 days of container logs).
+
+    One row per refused value: several writers (the WS reconnect gap-fill, the
+    worker's boundary gap-fill, reruns of either) can see the same value again, and
+    only its first observation is kept. A venue that goes X -> Y -> X records X once.
 
     Only `close` is kept: it is the sole field that reaches a strategy decision
     (`LendDecision.rate` takes `candle.close`). Widen if OHLCV analysis ever needs it.
@@ -72,7 +76,9 @@ class FundingCandleRevisionRow(Base):
 
     __table_args__ = (
         Index(
-            "idx_funding_candle_revisions_series",
-            "symbol", "timeframe", "period_agg", "mts",
+            "uq_funding_candle_revisions_value",
+            "symbol", "timeframe", "period_agg", "mts", "rejected_close",
+            unique=True,
+            postgresql_nulls_not_distinct=True,
         ),
     )

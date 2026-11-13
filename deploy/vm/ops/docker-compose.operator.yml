@@ -21,9 +21,8 @@
 # for the bfx_operator role (never the bot's role or the migration owner) and
 # BFX_EXCHANGE_ACCOUNT_ID. The wrapper passes BFX_OPERATOR_TAILNET_IDENTITY on
 # every call (the caller's tailnet user ID: the requests' requested_by, refused
-# unless it is a member of the account) and BFX_DEPLOYMENT_ENV from the
-# deployed revision's live.env, both through Compose interpolation of its own
-# environment. BFX_RUNTIME_DIR exists only so CI can render this file without the
+# unless it is a member of the account), through Compose interpolation of its own
+# environment. The CLI reads no deployment environment. BFX_RUNTIME_DIR exists only so CI can render this file without the
 # secret directory; the default must stay /opt/bfx/runtime and the file stays
 # required, so a missing operator.env stops the run instead of starting without it.
 #
@@ -51,7 +50,6 @@ services:
         required: true
     environment:
       BFX_OPERATOR_TAILNET_IDENTITY: ${BFX_OPERATOR_TAILNET_IDENTITY:?BFX_OPERATOR_TAILNET_IDENTITY is required}
-      BFX_DEPLOYMENT_ENV: ${BFX_DEPLOYMENT_ENV:?BFX_DEPLOYMENT_ENV is required}
       BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
       BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
       PYTHONDONTWRITEBYTECODE: "1"

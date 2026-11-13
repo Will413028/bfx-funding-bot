@@ -14,13 +14,13 @@ import pytest
 from sqlalchemy import select
 
 from bfx_funding_bot.core.errors import ExecutorTransientError
-from bfx_funding_bot.modules.execution.protocols import FundingCancelAllResult
+from bfx_funding_bot.external.bitfinex.order_port import FundingCancelAllResult
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillSwitch
 from bfx_funding_bot.modules.execution.safety.tables import (
     FundingCancelAllAuditRow,
     TradingStateRow,
 )
-from bfx_funding_bot.modules.execution.safety.trading_state import read_current
+from bfx_funding_bot.modules.execution.safety.trading_state_store import read_current
 
 from .contracts.stacks import ACCOUNT, SCOPE, Venue
 from .test_capital_command_boundary import (
@@ -48,7 +48,7 @@ class FakeVenue:
 
     async def cancel_all_funding_offers(self, *, currency, ctx):
         async with self.factory() as observer:
-            state = await read_current(observer, account_id=self.account, environment="ci")
+            state = await read_current(observer, account_id=self.account)
         self.calls.append((currency, state.state if state is not None else None))
         if currency in self.fail:
             raise ExecutorTransientError(f"venue unavailable for {currency}")
@@ -198,7 +198,7 @@ async def test_kill_waits_for_an_in_flight_command_after_writing_halted(capital_
             yield quiet
 
     switch = kill_switch(factory, trading, ctx, venue, stack=gate_stack, quiesce=observed_quiesce)
-    in_flight = gate._account_locks.setdefault((str(account), "ci"), asyncio.Lock())
+    in_flight = gate._account_locks.setdefault(str(account), asyncio.Lock())
     await in_flight.acquire()
     task = asyncio.create_task(switch.engage(cause="operator", actor="will", reason="kill"))
     try:
@@ -229,7 +229,7 @@ async def test_a_wedged_command_does_not_hold_the_kill_hostage(capital_db, gate_
     gate, ctx, trading, venue = await exposed_account(factory, account, gate_stack)
     switch = kill_switch(factory, trading, ctx, venue, stack=gate_stack,
                          quiesce=lambda: gate.quiesced(str(account), timeout_s=0.05))
-    wedged = gate._account_locks.setdefault((str(account), "ci"), asyncio.Lock())
+    wedged = gate._account_locks.setdefault(str(account), asyncio.Lock())
     await wedged.acquire()
     try:
         result = await asyncio.wait_for(
@@ -325,8 +325,7 @@ async def test_a_kill_request_names_itself_on_every_cancel_all_row_and_admin_hal
     request_id = uuid4()
     async with factory.begin() as session:
         await session.execute(insert(TradingControlRequestRow).values(
-            request_id=request_id, exchange_account_id=account, deployment_environment="ci",
-            action="kill", reason="stop", requested_by="operator", created_at_ms=1))
+            request_id=request_id, exchange_account_id=account, action="kill", reason="stop", requested_by="operator", created_at_ms=1))
     switch = kill_switch(factory, trading, ctx, venue, stack=gate_stack)
     await switch.engage(cause="operator", actor="operator", reason="kill: stop",
                         operator_request_id=request_id)

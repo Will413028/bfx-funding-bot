@@ -49,8 +49,7 @@ NO_SESSION = cast(AsyncSession, None)
 
 def _context(role: str = "owner") -> OperatorContext:
     return OperatorContext(exchange_account_id=ACCOUNT, user_id="operator",
-                           role=cast(AccountRole, role), lifecycle_status="active",
-                           deployment_environment="ci")
+                           role=cast(AccountRole, role), lifecycle_status="active")
 
 
 class _Columns:

@@ -23,13 +23,18 @@ from bfx_funding_bot.core import authority as authority_module
 from bfx_funding_bot.core.schema_head import SchemaHeadMismatch
 from bfx_funding_bot.modules.api.deps import ReadModels, get_read_models
 from bfx_funding_bot.modules.api.uncertainties import _request_model
+from bfx_funding_bot.modules.ledger import Scope
 
 
 def test_build_read_models_are_the_ledgers() -> None:
     models = build_read_models()
     assert type(models.operator_reads).__name__ == "LedgerOperatorReads"
     assert type(models.operator_evidence).__name__ == "LedgerOperatorEvidence"
-    assert type(models.operator_resolution).__name__ == "LedgerOperatorResolution"
+    # Read only: the policy port has no ``apply_policy`` and no resolution port is held.
+    reader = models.policy_reader(Scope(uuid4()))
+    assert type(reader).__name__ == "LedgerPolicyReader"
+    assert not hasattr(reader, "apply_policy")
+    assert not hasattr(models, "operator_resolution")
 
 
 class _Engine:
@@ -66,6 +71,30 @@ async def test_lifespan_stores_the_authority_and_its_read_models(monkeypatch) ->
     async with webapi.lifespan(app):
         assert len(required) == 1
         assert type(app.state.read_models.operator_reads).__name__ == "LedgerOperatorReads"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", [None, "staging"])
+async def test_lifespan_boots_without_a_deployment_environment(
+        monkeypatch, configured: str | None) -> None:
+    """The web API needs no BFX_DEPLOYMENT_ENV: unset or unknown, it boots with its read
+    models and keeps no environment on ``app.state`` for a route to depend on."""
+    async def authority(_session: object) -> str:
+        return "migration b1c2d3e4f5a6 genesis"
+
+    if configured is None:
+        monkeypatch.delenv("BFX_DEPLOYMENT_ENV", raising=False)
+    else:
+        monkeypatch.setenv("BFX_DEPLOYMENT_ENV", configured)
+    monkeypatch.setattr(webapi, "load_settings", lambda: SimpleNamespace(log_level="WARNING"))
+    monkeypatch.setattr(webapi, "make_engine", lambda _settings: _Engine())
+    monkeypatch.setattr(webapi, "make_session_factory", lambda _engine: _Session)
+    monkeypatch.setattr(webapi, "require_ledger_authority", authority)
+    monkeypatch.setattr(webapi, "assert_schema_head", _at_head)
+    app = FastAPI()
+    async with webapi.lifespan(app):
+        assert type(app.state.read_models.operator_reads).__name__ == "LedgerOperatorReads"
+        assert not hasattr(app.state, "deployment_environment")
 
 
 @pytest.mark.asyncio

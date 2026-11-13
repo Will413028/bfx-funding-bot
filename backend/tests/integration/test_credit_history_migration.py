@@ -25,14 +25,14 @@ TABLES = ("funding_credit_history", "funding_trades")
 INSERTS = {
     "funding_credit_history": (
         "INSERT INTO funding_credit_history (exchange_account_id, kind, credit_id, "
-        "deployment_environment, symbol, side, mts_create, mts_update, amount, status, rate, "
+        "symbol, side, mts_create, mts_update, amount, status, rate, "
         f"period, mts_opening, mts_last_payout) VALUES ('{ACCOUNT}', 'credit', 466642176, "
-        "'ci', 'fUST', 1, 1790350246000, 1790350246000, 150.76884612, 'CLOSED', 0.00019999, "
+        "'fUST', 1, 1790350246000, 1790350246000, 150.76884612, 'CLOSED', 0.00019999, "
         "2, 1790350246000, 1790351088000) ON CONFLICT DO NOTHING"),
     "funding_trades": (
-        "INSERT INTO funding_trades (exchange_account_id, trade_id, deployment_environment, "
+        "INSERT INTO funding_trades (exchange_account_id, trade_id, "
         f"symbol, mts_create, offer_id, amount, rate, period, maker) VALUES ('{ACCOUNT}', "
-        "432914136, 'ci', 'fUST', 1790350246000, 5123273052, 150.76884612, 0.00019999, 2, "
+        "432914136, 'fUST', 1790350246000, 5123273052, 150.76884612, 0.00019999, 2, "
         "NULL) ON CONFLICT DO NOTHING"),
 }
 

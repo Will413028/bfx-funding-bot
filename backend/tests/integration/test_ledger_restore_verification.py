@@ -36,7 +36,18 @@ from sqlalchemy.engine import make_url
 
 from tests import pg_local
 
-from .test_ledger_schema_roles import _A, _B, _D2, _O, _P, _QID, _build, _seed
+from .test_ledger_schema_roles import (
+    _A,
+    _B,
+    _D2,
+    _O,
+    _P,
+    _QID,
+    _build,
+    _has_realm_column,
+    _realm,
+    _seed,
+)
 
 pytestmark = pytest.mark.integration
 ROOT = Path(__file__).resolve().parents[3]
@@ -62,24 +73,28 @@ drill = _load("ledger_restore_verification_drill", PGBACKREST / "restore_drill.p
 ledger = drill._ledger
 
 
-def _decision_sql(decision_id: str) -> str:
+# ``realm``: the database is older than 545b2877e9bd, so its rows still carry the realm column
+# (the drill reads such a copy before it rehearses the migration).
+def _decision_sql(decision_id: str, *, realm: bool = False) -> str:
+    column, value = _realm(realm)
     return (
         "INSERT INTO execution_decisions(decision_id, account_id, exchange_account_id, "
-        "deployment_environment, reconcile_id, cell_id, symbol, signal_correlation_id, outcome, "
+        f"{column}reconcile_id, cell_id, symbol, signal_correlation_id, outcome, "
         "signal_rate, amount_usdt, duration_days, model_evidence, safety_result, execution_policy, "
         "service_version, config_hash, occurred_at_ms, recorded_at_ms) "
-        f"VALUES ('{decision_id}', 'account', '{_A}', 'ci', 'r', 'cell', 'fUST', '{decision_id}', "
+        f"VALUES ('{decision_id}', 'account', '{_A}', {value}'r', 'cell', 'fUST', '{decision_id}', "
         "'submitted', 0, 1, 2, '{}', '{}', 'policy', 'test', 'hash', 1, 1)"
     )
 
 
-def _attempt_sql(attempt_id: str, decision_id: str, seq: int) -> str:
+def _attempt_sql(attempt_id: str, decision_id: str, seq: int, *, realm: bool = False) -> str:
+    column, value = _realm(realm)
     return (
         "INSERT INTO submission_attempt_journal(attempt_id, execution_decision_id, "
-        "exchange_account_id, deployment_environment, symbol, cell_id, attempt_seq, "
+        f"exchange_account_id, {column}symbol, cell_id, attempt_seq, "
         "normalized_payload, payload_sha256, basis_id, policy_revision_id, "
         "authorization_evidence, started_at_ms) "
-        f"VALUES ('{attempt_id}', '{decision_id}', '{_A}', 'ci', 'fUST', 'cell', {seq}, "
+        f"VALUES ('{attempt_id}', '{decision_id}', '{_A}', {value}'fUST', 'cell', {seq}, "
         f"'{{\"amount\": \"1.10\"}}', 'hash', '{_B}', '{_P}', '{{}}', {seq + 3})"
     )
 
@@ -99,9 +114,10 @@ def restore_point(url: str) -> None:
     try:
         with engine.begin() as conn:
             _seed(conn)
-            conn.exec_driver_sql(_decision_sql(_D3))
+            realm = _has_realm_column(conn)
+            conn.exec_driver_sql(_decision_sql(_D3, realm=realm))
             conn.exec_driver_sql("UPDATE capital_command_clock SET revision = 1")  # the opening
-            conn.exec_driver_sql(_attempt_sql(_T2, _D2, 2))
+            conn.exec_driver_sql(_attempt_sql(_T2, _D2, 2, realm=realm))
             conn.exec_driver_sql(
                 "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, "
                 "reason) SELECT 2, 'ledger', 2, 'test', 'switch' WHERE (SELECT authority FROM "
@@ -119,21 +135,26 @@ def _template(url: str) -> None:
 def _production_moves_on(url: str) -> None:
     """Writes committed after the restore point: none may be compared."""
     with psycopg.connect(_libpq(url), autocommit=True) as conn:
+        realm = conn.execute(
+            "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' "
+            "AND table_name = 'capital_command_clock' "
+            "AND column_name = 'deployment_environment'").fetchone() == (1,)
+        column, value = _realm(realm)
         conn.execute(_outcome_sql(_T2))  # the pending attempt's outcome arrives
-        conn.execute(_attempt_sql(_T3, _D3, 3))
+        conn.execute(_attempt_sql(_T3, _D3, 3, realm=realm))
         conn.execute(_outcome_sql(_T3))
         conn.execute(
             "INSERT INTO ledger_observation_query (query_id, exchange_account_id, "
-            "deployment_environment, query_revision, started_at_ms, start_revision) "
-            f"VALUES ('{_Q2}', '{_A}', 'ci', 2, 10, 1)"
+            f"{column}query_revision, started_at_ms, start_revision) "
+            f"VALUES ('{_Q2}', '{_A}', {value}2, 10, 1)"
         )
         conn.execute(
             "INSERT INTO ledger_observation (id, query_id, exchange_account_id, "
-            "deployment_environment, schema_version, query_finished_at_ms, "
+            f"{column}schema_version, query_finished_at_ms, "
             "confirmation_finished_at_ms, accept_revision, wallets_complete, offers_complete, "
             "credits_complete, loans_complete, offer_history_complete, credit_history_complete, "
             "trades_complete, first_digest, confirmation_digest, accepted, evidence) VALUES "
-            f"('{_O2}', '{_Q2}', '{_A}', 'ci', 1, 11, 12, 1, true, true, true, true, true, true, "
+            f"('{_O2}', '{_Q2}', '{_A}', {value}1, 11, 12, 1, true, true, true, true, true, true, "
             "true, 'd', 'd', false, '{}')"
         )
         conn.execute(
@@ -209,7 +230,7 @@ def test_production_ahead_of_the_restore_point_matches(clusters) -> None:
     assert all(entry["count"] == entry["restored_total"] for name, entry in tables.items()
                if name not in ledger.PARTIAL_TABLES)
     [scope] = summary["scopes"]
-    assert (scope["exchange_account_id"], scope["deployment_environment"]) == (_A, "ci")
+    assert scope["exchange_account_id"] == _A and "deployment_environment" not in scope
     assert (scope["clock_revision"], scope["production_clock_revision"]) == (1, 2)
     assert (scope["query_revision"], scope["attempt_seq"], scope["opened_revision"]) == (1, 2, 1)
     assert summary["pending_attempts"] == 1 and summary["epoch_seq"] == 2

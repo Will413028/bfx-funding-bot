@@ -76,7 +76,7 @@ def sent(monkeypatch) -> list[tuple]:
 
 def _periodic(sink, *, probe=None, deployment=None, deployment_input=None):
     return PeriodicReconcile(resync=ResyncChannel(),
-        recovery=sink, scope=Scope(uuid4(), "ci"), probe=probe or _Probe(), interval_s=90,
+        recovery=sink, scope=Scope(uuid4()), probe=probe or _Probe(), interval_s=90,
         deployment=deployment, deployment_input=deployment_input,
     )
 

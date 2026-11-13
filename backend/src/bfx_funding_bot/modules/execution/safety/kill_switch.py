@@ -52,8 +52,8 @@ from bfx_funding_bot.modules.execution.safety.trading_state import (
     CAUSE_OPERATOR,
     HALTED,
     TradingState,
-    TradingStateRepository,
 )
+from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
 from bfx_funding_bot.modules.ledger import ManagedOfferReader, Scope, UncertaintyReader
 from bfx_funding_bot.modules.observability import alerts
 
@@ -185,8 +185,8 @@ class KillSwitch:
         result = KillResult(state=halted, state_changed=transition.changed,
                             cancel_all=tuple(outcomes), scope_error=scope_error)
         level = logging.WARNING if result.complete else logging.CRITICAL
-        log.log(level, "kill_switch_engaged account=%s env=%s cause=%s state_id=%s complete=%s "
-                "outcomes=%s", self._trading.account_id, self._trading.environment, cause,
+        log.log(level, "kill_switch_engaged account=%s cause=%s state_id=%s complete=%s "
+                "outcomes=%s", self._trading.account_id, cause,
                 halted.id, result.complete,
                 [(o.currency, o.phase, o.detail) for o in outcomes])
         alerts.emit(alerts.KILL_SWITCH_ENGAGED, complete=result.complete, cause=cause,  # T8
@@ -222,7 +222,7 @@ class KillSwitch:
         symbols = set(self._configured)
         error = None
         try:
-            scope = Scope(self._trading.account_id, self._trading.environment)
+            scope = Scope(self._trading.account_id)
             async with self._sf() as session:
                 symbols.update(record.symbol for record in
                                await self._uncertainty.list_open(session, scope))
@@ -276,7 +276,6 @@ class KillSwitch:
             async with self._sf.begin() as session:
                 session.add(FundingCancelAllAuditRow(
                     exchange_account_id=self._trading.account_id,
-                    deployment_environment=self._trading.environment,
                     trading_state_id=halted.id,
                     attempt_id=attempt,
                     currency=currency,

@@ -2,7 +2,7 @@
 raises the error the caller handles, never an unhandled exception.
 
 Each parser's defined error is the one its callers catch: ``BitfinexShapeError`` for
-the row parsers, ``InvariantViolation`` for the cancel-all classifier, and none at all
+the row parsers, ``VenueResponseShapeError`` for the cancel-all classifier, and none at all
 for the submit classification (once transport started, every answer is an outcome)
 and the venue-error readers (they return None). ``BitfinexREST`` turns
 ``ROW_CONVERSION_ERRORS`` from the candle and stat rows into ``BitfinexShapeError``.
@@ -45,14 +45,14 @@ from bfx_funding_bot.external.bitfinex.observations import (
     parse_offer_observations,
     parse_wallet_observations,
 )
-from bfx_funding_bot.external.bitfinex.rest import ROW_CONVERSION_ERRORS, FundingTrade
+from bfx_funding_bot.external.bitfinex.order_port import VenueResponseShapeError
+from bfx_funding_bot.external.bitfinex.rest import ROW_CONVERSION_ERRORS
 from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmitAcknowledged,
     SubmitOutcomeUnknown,
     classify_submit_response,
 )
 from bfx_funding_bot.external.bitfinex.submit_wire import response_digest, venue_error
-from bfx_funding_bot.modules.execution.errors import InvariantViolation
 
 # Values a Bitfinex row slot can hold after json.loads (which also yields inf and
 # nan), plus the strings that are hardest on numeric conversion.
@@ -93,7 +93,6 @@ ROW_PARSERS: dict[str, Callable[[Any], object]] = {
     "wallet_observations": parse_wallet_observations,
     "offer_observations": parse_offer_observations,
     "credit_observations": lambda raw: parse_credit_observations(raw, source_kind="credit"),
-    "public_funding_trade": FundingTrade.from_bitfinex,
     "public_funding_book_level": FundingBookLevel.from_bitfinex,
 }
 
@@ -127,8 +126,8 @@ def test_public_candle_and_stat_rows_raise_only_what_the_client_wraps(
 
 
 @given(raw=_BODY)
-def test_cancel_all_response_raises_only_invariant_violation(raw: Any) -> None:
-    with contextlib.suppress(InvariantViolation):
+def test_cancel_all_response_raises_only_venue_response_shape_error(raw: Any) -> None:
+    with contextlib.suppress(VenueResponseShapeError):
         classify_cancel_all_response(raw)
 
 
@@ -156,8 +155,6 @@ FORMER_DEFECTS = [
                  [[False, False, None, False, False, False, None, None, None, None, None, False, False,
                    None, None]], BitfinexShapeError, id="F40-credit_history"),
     pytest.param(parse_funding_trades, [[False] * 7], BitfinexShapeError, id="F40-funding_trades"),
-    pytest.param(FundingTrade.from_bitfinex, [False, INF, None, None, None], BitfinexShapeError,
-                 id="F41-public_funding_trade"),
     pytest.param(FundingBookLevel.from_bitfinex, [None, None, None, None], BitfinexShapeError,
                  id="F41-public_funding_book_level"),
     pytest.param(_candle, [1, "x", 1, 1, 1, 1], ROW_CONVERSION_ERRORS, id="F42-public_candle"),

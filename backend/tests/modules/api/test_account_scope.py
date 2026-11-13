@@ -69,8 +69,7 @@ async def _seed_account(
 
 
 @pytest.mark.asyncio
-async def test_member_context_is_explicit_and_role_scoped(session: AsyncSession, monkeypatch) -> None:
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+async def test_member_context_is_explicit_and_role_scoped(session: AsyncSession) -> None:
     await _seed_account(session, role="viewer")
 
     context = await require_account_member(
@@ -84,25 +83,6 @@ async def test_member_context_is_explicit_and_role_scoped(session: AsyncSession,
     assert context.user_id == "operator-1"
     assert context.role == "viewer"
     assert context.can_write is False
-    assert context.deployment_environment == "ci"
-
-
-@pytest.mark.asyncio
-async def test_authorized_context_requires_validated_deployment_environment(
-    session: AsyncSession, monkeypatch
-) -> None:
-    await _seed_account(session)
-    monkeypatch.delenv("BFX_DEPLOYMENT_ENV", raising=False)
-
-    with pytest.raises(HTTPException) as error:
-        await require_account_member(
-            exchange_account_id=_ACCOUNT_ID,
-            user=Principal(user_id="operator-1", email="operator@example.com", role="admin"),
-            session=session,
-        )
-
-    assert error.value.status_code == 503
-    assert error.value.detail == "deployment_environment_not_configured"
 
 
 @pytest.mark.asyncio
@@ -157,7 +137,6 @@ def test_implicit_default_account_is_not_a_valid_path() -> None:
 @pytest_asyncio.fixture
 async def scoped_app(sqlite_engine, monkeypatch) -> TestClient:
     monkeypatch.setenv("BFX_VAULT_KEK", "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=")
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "prod")
     async with sqlite_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(sqlite_engine, expire_on_commit=False)
@@ -210,7 +189,7 @@ async def scoped_app(sqlite_engine, monkeypatch) -> TestClient:
             return (PositionView(symbol, Decimal("0"), Decimal("0"), amount, None, 1, 1, None),)
 
     unused = object()
-    app.state.read_models = ReadModels(_Positions(), unused, unused, unused, unused)  # type: ignore[arg-type]
+    app.state.read_models = ReadModels(_Positions(), unused, unused, unused)  # type: ignore[arg-type]
     current_user = {"value": "operator-1"}
 
     async def _operator() -> Principal:

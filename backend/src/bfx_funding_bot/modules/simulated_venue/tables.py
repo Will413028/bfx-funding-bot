@@ -1,8 +1,8 @@
 """The simulated venue's durable event log (`sim_venue_event`), insert-only.
 
 Independent of the bot's tables on purpose: no foreign key to `exchange_accounts`, and the
-venue never reads ledger journals. The realm CHECK makes a `prod` row impossible by
-construction in every database the one migration chain reaches (ADR 2026-10-03 D1). The
+venue never reads ledger journals. A row carries no realm of its own: the store refuses a
+database whose realm stamp is not the simulated one (`_internal/store_sql.py`). The
 insert-only triggers, the revoked default privileges and the `bfx_bot` SELECT/INSERT grant
 live in the migration, because SQLAlchemy metadata cannot express them.
 """
@@ -31,7 +31,6 @@ class SimVenueEventRow(Base):
     __tablename__ = SIM_VENUE_EVENT_TABLE
 
     exchange_account_id: Mapped[str] = mapped_column(Text, nullable=False)
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     # 1-based position in the scope's log; the primary key makes a second writer on the
     # same position fail instead of overwrite (optimistic concurrency).
     seq: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -45,9 +44,7 @@ class SimVenueEventRow(Base):
 
     __table_args__ = (
         PrimaryKeyConstraint(
-            "exchange_account_id", "deployment_environment", "seq", name="pk_sim_venue_event"),
-        CheckConstraint(
-            "deployment_environment IN ('shadow', 'ci')", name="ck_sim_venue_event_realm"),
+            "exchange_account_id", "seq", name="pk_sim_venue_event"),
         CheckConstraint("seq >= 1", name="ck_sim_venue_event_seq"),
         CheckConstraint("exchange_account_id <> ''", name="ck_sim_venue_event_account"),
         CheckConstraint("schema_version >= 1", name="ck_sim_venue_event_version"),

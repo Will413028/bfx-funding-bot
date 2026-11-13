@@ -3,7 +3,7 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, func, insert, select, update
+from sqlalchemy import CursorResult, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.postgresql.dml import Insert as PGInsert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -16,8 +16,8 @@ from bfx_funding_bot.modules.candles.tables import (
     FundingCandleRow,
 )
 
-# Period length per timeframe. Mirrors marketfeed.scheduler._TIMEFRAME_MS; kept
-# here so the candles layer does not import upward into marketfeed.
+# Period length per timeframe. Mirrors apps.runtime.scheduler._TIMEFRAME_MS; kept
+# here so the candles layer does not import upward into the runtime.
 _TIMEFRAME_MS = {"15m": 15 * 60_000, "30m": 30 * 60_000, "1h": 60 * 60_000}
 
 _UPSERT_INDEX = ["symbol", "timeframe", "period_agg", "mts"]
@@ -93,7 +93,7 @@ async def upsert_candles(
 
     now = now_ms if now_ms is not None else int(time.time() * 1000)
 
-    dialect_name = session.bind.dialect.name if session.bind else "postgresql"
+    dialect_name = _dialect(session)
 
     for i in range(0, len(candles), _CANDLE_CHUNK):
         chunk = candles[i : i + _CANDLE_CHUNK]
@@ -184,7 +184,22 @@ async def _record_rejected_revisions(
             })
 
     if revisions:
-        await session.execute(insert(FundingCandleRevisionRow), revisions)
+        # First observation wins (unique value key): a repeat from another writer or a
+        # rerun is a no-op, not an error and not a second row. A writer that meets
+        # another's uncommitted row waits on it; inserting in key order keeps two such
+        # writers from waiting on each other.
+        revisions.sort(key=lambda r: (
+            r["symbol"], r["timeframe"], r["period_agg"], r["mts"],
+            r["rejected_close"] is None, r["rejected_close"] or 0.0,
+        ))
+        insert = pg_insert if _dialect(session) == "postgresql" else sqlite_insert
+        await session.execute(
+            insert(FundingCandleRevisionRow).values(revisions).on_conflict_do_nothing()
+        )
+
+
+def _dialect(session: AsyncSession) -> str:
+    return session.bind.dialect.name if session.bind else "postgresql"
 
 
 async def mark_candles_final(

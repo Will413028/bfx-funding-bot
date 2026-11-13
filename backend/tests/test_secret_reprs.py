@@ -1,17 +1,16 @@
 """Secret fields stay usable and serializable, but never enter repr/str."""
 
-import asyncio
 import json
 from collections.abc import Callable
 from unittest.mock import Mock
 
 import pytest
 
+from bfx_funding_bot.apps.runtime.config import MarketfeedConfig
+from bfx_funding_bot.apps.runtime.daemon import Daemon
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
-from bfx_funding_bot.modules.marketfeed.config import MarketfeedConfig
-from bfx_funding_bot.modules.marketfeed.daemon import Daemon
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 
 DATABASE_URL = "postgresql://u:fake-db-password@h/db"
@@ -35,15 +34,12 @@ def test_daemon_admin_token_hidden(
     daemon = Daemon(
         config=config,
         registry=Mock(),
-        candle_q=asyncio.Queue(),
         diagnostics=Mock(),
         probe=Mock(),
         monitor=Mock(),
         scheduler=Mock(),
         signal_engine=Mock(),
         db_engine=Mock(),
-        ws_client=None,
-        writer=Mock(),
         bitfinex_http=Mock(),
         bitfinex=Mock(),
         session_factory=Mock(),

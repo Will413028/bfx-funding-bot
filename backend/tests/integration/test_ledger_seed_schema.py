@@ -38,9 +38,11 @@ from .test_ledger_schema_roles import (
     _Q,
     _basis_sql,
     _build,
+    _has_realm_column,
     _member_sql,
     _observation_sql,
     _query_sql,
+    _realm,
     _seed,
     pre_switch_url,
     reversible_ledger_db,  # noqa: F401 - fixture re-export
@@ -94,8 +96,10 @@ def _seed_observation_sql(
     pages: str = "NULL",
     origin: str = "legacy_seed",
     overrides: dict[str, str] | None = None,
+    realm: bool = False,
 ) -> str:
-    """A seed header; ``overrides`` replaces or adds single columns (SQL literals)."""
+    """A seed header; ``overrides`` replaces or adds single columns (SQL literals). ``realm``:
+    the database is older than 545b2877e9bd and still requires the realm column."""
 
     def flag(value: bool) -> str:
         return str(value).lower()
@@ -104,7 +108,7 @@ def _seed_observation_sql(
         "id": f"'{observation_id}'",
         "query_id": f"'{query_id}'",
         "exchange_account_id": f"'{_A}'",
-        "deployment_environment": "'ci'",
+        **({"deployment_environment": "'ci'"} if realm else {}),
         "schema_version": "1",
         "query_finished_at_ms": "2",
         "confirmation_finished_at_ms": "3",
@@ -132,14 +136,15 @@ def _seed_observation_sql(
 
 def _new_query(conn, revision: int) -> str:
     query_id = str(uuid4())
-    conn.exec_driver_sql(_query_sql(query_id, revision))
+    conn.exec_driver_sql(_query_sql(query_id, revision, realm=_has_realm_column(conn)))
     return query_id
 
 
 def _owner_seed_observation(conn, revision: int = 2) -> str:
     """The owner writes a seed observation on a fresh newest query."""
     observation_id = str(uuid4())
-    conn.exec_driver_sql(_seed_observation_sql(observation_id, _new_query(conn, revision)))
+    conn.exec_driver_sql(_seed_observation_sql(
+        observation_id, _new_query(conn, revision), realm=_has_realm_column(conn)))
     return observation_id
 
 
@@ -153,22 +158,23 @@ def _append_epoch(conn, authority: str) -> None:
     )
 
 
-def _decision_sql(decision_id: str) -> str:
+def _decision_sql(decision_id: str, *, realm: bool = False) -> str:
+    realm_column, realm_value = _realm(realm)
     return f"""INSERT INTO execution_decisions(decision_id, account_id, exchange_account_id,
-      deployment_environment, reconcile_id, cell_id, symbol, signal_correlation_id, outcome,
+      {realm_column}reconcile_id, cell_id, symbol, signal_correlation_id, outcome,
       signal_rate, amount_usdt, duration_days, model_evidence, safety_result, execution_policy,
       service_version, config_hash, occurred_at_ms, recorded_at_ms)
-      VALUES ('{decision_id}', 'account', '{_A}', 'ci', 'r', 'cell', 'fUST', '{decision_id}',
+      VALUES ('{decision_id}', 'account', '{_A}', {realm_value}'r', 'cell', 'fUST', '{decision_id}',
       'submitted', 0, 1, 2, '{{}}', '{{}}', 'policy', 'test', 'hash', 1, 1)"""
 
 
 def _insert_attempt(conn, seq: int, *, policy: str | None, provenance: str | None) -> None:
     """One attempt on its own decision (the decision id is unique per attempt)."""
     decision = f"decision-{uuid4()}"
-    conn.exec_driver_sql(_decision_sql(decision))
-    conn.exec_driver_sql(
-        _attempt_sql(str(uuid4()), seq, policy=policy, provenance=provenance, decision=decision)
-    )
+    realm = _has_realm_column(conn)
+    conn.exec_driver_sql(_decision_sql(decision, realm=realm))
+    conn.exec_driver_sql(_attempt_sql(
+        str(uuid4()), seq, policy=policy, provenance=provenance, decision=decision, realm=realm))
 
 
 def _attempt_sql(
@@ -178,35 +184,37 @@ def _attempt_sql(
     policy: str | None,
     provenance: str | None,
     decision: str = _D2,
+    realm: bool = False,
 ) -> str:
+    realm_column, realm_value = _realm(realm)
     policy_value = "NULL" if policy is None else f"'{policy}'"
     provenance_value = "NULL" if provenance is None else f"'{provenance}'"
     return f"""INSERT INTO submission_attempt_journal(attempt_id, execution_decision_id,
-      exchange_account_id, deployment_environment, symbol, cell_id, attempt_seq,
+      exchange_account_id, {realm_column}symbol, cell_id, attempt_seq,
       normalized_payload, payload_sha256, basis_id, policy_revision_id,
       authorization_evidence, seed_provenance, started_at_ms)
-      VALUES ('{attempt_id}', '{decision}', '{_A}', 'ci', 'fUST', 'cell', {seq}, '{{"amount": "1"}}',
+      VALUES ('{attempt_id}', '{decision}', '{_A}', {realm_value}'fUST', 'cell', {seq}, '{{"amount": "1"}}',
       'hash', '{_B}', {policy_value}, '{{}}', {provenance_value}, 4)"""
 
 
 def _quarantine_sql(quarantine_id: str) -> str:
     return f"""INSERT INTO quarantine_opening(quarantine_id, exchange_account_id,
-      deployment_environment, symbol, intended_amount, opened_at_ms, opened_revision, evidence)
-      VALUES ('{quarantine_id}', '{_A}', 'ci', 'fUST', 1, 4, 1, '{{}}')"""
+      symbol, intended_amount, opened_at_ms, opened_revision, evidence)
+      VALUES ('{quarantine_id}', '{_A}', 'fUST', 1, 4, 1, '{{}}')"""
 
 
 def _resolution_sql(quarantine_id: str, observation_id: str) -> str:
     return f"""INSERT INTO execution_resolution_journal(id, quarantine_id, exchange_account_id,
-      deployment_environment, symbol, action, venue_offer_id, observation_id, actor_kind,
+      symbol, action, venue_offer_id, observation_id, actor_kind,
       actor_id, resolved_at_ms, reason, evidence)
-      VALUES ('{uuid4()}', '{quarantine_id}', '{_A}', 'ci', 'fUST', 'bound_to_venue', 'offer-1',
+      VALUES ('{uuid4()}', '{quarantine_id}', '{_A}', 'fUST', 'bound_to_venue', 'offer-1',
       '{observation_id}', 'operator', 'test', 5, 'test', '{{}}')"""
 
 
 def _request_sql(observation_id: str) -> str:
     return f"""INSERT INTO uncertainty_resolution_requests(request_id, exchange_account_id,
-      deployment_environment, uncertainty_id, action, observation_id, requested_by, created_at_ms)
-      VALUES ('{uuid4()}', '{_A}', 'ci', '{uuid4()}', 'mark_not_accepted', '{observation_id}',
+      uncertainty_id, action, observation_id, requested_by, created_at_ms)
+      VALUES ('{uuid4()}', '{_A}', '{uuid4()}', 'mark_not_accepted', '{observation_id}',
       'operator', 6)"""
 
 
@@ -356,16 +364,16 @@ def test_seed_observation_is_never_mirror_terminal_evidence(
 
 def _terminal_mirror_insert_sql(mirror: str, venue_id: str, history_id: str) -> str:
     if mirror == "venue_offer_mirror":
-        return f"""INSERT INTO venue_offer_mirror(exchange_account_id, deployment_environment,
+        return f"""INSERT INTO venue_offer_mirror(exchange_account_id,
           venue_offer_id, symbol, amount_original, amount_remaining, rate_observed, status,
           mts_created, last_accepted_observation_id, present_in_latest_accepted_snapshot,
           terminal_evidence_id, terminal_kind)
-          VALUES ('{_A}', 'ci', '{venue_id}', 'fUST', 1, 0, true, 'CANCELLED', 1, '{_O}', false,
+          VALUES ('{_A}', '{venue_id}', 'fUST', 1, 0, true, 'CANCELLED', 1, '{_O}', false,
           '{history_id}', 'cancelled')"""
-    return f"""INSERT INTO venue_credit_mirror(exchange_account_id, deployment_environment,
+    return f"""INSERT INTO venue_credit_mirror(exchange_account_id,
       venue_credit_id, source_kind, symbol, amount, status, last_accepted_observation_id,
       present_in_latest_accepted_snapshot, terminal_evidence_id, terminal_kind)
-      VALUES ('{_A}', 'ci', '{venue_id}', 'credit', 'fUST', 1, 'CLOSED', '{_O}', false,
+      VALUES ('{_A}', '{venue_id}', 'credit', 'fUST', 1, 'CLOSED', '{_O}', false,
       '{history_id}', 'closed')"""
 
 

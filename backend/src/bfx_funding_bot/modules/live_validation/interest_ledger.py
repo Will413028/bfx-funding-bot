@@ -64,7 +64,6 @@ class InterestLedgerSync:
         ctx: AccountContext,
         session_factory: async_sessionmaker[AsyncSession],
         exchange_account_id: UUID,
-        deployment_environment: str,
         currencies: Sequence[str],
         interval_s: int = DEFAULT_INTERVAL_S,
         clock: Callable[[], int] | None = None,
@@ -73,7 +72,6 @@ class InterestLedgerSync:
         self._ctx = ctx
         self._sf = session_factory
         self._account = exchange_account_id
-        self._env = deployment_environment
         self._currencies = tuple(currencies)
         self._interval_s = interval_s
         self._clock = clock or (lambda: int(time.time() * 1000))
@@ -106,7 +104,7 @@ class InterestLedgerSync:
         # Category 28 also carries margin interest; only the funding wallet is lending.
         rows = [{
             "exchange_account_id": self._account, "ledger_id": p.ledger_id,
-            "deployment_environment": self._env, "currency": p.currency, "mts": p.mts,
+            "currency": p.currency, "mts": p.mts,
             "amount": p.amount, "balance": p.balance, "description": p.description,
         } for p in payments if p.wallet == "funding"]
         if not rows:

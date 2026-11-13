@@ -25,6 +25,7 @@ on:
       - backend/tests/integration/test_ledger_command_authorize.py
       # The gate itself.
       - backend/scripts/capital_mutation_gate.py
+      - backend/scripts/mutation_sandbox.py
       - .github/workflows/capital-rules.yml
       - .github/actions/postgres-18/action.yml
   schedule:
@@ -62,7 +63,7 @@ jobs:
         run: |
           changed="$(git diff --name-only HEAD^1 HEAD)"
           echo "$changed"
-          pattern='^(backend/src/bfx_funding_bot/modules/execution/safety/hard_guards\.py|backend/src/bfx_funding_bot/modules/ledger/_internal/journal\.py|backend/tests/integration/test_capital_command_boundary\.py|backend/tests/integration/test_ledger_command_authorize\.py|backend/scripts/capital_mutation_gate\.py|\.github/workflows/capital-rules\.yml|\.github/actions/postgres-18/action\.yml)$'
+          pattern='^(backend/src/bfx_funding_bot/modules/execution/safety/hard_guards\.py|backend/src/bfx_funding_bot/modules/ledger/_internal/journal\.py|backend/tests/integration/test_capital_command_boundary\.py|backend/tests/integration/test_ledger_command_authorize\.py|backend/scripts/capital_mutation_gate\.py|backend/scripts/mutation_sandbox\.py|\.github/workflows/capital-rules\.yml|\.github/actions/postgres-18/action\.yml)$'
           if grep -qE "$pattern" <<< "$changed"; then
             echo "args=--include-integration" >> "$GITHUB_OUTPUT"
           else
@@ -79,7 +80,7 @@ jobs:
         uses: ./.github/actions/postgres-18
       - env:
           GATE_ARGS: ${{ steps.scope.outputs.args }}
-        run: uv run python scripts/capital_mutation_gate.py ${GATE_ARGS:+"$GATE_ARGS"}
+        run: uv run python -m scripts.capital_mutation_gate ${GATE_ARGS:+"$GATE_ARGS"}
 
   nightly:
     name: Nightly properties (1k) and full capital mutation gate
@@ -108,4 +109,4 @@ jobs:
       - name: Property tests (nightly profile)
         run: uv run pytest -m "property and not integration" --hypothesis-profile=nightly -q -n auto
       - name: Capital mutation gate (all mutants)
-        run: uv run python scripts/capital_mutation_gate.py --include-integration
+        run: uv run python -m scripts.capital_mutation_gate --include-integration

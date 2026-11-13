@@ -49,6 +49,7 @@ from bfx_funding_bot.modules.ledger import (
     UncertaintyReader,
     VenueHintSink,
 )
+from bfx_funding_bot.modules.ledger.read import build_operator_reads
 from bfx_funding_bot.modules.ledger.wiring import (
     build_capital_authority,
     build_command_journal,
@@ -57,7 +58,6 @@ from bfx_funding_bot.modules.ledger.wiring import (
     build_ledger_managed_offers,
     build_managed_offer_reader,
     build_observation_sink,
-    build_operator_reads,
     build_operator_resolution,
     build_policy_store,
     build_scope_lock,
@@ -165,7 +165,7 @@ def build_capital_ports(
         operator_resolution=build_operator_resolution(),
         deployment_input=LedgerDeploymentInput(
             session_factory=session_factory, account_id=scope.exchange_account_id,
-            environment=scope.deployment_environment, offers=build_ledger_managed_offers(),
+            offers=build_ledger_managed_offers(),
         ),
         observation=observation,
         uncertainty_reader=build_uncertainty_reader(session_factory),

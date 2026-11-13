@@ -12,11 +12,10 @@ import pytest
 from sqlalchemy import insert
 
 from bfx_funding_bot.modules.execution.safety.tables import TradingControlRequestRow
-from bfx_funding_bot.modules.execution.safety.trading_state import (
-    IllegalTradingTransition,
-    TradingStateRepository,
-)
+from bfx_funding_bot.modules.execution.safety.trading_state import IllegalTradingTransition
+from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
 from bfx_funding_bot.modules.execution.trading_control import TradingControlWorker
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 from bfx_funding_bot.modules.observability import alerts
 
 pytestmark = pytest.mark.integration
@@ -29,16 +28,14 @@ async def allow(session, *, account_id, user) -> bool:
 
 
 def worker(factory, account, *, now=lambda: T0) -> TradingControlWorker:
-    return TradingControlWorker(session_factory=factory, account_id=account, environment="ci",
-                                authority=allow, clock=lambda: now())
+    return TradingControlWorker(session_factory=factory, account_id=account, authority=allow, clock=lambda: now(), scope_lock=build_scope_lock())
 
 
 async def request(factory, account, action, *, by="operator", at=T0):
     request_id = uuid4()
     async with factory.begin() as session:
         await session.execute(insert(TradingControlRequestRow).values(
-            request_id=request_id, exchange_account_id=account, deployment_environment="ci",
-            action=action, reason=f"{action} for test", requested_by=by, created_at_ms=at))
+            request_id=request_id, exchange_account_id=account, action=action, reason=f"{action} for test", requested_by=by, created_at_ms=at))
     return request_id
 
 
@@ -57,11 +54,11 @@ async def written_by(factory, state_id):
 
 
 async def state_of(factory, account):
-    return await TradingStateRepository(factory, account_id=account, deployment_environment="ci").current()
+    return await TradingStateRepository(factory, account_id=account, scope_lock=build_scope_lock()).current()
 
 
 async def start(factory, account, state="ACTIVE", cause="operator"):
-    repo = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    repo = TradingStateRepository(factory, account_id=account, scope_lock=build_scope_lock())
     if state != "ACTIVE":
         await repo.transition("ACTIVE", cause="operator", actor="t", reason="setup", now_ms=1)
     await repo.transition(state, cause=cause, actor="t", reason="setup", now_ms=2)
@@ -261,8 +258,7 @@ async def audit(factory, account, *phases, currency="UST", at=T0):
     async with factory.begin() as session:
         for phase in phases:
             session.add(FundingCancelAllAuditRow(
-                exchange_account_id=account, deployment_environment="ci",
-                trading_state_id=current.id, attempt_id=attempt, currency=currency, phase=phase,
+                exchange_account_id=account, trading_state_id=current.id, attempt_id=attempt, currency=currency, phase=phase,
                 actor="operator", occurred_at_ms=at))
 
 
@@ -334,7 +330,7 @@ async def test_a_kill_resumed_since_is_never_caught_up(migrated_db):
     clock[0] = T0 + 1
     assert await w.process(await request(factory, account, "resume", at=T0 + 1)) == "applied"
     await w.idle()       # ACTIVE: nothing to do
-    repo = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    repo = TradingStateRepository(factory, account_id=account, scope_lock=build_scope_lock())
     await repo.transition("HALTED", cause="auto", actor="auto:x", reason="x", now_ms=T0 + 2)
     await w.idle()
     assert w.kill_switch.requests == []
@@ -360,7 +356,7 @@ async def test_a_resume_in_the_kills_own_millisecond_still_ends_it(migrated_db, 
     await cut_off_kill(factory, account, w)
     assert await w.process(await request(factory, account, "resume")) == "applied"
     await w.idle()       # ACTIVE: nothing to do
-    repo = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    repo = TradingStateRepository(factory, account_id=account, scope_lock=build_scope_lock())
     await repo.transition("HALTED", cause="auto", actor="auto:x", reason="x", now_ms=T0)
     await w.idle()
     assert w.kill_switch.requests == []

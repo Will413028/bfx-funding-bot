@@ -28,7 +28,6 @@ class BotRunRow(Base):
         PG_UUID(as_uuid=True), ForeignKey("exchange_accounts.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     started_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     source_revision: Mapped[str | None] = mapped_column(Text, nullable=True)
     image_digest: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -48,6 +47,5 @@ class BotRunRow(Base):
             "(end_reason IS NULL) = (end_recorded_at_ms IS NULL)",
             name="ck_bot_runs_end_pair",
         ),
-        Index("ix_bot_runs_scope_started", "exchange_account_id", "deployment_environment",
-              "started_at_ms"),
+        Index("ix_bot_runs_scope_started", "exchange_account_id", "started_at_ms"),
     )

@@ -32,7 +32,7 @@ def _make_periodic(*, recovery, scope=None, **kwargs):
     if kwargs.get("deployment") is not None:
         kwargs.setdefault("deployment_input", _Input())
     return PeriodicReconcile(resync=ResyncChannel(), recovery=recovery,
-                             scope=scope or Scope(uuid4(), "ci"), **kwargs)
+                             scope=scope or Scope(uuid4()), **kwargs)
 
 
 class _FakeProbe:
@@ -282,7 +282,7 @@ async def test_periodic_expected_refusal_is_not_transport_failure():
     recovery = AsyncMock()
     recovery.run.return_value = CycleResult("fenced")
     periodic = _make_periodic(
-        recovery=recovery, scope=Scope(uuid4(), "ci"), probe=_FakeProbe(), interval_s=90,
+        recovery=recovery, scope=Scope(uuid4()), probe=_FakeProbe(), interval_s=90,
     )
     await periodic._tick()
     assert periodic._consecutive_failures == 0

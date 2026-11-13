@@ -7,19 +7,41 @@ import os
 import signal
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
 
 import httpx
-from sqlalchemy.ext.asyncio import (
-    async_sessionmaker,
-)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.apps.authority_support import require_ledger_epoch
 from bfx_funding_bot.apps.bot_ports import ObservationVenue, build_capital_ports
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS, load_config
+from bfx_funding_bot.apps.runtime.boot_wait import wait_for_database
+from bfx_funding_bot.apps.runtime.config import MarketfeedConfig
+from bfx_funding_bot.apps.runtime.daemon import (
+    Daemon,
+    assert_live_guard_invariant,
+    load_account_bootstrap,
+    require_env,
+)
+from bfx_funding_bot.apps.runtime.divergence_reporter import DivergenceReporter
+from bfx_funding_bot.apps.runtime.health_monitor import HealthMonitor
+from bfx_funding_bot.apps.runtime.market_data import MarketDataRuntime
+from bfx_funding_bot.apps.runtime.scheduler import (
+    Scheduler,
+    now_ms_utc,
+)
+from bfx_funding_bot.apps.runtime.signal_engine import SignalEngine
+from bfx_funding_bot.apps.runtime.strategy_registry import StrategyRegistry
+from bfx_funding_bot.apps.runtime.tick_candles import read_tick_candles
+from bfx_funding_bot.apps.runtime.warmup import (
+    WarmupResult,
+    rehydrate_boot_boundary,
+    warmup_cell,
+)
 from bfx_funding_bot.apps.venue import VenueSeam, build_venue
 from bfx_funding_bot.core.bounded import run_bounded
 from bfx_funding_bot.core.crypto import load_kek
@@ -37,6 +59,7 @@ from bfx_funding_bot.core.loop_watchdog import LoopWatchdog, loop_watchdog_timeo
 from bfx_funding_bot.core.schema_head import assert_schema_head
 from bfx_funding_bot.core.secret_files import read_secret, warn_ignored_env_keys
 from bfx_funding_bot.core.security_log import BOOT_REFUSED, security_event
+from bfx_funding_bot.core.settings import deployment_environment_label
 from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level
 from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
@@ -56,11 +79,10 @@ from bfx_funding_bot.external.bitfinex.ws import (
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     account_id_uuid_or_none,
 )
-from bfx_funding_bot.modules.admin.trading_status import CapitalStatusReads, TradingStatusService
-from bfx_funding_bot.modules.candles.repository import get_up_to, seal_closed_periods
+from bfx_funding_bot.modules.candles.repository import get_up_to
 from bfx_funding_bot.modules.candles.service import reindex_and_ffill
 from bfx_funding_bot.modules.deployments.identity import DeploymentIdentity
-from bfx_funding_bot.modules.execution.audit import ExecutionDecisionRecorder
+from bfx_funding_bot.modules.execution.audit import AuditContext, ExecutionDecisionRecorder
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.command_boundary import CommandOutcomeNotice
@@ -87,19 +109,23 @@ from bfx_funding_bot.modules.execution.events import (
 from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
 from bfx_funding_bot.modules.execution.middleware import (
     HeartbeatMiddleware,
+    MetricsSubmitMiddleware,
     ReservationEmittingMiddleware,
+    TimedReconcileRecovery,
+    TracedReconcileRecovery,
+    TracingSubmitMiddleware,
+    instrument_ws_dispatcher,
 )
-from bfx_funding_bot.modules.execution.operator_requests import operator_authorized
+from bfx_funding_bot.modules.execution.operator_request_worker import operator_authorized
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.protocols import (
-    CancelPort,
     ExecutorPort,
-    FundingCancelAllPort,
     GuardRule,
-    VenueExecutorPort,
 )
+from bfx_funding_bot.modules.execution.readiness import TradingReadiness
 from bfx_funding_bot.modules.execution.registry import build_executor
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
+from bfx_funding_bot.modules.execution.safety.boot_stop import report_refused_boot
 from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
 from bfx_funding_bot.modules.execution.safety.config import (
     load_safety_config,
@@ -126,12 +152,14 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     NavDropMonitor,
     WriterLockWatch,
 )
-from bfx_funding_bot.modules.execution.safety.trading_state import (
-    TradingStateRepository,
-)
+from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
 from bfx_funding_bot.modules.execution.trading_control import TradingControlWorker
-from bfx_funding_bot.modules.execution.uncertainty_requests import (
-    ResolutionScope,
+from bfx_funding_bot.modules.execution.trading_status import (
+    CapitalStatusReads,
+    TradingStatusService,
+)
+from bfx_funding_bot.modules.execution.uncertainty_requests import ResolutionScope
+from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
     UncertaintyResolutionWorker,
 )
 from bfx_funding_bot.modules.execution.ws_dispatcher import BitfinexLiveWSDispatcher
@@ -147,52 +175,21 @@ from bfx_funding_bot.modules.live_validation.interest_ledger import (
     funding_currency,
 )
 from bfx_funding_bot.modules.live_validation.regime import record_config_regime
-from bfx_funding_bot.modules.marketfeed.book_snapshot import BookSnapshotWriter
-from bfx_funding_bot.modules.marketfeed.boot_wait import wait_for_database
+from bfx_funding_bot.modules.market._internal.book import FundingBookService, FundingBookStore
+from bfx_funding_bot.modules.market._internal.recorders.book_snapshot import BookSnapshotWriter
 from bfx_funding_bot.modules.marketfeed.candle_writer import CandleWriter
-from bfx_funding_bot.modules.marketfeed.daemon import (
-    Daemon,
-    _DaemonAuditContextFactory,
-    _emit_locf_degraded,
-    _refuse_live_boot,
-    assert_live_guard_invariant,
-    load_account_bootstrap,
-    log,
-)
-from bfx_funding_bot.modules.marketfeed.divergence_reporter import DivergenceReporter
-from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookService, FundingBookStore
-from bfx_funding_bot.modules.marketfeed.health_monitor import HealthMonitor
-from bfx_funding_bot.modules.marketfeed.readiness import TradingReadiness
-from bfx_funding_bot.modules.marketfeed.scheduler import (
-    Scheduler,
-    now_ms_utc,
-)
-from bfx_funding_bot.modules.marketfeed.signal_engine import SignalEngine
-from bfx_funding_bot.modules.marketfeed.strategy_registry import StrategyRegistry
-from bfx_funding_bot.modules.marketfeed.warmup import (
-    WarmupResult,
-    rehydrate_boot_boundary,
-    warmup_cell,
-)
 from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.observability.bot_runs import BotRunRecord
 from bfx_funding_bot.modules.observability.error_tracking import init_error_tracking
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
-    MetricsSubmitMiddleware,
-    TimedReconcileRecovery,
     attach_httpx_metrics,
     install_log_metrics_handler,
 )
 from bfx_funding_bot.modules.observability.resource import EventResource
 from bfx_funding_bot.modules.observability.stdout_sink import StdoutEventSink
-from bfx_funding_bot.modules.observability.tracing import (
-    TracedReconcileRecovery,
-    TracingSubmitMiddleware,
-    instrument_ws_dispatcher,
-    tracing_from_env,
-)
-from bfx_funding_bot.modules.strategy import CellConfig, configured_symbols
+from bfx_funding_bot.modules.observability.tracing import tracing_from_env
+from bfx_funding_bot.modules.strategy import CellConfig, DecisionPayload, configured_symbols
 from bfx_funding_bot.modules.strategy.wiring import build_strategy, build_strategy_at_boundary
 
 _BITFINEX_REST_BASE_URL = "https://api-pub.bitfinex.com"
@@ -212,6 +209,82 @@ def admin_tokens(env: Mapping[str, str]) -> tuple[str | None, str | None]:
         read = None
     return admin, read
 
+log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class _AuditContextFactory:
+    account_id: str
+    service_version: str
+    config_hash: str
+
+    def build(
+        self, *, candidate: DecisionPayload, cell_id: str, reconcile_id: str,
+    ) -> AuditContext:
+        return AuditContext(
+            account_id=self.account_id,
+            reconcile_id=reconcile_id,
+            cell_id=cell_id,
+            symbol=candidate.symbol,
+            signal_correlation_id=str(candidate.signal_correlation_id),
+            service_version=self.service_version,
+            config_hash=self.config_hash,
+        )
+
+
+async def _emit_locf_degraded(
+    stdout_sink: StdoutEventSink,
+    config: MarketfeedConfig,
+    cell: CellConfig,
+    stale_seconds: int | None,
+    budget_seconds: int,
+) -> None:
+    """Emit HealthCheckPayload SIGNAL_PIPELINE DEGRADED reason=stale_exceeded.
+
+    Called from two paths: (a) no candles in lookback window (stale_seconds=None),
+    (b) source candle older than budget (stale_seconds = computed wall-clock gap).
+
+    # LOCF DEGRADED events carry cell_id in the "cell" envelope field (HealthMonitor._emit
+    # always writes "cell": None — intentional divergence to enable per-cell dashboards).
+    """
+    error_message = (
+        "stale_exceeded: no candles in lookback window"
+        if stale_seconds is None
+        else "stale_exceeded"
+    )
+    payload: dict[str, object] = {
+        "check_target": HealthTarget.SIGNAL_PIPELINE.value,
+        "status": HealthStatus.DEGRADED.value,
+        "error_message": error_message,
+        "reason": "stale_exceeded",
+        "stale_seconds": stale_seconds,
+        "budget_seconds": budget_seconds,
+    }
+    await stdout_sink.emit({
+        "timestamp": datetime.now(UTC).isoformat(),
+        "level": Level.WARN.value,
+        "phase": config.phase.value,
+        "strategy": None,
+        "cell": cell.cell_id,
+        "event_type": EventType.HEALTH_CHECK.value,
+        "correlation_id": str(uuid4()),
+        "payload": payload,
+    })
+
+
+async def _refuse_live_boot(exc: BaseException, *, config: MarketfeedConfig,
+                            session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """A live boot that refuses to run alerts (``safety/boot_stop``) before the
+    error is raised; nothing is written and nothing reaches the venue."""
+    try:
+        account_id = UUID(require_env("BFX_EXCHANGE_ACCOUNT_ID"))
+    except Exception:
+        log.critical("boot_refused_without_account account unknown")
+        return
+    report_refused_boot(account_id=account_id, environment=config.deployment_environment.value,
+                        reason=f"boot_blocked: {str(exc) or type(exc).__name__}")
+
+
 async def build_daemon(
     *,
     cells_yaml_path: Path | None = None,
@@ -219,20 +292,21 @@ async def build_daemon(
     venue_seam: VenueSeam | None = None,
     stop_event: asyncio.Event | None = None,
 ) -> Daemon:
-    """Compose one bot process. ``venue_seam`` is for tests: production passes nothing, so
-    the simulated venue runs on the live market feed and without injected faults.
+    """Compose one bot process. ``venue_seam`` is for tests: the simulated venue's market feed
+    and faults; production passes nothing, and a simulated boot without it is refused.
     ``stop_event`` becomes the daemon's stop event; ``_run`` passes the one its loop
     watchdog already follows."""
     # Created first: the daemon stops on it, and an applied credential rotation sets it.
     stop_event = stop_event if stop_event is not None else asyncio.Event()
-    config = load_config(cells_yaml_path=cells_yaml_path)
+    config = load_config(
+        cells_yaml_path=cells_yaml_path, simulated_venue=venue_seam is not None)
     db_engine = make_async_engine_from_url(config.database_url)
     session_factory = async_sessionmaker(db_engine, expire_on_commit=False)
     # Both venues, in this order, before the credential vault or any client is touched:
     # a database at another schema means this is the wrong build for it (for instance a
     # rollback onto a newer schema); its stamped realm must equal the realm this process
     # runs as (E2); and the capital authority epoch is read once: either venue runs only
-    # on the ledger, and the real venue only on an epoch a known writer appended
+    # on a ``ledger`` epoch a known writer appended, with no venue exemption
     # (``apps/authority_support.py``), before any ledger write. Any refusal stops the boot and
     # alerts (``_refuse_live_boot``: alert routing is configuration, the sink prefixes the realm).
     try:
@@ -242,7 +316,7 @@ async def build_daemon(
         async with session_factory() as boot_session:
             await assert_schema_head(boot_session)
             await assert_database_realm(boot_session, config.deployment_environment.value)
-            await require_ledger_epoch(boot_session, venue=config.venue)
+            await require_ledger_epoch(boot_session)
     except Exception as exc:
         await _refuse_live_boot(exc, config=config, session_factory=session_factory)
         await db_engine.dispose()
@@ -250,16 +324,14 @@ async def build_daemon(
     try:
         async with session_factory() as bootstrap_session:
             account_bootstrap = await load_account_bootstrap(
-                bootstrap_session,
-                deployment_environment=config.deployment_environment.value,
-                phase=config.phase,
+                bootstrap_session, phase=config.phase,
             )
     except Exception:
         await db_engine.dispose()
         raise
     # Capital ports: every adapter a consumer binds to is the ledger's (apps/bot_ports.py).
     env_str = config.deployment_environment.value
-    capital_scope = Scope(account_bootstrap.exchange_account_id, env_str)
+    capital_scope = Scope(account_bootstrap.exchange_account_id)
     account_id = account_bootstrap.account_id
     bus = DomainEventBus()
     resync = ResyncChannel()
@@ -288,8 +360,9 @@ async def build_daemon(
     metrics = DaemonMetrics()
     metrics.register_probe(probe)  # heartbeat age/threshold + health_status
     install_log_metrics_handler(metrics)  # WARNING+ error-rate, idempotent
-    # Dependency freshness this process reports: the public WS's market data (when it
-    # runs one) and the database. Each starts not ready until its first beat.
+    # Dependency freshness this process reports: the account's book feed (not watched in
+    # skip_ws test compositions, which detach the network) and the database. Each starts
+    # not ready until its first beat.
     market_data_dependencies = [] if skip_ws else [MARKET_DATA_FRESHNESS]
     trading_readiness = TradingReadiness(
         on_change=metrics.set_trading_ready,
@@ -336,7 +409,7 @@ async def build_daemon(
         venue_wiring = await build_venue(
             config, exchange_account_id=account_bootstrap.exchange_account_id,
             session_factory=session_factory, db_engine=db_engine,
-            bitfinex_http=bitfinex_http, bitfinex=bitfinex, clock=now_ms_utc, metrics=metrics,
+            bitfinex_http=bitfinex_http, clock=now_ms_utc, metrics=metrics,
             seam=venue_seam,
         )
     except Exception as exc:
@@ -413,7 +486,6 @@ async def build_daemon(
 
     diagnostics = DiagnosticsSink(
         session_factory=session_factory, account_id=account_id,
-        deployment_environment=env_str,
         metrics=metrics,  # bfx_diagnostic_events_total (safety trips / decisions)
     )
     # Safety config — immutable for daemon lifetime. Config change = redeploy.
@@ -435,12 +507,9 @@ async def build_daemon(
     window_account = account_id_uuid_or_none(account_id)
     pnl_source = ReconcileNavTracker(
         account_id=account_id,
-        peak_store=NavPeakStore(
-            session_factory, account_id=account_id, deployment_environment=env_str,
-        ),
+        peak_store=NavPeakStore(session_factory, account_id=account_id),
         # T9: the 24h loss window survives restarts (canonical accounts only).
-        window_store=(NavWindowStore(session_factory, account_id=window_account,
-                                     deployment_environment=env_str)
+        window_store=(NavWindowStore(session_factory, account_id=window_account)
                       if window_account is not None else None),
     )
     # Seed the all-time peak from nav_peak so drawdown_pct survives restarts
@@ -453,7 +522,7 @@ async def build_daemon(
     # peak store above: an unreadable trading state blocks submits rather than
     # degrading gracefully — see ManualKillGuard.
     trading_state = TradingStateRepository(
-        session_factory, account_id=account_id, deployment_environment=env_str,
+        session_factory, account_id=account_id, scope_lock=capital.scope_lock,
     )
 
     # cells[0] used for safety_chain emit envelope (phase/strategy/cell) —
@@ -468,17 +537,12 @@ async def build_daemon(
     # (assert_live_guard_invariant). Capital limits are the applied
     # CapitalPolicy's, enforced by CapitalPolicyGuard below.
 
-    # bus is the executor's construction dependency, so it is created above.
-    # Env-driven via registry (CC4 invariant — WS client required).
+    # Env-driven via registry (CC4 invariant — WS client required). The bus
+    # created above goes to the command gate, which publishes the cancel events.
     all_symbols = frozenset(configured_symbols(config.cells))
     spec = build_executor(
-        event_sink=stdout_sink,
-        phase=config.phase,
-        strategy=first_cell.strategy,
         configured_symbols=all_symbols,
-        cell=first_cell.cell_id,
         http=venue_wiring.auth_http,
-        bus=bus,
         auth_gate=bfx_auth_gate,
         clock=now_ms_utc,
     )
@@ -491,7 +555,7 @@ async def build_daemon(
     # guard-append and the return.
     writer_lock = WriterLock(
         database_url=config.database_url,
-        key=derive_lock_key(account_id, env_str),
+        key=derive_lock_key(account_id),
     )
     if config.database_url.startswith(("postgres", "postgresql")):
         await writer_lock.acquire()  # raises WriterLockUnacquired on contention
@@ -504,29 +568,27 @@ async def build_daemon(
                 pending_stop=protection.pending_reason,
             )
         )
-    # UNKNOWN/orphan exposure is always account+environment+symbol scoped and
+    # UNKNOWN/orphan exposure is always account+symbol scoped and
     # must be read before the reconciler computes an economic gap.  It is not
     # configurable off in canary/live because an unreadable projection fails
     # closed inside the guard.
-    guards.append(UncertaintyGuard(
-        reader=uncertainty_reader,
-        deployment_environment=env_str,
-    ))
+    guards.append(UncertaintyGuard(reader=uncertainty_reader))
     if hg.auth_health.enabled:
         guards.append(AuthHealthGuard(probe=probe))
     if hg.heartbeat.enabled:
         guards.append(HeartbeatGuard(
             probe=probe,
             # Readiness gate: block POST only when our MARKET VIEW is stale.
-            # Watch market-data freshness ("ws_data": a public WS frame seen),
+            # Watch market-data freshness ("ws_data": a frame on the account's own
+            # funding book feed, which prices the offer; ADR 2026-10-19 D1),
             # not the reactive executor/safety_chain — those are bumped only by
             # trading itself, so watching them self-suppresses trades in quiet
             # markets and was part of the 2026-05-26 canary restart loop. ws_data
-            # stays fresh in quiet markets via Daemon._ws_freshness_tick
+            # stays fresh in quiet markets via freshness.book_freshness_tick
             # (Bitfinex hb ~15s); a venue outage ages it and blocks here, with
             # no restart. Never seen since boot also blocks, until the first
-            # frame. A composition without the public WS (skip_ws, tests only)
-            # has no such dependency to watch.
+            # frame. skip_ws compositions (tests only, which detach or replace the
+            # network) do not watch it; their book feed still runs.
             watched_sub_tasks=market_data_dependencies,
         ))
     guards.append(CapitalPolicyGuard(authority=capital.capital_authority, scope=capital_scope,
@@ -555,7 +617,7 @@ async def build_daemon(
         ttl_ms=int(os.environ.get("BFX_QUOTE_TTL_MS", "3900000")),
     )
 
-    executor: VenueExecutorPort = spec.executor
+    executor = spec.executor
 
     # 3a-recovery: venue reconciliation against the real venue.
     book_snapshot_writer: BookSnapshotWriter | None = None
@@ -564,14 +626,12 @@ async def build_daemon(
     interest_ledger_sync = InterestLedgerSync(
         rest=auth_rest, ctx=account_ctx, session_factory=session_factory,
         exchange_account_id=account_bootstrap.exchange_account_id,
-        deployment_environment=env_str,
         currencies=sorted({funding_currency(s) for s in configured_symbols(config.cells)}),
     )
     # Per-credit truth (credit history + funding trades), read-only: see credit_history.
     credit_history_sync = CreditHistorySync(
         rest=auth_rest, ctx=account_ctx, session_factory=session_factory,
         exchange_account_id=account_bootstrap.exchange_account_id,
-        deployment_environment=env_str,
         symbols=sorted(configured_symbols(config.cells)),
     )
     reconcile_interval_s = float(os.environ.get("BFX_RECONCILE_INTERVAL_S", "90"))
@@ -626,6 +686,7 @@ async def build_daemon(
     # no-retry submit contract below are untouched.
     reservation_middleware = ReservationEmittingMiddleware(
         executor,
+        bus=bus,
         safety_evaluator=safety_chain,
         boundary=capital.command_boundary,
         uncertainty_reader=uncertainty_reader,
@@ -663,12 +724,13 @@ async def build_daemon(
     funding_rules = FundingRules(http=bitfinex_http, clock=now_ms_utc)
     trading_control = TradingControlWorker(
         session_factory=session_factory, account_id=UUID(account_id),
-        environment=env_str, authority=operator_authorized, clock=now_ms_utc,
+        authority=operator_authorized, scope_lock=capital.scope_lock,
+        clock=now_ms_utc,
         ownership=writer_lock.verify_held,
     )
     capital_policy_control = CapitalPolicyRequestWorker(
         session_factory=session_factory, account_id=UUID(account_id),
-        environment=env_str, authority=operator_authorized,
+        authority=operator_authorized,
         policy_store=capital.policy_store, scope_lock=capital.scope_lock,
         clock=now_ms_utc,
         ownership=writer_lock.verify_held,
@@ -680,7 +742,8 @@ async def build_daemon(
         rotation_http = venue_wiring.auth_http
         credential_rotation = CredentialRotationWorker(
             session_factory=session_factory, account_id=UUID(account_id),
-            environment=env_str, authority=operator_authorized,
+            authority=operator_authorized,
+            scope_lock=capital.scope_lock,
             client_factory=lambda: BitfinexAuthREST(http=rotation_http,
                                                     auth_gate=AuthRequestGate()),
             kek_loader=load_kek, restart=stop_event.set,
@@ -710,7 +773,7 @@ async def build_daemon(
         clock=now_ms_utc,
         event_sink=stdout_sink,
         phase=config.phase,
-        canceller=reservation_middleware if isinstance(executor, CancelPort) else None,
+        canceller=reservation_middleware,
         reprice=reprice_policy,
         ladder=ladder_policy,
         attempt_recorder=attempt_recorder,
@@ -724,24 +787,22 @@ async def build_daemon(
         ),
         # Every decision names the build that made it: the revision and
         # image digest the deploy tool injected.
-        audit_context_factory=_DaemonAuditContextFactory(
+        audit_context_factory=_AuditContextFactory(
             account_id=account_id,
-            deployment_environment=env_str,
             service_version=deployment_identity.source_revision or "unidentified",
             config_hash=deployment_identity.backend_digest or "unidentified",
         ),
         protection=protection,
-        managed_sweep=(ManagedOfferSweep(
+        managed_sweep=ManagedOfferSweep(
             session_factory=session_factory, account_id=UUID(account_id),
-            environment=env_str, canceller=reservation_middleware, ctx=account_ctx,
-            offers=managed_offers)
-            if isinstance(executor, CancelPort) else None),
+            canceller=reservation_middleware, ctx=account_ctx,
+            offers=managed_offers),
     )
     # The web API queues operator adjudications; only this writer appends them.
     uncertainty_worker = UncertaintyResolutionWorker(
         session_factory=session_factory,
-        scope=ResolutionScope(account_bootstrap.exchange_account_id, env_str),
-        authority=operator_authorized,
+        scope=ResolutionScope(account_bootstrap.exchange_account_id),
+        authority=operator_authorized, scope_lock=capital.scope_lock,
         clock=now_ms_utc,
         ownership=writer_lock.verify_held,
         resolution=capital.operator_resolution,
@@ -752,7 +813,6 @@ async def build_daemon(
     await record_config_regime(
         session_factory,
         account_id=account_id,
-        deployment_environment=env_str,
         clamp_enabled=False,
         reprice_enabled=reprice_policy.enabled,
         git_sha=deployment_identity.source_revision,
@@ -800,7 +860,7 @@ async def build_daemon(
         # that has mts = T - timeframe.
         # Discovered Phase 4.2.0 d90363fa shadow run: 56 degraded events,
         # 0 signal events because query used mts=T (always empty).
-        from bfx_funding_bot.modules.marketfeed.scheduler import _TIMEFRAME_MS
+        from bfx_funding_bot.apps.runtime.scheduler import _TIMEFRAME_MS
         candle_mts = mts - _TIMEFRAME_MS[cell.timeframe]
 
         # Phase 4.3 LOCF: fetch a lookback window and LOCF-fill gaps.
@@ -811,27 +871,10 @@ async def build_daemon(
         # tier. Strategy state itself lives in the pre-warmed StrategyRegistry which
         # was fed during daemon startup — NOT re-fed from this small window.
         lookback = budget_hours + 1  # +1 to ensure boundary candle is included
-        async with session_factory() as s:
-            # Seal on elapsed time before reading. CandleWriter only seals when a
-            # LATER mts lands, so a slow venue push leaves mts=candle_mts unsealed
-            # at exactly the moment we need it — a final-only read then skips it,
-            # LOCF fills the slot from the previous candle, and the live observe
-            # sequence gains a hole that replay does not have.
-            await seal_closed_periods(
-                s,
-                symbol=cell.symbol,
-                timeframe=cell.timeframe,
-                period_agg=cell.period_agg,
-            )
-            await s.commit()
-            raw_candles = await get_up_to(
-                s,
-                symbol=cell.symbol,
-                timeframe=cell.timeframe,
-                period_agg=cell.period_agg,
-                mts_inclusive=candle_mts,
-                lookback=lookback,
-            )
+        raw_candles = await read_tick_candles(
+            session_factory=session_factory, bitfinex=bitfinex, cell=cell,
+            candle_mts=candle_mts, lookback=lookback,
+        )
 
         filled = reindex_and_ffill(
             raw_candles, ref_mts=candle_mts, max_gap_hours=budget_hours,
@@ -962,7 +1005,7 @@ async def build_daemon(
         session_factory=session_factory,
         ctx=account_ctx,
         configured_symbols=all_symbols,
-        venue=executor if isinstance(executor, FundingCancelAllPort) else None,
+        venue=executor,
         writer_lock=writer_lock,
         uncertainty=uncertainty_reader,
         offers=managed_offers,
@@ -982,11 +1025,12 @@ async def build_daemon(
     trading_status = TradingStatusService(
         chain=safety_chain,
         exposure=CapitalStatusReads(
-            authority=capital.capital_authority, lock=capital.scope_lock, scope=capital_scope,
+            authority=capital.capital_authority, scope=capital_scope,
             session_factory=session_factory, clock=now_ms_utc),
         account_ctx=account_ctx,
         cells=config.cells,
         phase=config.phase,
+        deployment_environment=env_str,
         attempts=attempt_recorder,
         trading_state=trading_state,
         kill_switch=kill_switch,
@@ -1048,15 +1092,12 @@ async def build_daemon(
         config=config,
         account_bootstrap=account_bootstrap,
         registry=registry,
-        candle_q=candle_q,
         diagnostics=diagnostics,
         probe=probe,
         monitor=monitor,
         scheduler=scheduler,
         signal_engine=signal_engine_obj,
         db_engine=db_engine,
-        ws_client=ws_client,
-        writer=writer,
         bitfinex_http=bitfinex_http,
         bitfinex=bitfinex,
         session_factory=session_factory,
@@ -1068,7 +1109,11 @@ async def build_daemon(
         ws_dispatcher=ws_dispatcher,
         boot_recovery=boot_recovery,
         observation_scope=capital_scope if boot_recovery is not None else None,
-        book_snapshot_writer=book_snapshot_writer,
+        market_data=MarketDataRuntime(
+            cells=config.cells, probe=probe, candle_q=candle_q, writer=writer,
+            ws_client=ws_client, bitfinex=bitfinex, session_factory=session_factory,
+            book_snapshot_writer=book_snapshot_writer,
+        ),
         interest_ledger_sync=interest_ledger_sync,
         credit_history_sync=credit_history_sync,
         funding_book_service=funding_book_service,
@@ -1091,9 +1136,7 @@ async def build_daemon(
         credential_compliance=credential_compliance,
         writer_lock_watch=WriterLockWatch(lock=writer_lock),
         boot_mts=now_mts,
-        venue_tasks=venue_wiring.tasks,
         venue_aclose=venue_wiring.aclose,
-        venue_diagnostics=venue_wiring.simulated,
         # Credential recovery mode ends when the vault's active key is no longer this one;
         # the simulated venue's throwaway keys are in no vault.
         boot_credential_api_key=(venue_wiring.credentials.api_key
@@ -1106,7 +1149,7 @@ async def build_daemon(
 def main() -> None:
     configure_logging("bot")
     warn_ignored_env_keys(log)
-    init_error_tracking("bot", os.environ)
+    init_error_tracking("bot", os.environ, environment=deployment_environment_label())
     try:
         asyncio.run(_run())
     except WriterLockUnacquired as exc:
@@ -1125,9 +1168,10 @@ def main() -> None:
 
 async def _run() -> None:
     # T8: operator alerts. Installed before anything can refuse the boot; hooks in
-    # safety/{trading_state,protection,kill_switch}.py emit into it. Log-only
+    # safety/{trading_state_store,protection,kill_switch}.py emit into it. Log-only
     # (said once) when TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not set.
-    alerts.install(alerts.AlertSink.from_environment(os.environ))
+    alerts.install(alerts.AlertSink.from_environment(
+        os.environ, context=deployment_environment_label()))
     try:
         watchdog = LoopWatchdog(timeout_s=loop_watchdog_timeout_s(os.environ))
     except Exception as exc:
@@ -1169,7 +1213,6 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
     run_record = BotRunRecord(
         daemon.session_factory,
         exchange_account_id=daemon.account_bootstrap.exchange_account_id,
-        deployment_environment=daemon.account_bootstrap.deployment_environment,
     )
     await run_record.start()
     # The rotation worker publishes its recipient key under this run: a CLI only seals to
@@ -1217,11 +1260,11 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
         log.critical(
             "executor_auth_failed — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
         )
-        if not daemon.booted:
+        if daemon.refused_boot:
             _log_boot_refused("ExecutorAuthError")
-        alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
+        alerts.emit(alerts.BOOT_REFUSED if daemon.refused_boot else alerts.DAEMON_FATAL,
                     error="ExecutorAuthError: venue credentials rejected")
-        end_reason = "fatal" if daemon.booted else "boot_refused"
+        end_reason = "boot_refused" if daemon.refused_boot else "fatal"
         sys.exit(EXIT_CODE_AUTH_FAILED)
     except* VenueCredentialRejectedError:
         # The venue refused the key while running (the periodic reconcile raises it for a
@@ -1232,11 +1275,11 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
         log.critical(
             "venue_credential_rejected — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
         )
-        if not daemon.booted:
+        if daemon.refused_boot:
             _log_boot_refused("VenueCredentialRejectedError")
-        alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
+        alerts.emit(alerts.BOOT_REFUSED if daemon.refused_boot else alerts.DAEMON_FATAL,
                     error="VenueCredentialRejectedError: venue refused the account's key")
-        end_reason = "fatal" if daemon.booted else "boot_refused"
+        end_reason = "boot_refused" if daemon.refused_boot else "fatal"
         sys.exit(EXIT_CODE_AUTH_FAILED)
     except* CredentialNoncompliantError as eg:
         # The 6-hour recheck found the key no longer compliant (a write scope beyond funding,
@@ -1246,20 +1289,20 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
         log.critical(
             "credential_noncompliant — sys.exit(EXIT_CODE_AUTH_FAILED=78)",
         )
-        alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
-                    error=_error_text(eg.exceptions))
-        end_reason = "fatal" if daemon.booted else "boot_refused"
+        alerts.emit(alerts.BOOT_REFUSED if daemon.refused_boot else alerts.DAEMON_FATAL,
+                    error=_error_text(_leaves(eg)))
+        end_reason = "boot_refused" if daemon.refused_boot else "fatal"
         sys.exit(EXIT_CODE_AUTH_FAILED)
     except* Exception as eg:
         log.error(
             "daemon_taskgroup_fatal exceptions=%s",
-            [type(e).__name__ for e in eg.exceptions],
+            [type(e).__name__ for e in _leaves(eg)],
         )
-        if not daemon.booted:
-            _log_boot_refused(*(type(e).__name__ for e in eg.exceptions))
-        alerts.emit(alerts.DAEMON_FATAL if daemon.booted else alerts.BOOT_REFUSED,
-                    error=_error_text(eg.exceptions))
-        end_reason = "fatal" if daemon.booted else "boot_refused"
+        if daemon.refused_boot:
+            _log_boot_refused(*(type(e).__name__ for e in _leaves(eg)))
+        alerts.emit(alerts.BOOT_REFUSED if daemon.refused_boot else alerts.DAEMON_FATAL,
+                    error=_error_text(_leaves(eg)))
+        end_reason = "boot_refused" if daemon.refused_boot else "fatal"
         raise
     finally:
         # Cleanup after TaskGroup completes (close http client)
@@ -1293,6 +1336,15 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
 # (5s) and alerts.shutdown (5s) stay well inside the 30s stop_grace_period of
 # deploy/vm/docker-compose.app.yml.
 _RELEASE_TIMEOUT_S = 5.0
+
+
+def _leaves(group: BaseExceptionGroup[BaseException]) -> list[BaseException]:
+    """The exceptions in ``group``, nested groups opened (market data and the account each
+    run their own TaskGroup inside the daemon's)."""
+    leaves: list[BaseException] = []
+    for exc in group.exceptions:
+        leaves.extend(_leaves(exc) if isinstance(exc, BaseExceptionGroup) else [exc])
+    return leaves
 
 
 def _error_text(exceptions: Sequence[BaseException]) -> str:

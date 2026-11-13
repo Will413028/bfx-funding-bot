@@ -16,8 +16,8 @@ from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 # A loop blocked by synchronous code is caught by core.loop_watchdog instead:
 # with the loop stopped, neither /healthz nor scan_staleness can run.
 LIVENESS_THRESHOLDS: dict[str, int] = {
-    "ws": 90,                    # the WS freshness poller iterates every 15s
-                                 # (Daemon._ws_freshness_tick)
+    "ws": 90,                    # the candle WS poller iterates every 15s
+                                 # (MarketDataRuntime._ws_freshness_tick)
     "candle_writer": 65 * 60,    # per dequeued candle and per idle minute, whatever
                                  # the upsert outcome (CandleWriter.run)
     "scheduler": 65 * 60,        # per loop pass, whatever the callback outcome; a
@@ -38,7 +38,8 @@ LIVENESS_THRESHOLDS: dict[str, int] = {
 MARKET_DATA_FRESHNESS = "ws_data"
 DB_FRESHNESS = "db"
 DEPENDENCY_THRESHOLDS: dict[str, int] = {
-    MARKET_DATA_FRESHNESS: 90,   # public WS frame (candle or Bitfinex `hb`, ~15s)
+    MARKET_DATA_FRESHNESS: 90,   # the account's book feed frame (data or Bitfinex
+                                 # `hb`, ~15s): freshness.book_freshness_tick
                                  # seen within 60s at a 15s poll: 4-5 missed hb frames
     DB_FRESHNESS: 7 * 60,        # keepalive SELECT 1 succeeded (5min interval + 2min)
 }

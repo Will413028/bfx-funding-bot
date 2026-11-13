@@ -14,6 +14,8 @@ from uuid import UUID, uuid4
 from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionScope,
     UncertaintyResolutionRequests,
+)
+from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
     UncertaintyResolutionWorker,
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
@@ -28,11 +30,8 @@ from bfx_funding_bot.modules.ledger import (
     ResolutionSubject,
     observation_evidence_ref,
 )
-from bfx_funding_bot.modules.ledger.wiring import (
-    build_operator_evidence,
-    build_operator_reads,
-    build_operator_resolution,
-)
+from bfx_funding_bot.modules.ledger.read import build_operator_evidence, build_operator_reads
+from bfx_funding_bot.modules.ledger.wiring import build_operator_resolution, build_scope_lock
 
 from ..test_ledger_unknown_resolver_pg import (
     Clock,
@@ -42,10 +41,10 @@ from ..test_ledger_unknown_resolver_pg import (
     start,
     venue_offer,
 )
-from .stacks import ACCOUNT, ENVIRONMENT, SCOPE, Stack
+from .stacks import ACCOUNT, SCOPE, Stack
 
 OPERATOR = "operator-1"
-RSCOPE = ResolutionScope(ACCOUNT, ENVIRONMENT)
+RSCOPE = ResolutionScope(ACCOUNT)
 WORKER_NOW = 3_000_000
 
 
@@ -98,7 +97,7 @@ class Driver:
     async def settle(self, request_id: UUID) -> UncertaintyResolutionRequestRow:
         worker = UncertaintyResolutionWorker(
             session_factory=self.factory, scope=RSCOPE, authority=Allow(),
-            clock=lambda: WORKER_NOW, resolution=self.resolution,
+            clock=lambda: WORKER_NOW, resolution=self.resolution, scope_lock=build_scope_lock(),
         )
         await worker.process(request_id)
         return await self.row(request_id)

@@ -7,8 +7,8 @@ from pathlib import Path
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.frr_series import FrrSeries
-from bfx_funding_bot.modules.backtest.oos_profitability import WindowOutcome
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
+from bfx_funding_bot.modules.performance.oos_profitability import WindowOutcome
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "run_frr_floor_backtest.py"
 _SPEC = importlib.util.spec_from_file_location("run_frr_floor_backtest", _SCRIPT_PATH)

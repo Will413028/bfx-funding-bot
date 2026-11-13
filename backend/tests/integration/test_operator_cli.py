@@ -20,8 +20,8 @@ from sqlalchemy.engine import make_url
 from bfx_funding_bot.apps import operator_cli
 from bfx_funding_bot.modules.execution.capital_policy_control import CapitalPolicyRequestWorker
 from bfx_funding_bot.modules.execution.trading_control import TradingControlWorker
-from bfx_funding_bot.modules.execution.uncertainty_requests import (
-    ResolutionScope,
+from bfx_funding_bot.modules.execution.uncertainty_requests import ResolutionScope
+from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
     UncertaintyResolutionWorker,
 )
 from bfx_funding_bot.modules.ledger import Quarantine, observation_evidence_ref
@@ -130,8 +130,8 @@ async def test_resume_and_kill(book, operator_env) -> None:
     await member(book)
     await start(book)
     worker = TradingControlWorker(session_factory=book.factory, account_id=ACCOUNT,
-                                  environment="ci", authority=allow,
-                                  clock=lambda: WORKER_NOW)
+                                  authority=allow,
+                                  clock=lambda: WORKER_NOW, scope_lock=build_scope_lock())
     worker.kill_switch = kill = KillSwitch()
 
     code, queued, log = await cli("resume", "--reason", "back to work", "--no-wait")
@@ -168,7 +168,7 @@ async def test_currency_enable_and_disable(book, operator_env) -> None:
     await member(book)
     await start(book)
     worker = CapitalPolicyRequestWorker(
-        session_factory=book.factory, account_id=ACCOUNT, environment="ci", authority=allow,
+        session_factory=book.factory, account_id=ACCOUNT, authority=allow,
         policy_store=build_policy_store(SCOPE), scope_lock=build_scope_lock(),
         clock=lambda: WORKER_NOW)
     code, queued, _ = await cli("disable", "fUST", "--reason", "pause fUST", "--no-wait")
@@ -184,8 +184,8 @@ async def test_currency_enable_and_disable(book, operator_env) -> None:
 
 async def _settle(book_) -> None:
     worker = UncertaintyResolutionWorker(
-        session_factory=book_.factory, scope=ResolutionScope(ACCOUNT, "ci"), authority=allow,
-        clock=lambda: WORKER_NOW, resolution=build_operator_resolution())
+        session_factory=book_.factory, scope=ResolutionScope(ACCOUNT), authority=allow,
+        clock=lambda: WORKER_NOW, resolution=build_operator_resolution(), scope_lock=build_scope_lock())
     assert await worker.tick() is True
 
 

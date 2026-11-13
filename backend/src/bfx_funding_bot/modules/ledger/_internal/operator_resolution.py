@@ -45,7 +45,8 @@ from bfx_funding_bot.modules.ledger import (
 )
 from bfx_funding_bot.modules.ledger._internal import resolver
 from bfx_funding_bot.modules.ledger._internal.journal import record_resolution
-from bfx_funding_bot.modules.ledger._internal.operator_evidence import (
+from bfx_funding_bot.modules.ledger.read.match_evidence import load_match_evidence, preview_match
+from bfx_funding_bot.modules.ledger.read.operator_evidence import (
     AttemptMatcher,
     LedgerOperatorEvidence,
     observation_id,
@@ -88,7 +89,6 @@ async def attempt_match(
             .where(
                 SubmissionAttemptJournalRow.attempt_id == attempt_id,
                 SubmissionAttemptJournalRow.exchange_account_id == scope.exchange_account_id,
-                SubmissionAttemptJournalRow.deployment_environment == scope.deployment_environment,
                 TransportOutcomeJournalRow.kind == "unknown",
             )
         )
@@ -98,53 +98,7 @@ async def attempt_match(
     terms = resolver._terms(*row)
     if terms is None:
         return None
-    evidence = await resolver.load_match_evidence(session, observation)
-    if evidence is None:
-        raise ResolutionRejected("stale_reconcile_fence")
-    return match_unknown(terms, evidence)
-
-
-async def preview_match(
-    session: AsyncSession, scope: Scope, attempt_id: UUID, observation: UUID
-) -> UnknownMatch | None:
-    """``attempt_match`` from granted columns only, so the web API's role can run it.
-
-    The terms come from the generated match columns and the evidence from the granted
-    observation columns: the payload digest is NOT rechecked and the payload's own symbol
-    is not compared. Advisory (the operator's context and the queue-time check); the
-    worker's ``attempt_match`` decides.
-    """
-    row = (
-        await session.execute(
-            select(
-                SubmissionAttemptJournalRow.attempt_id,
-                SubmissionAttemptJournalRow.symbol,
-                SubmissionAttemptJournalRow.intended_amount,
-                SubmissionAttemptJournalRow.match_rate,
-                SubmissionAttemptJournalRow.match_period_days,
-                SubmissionAttemptJournalRow.match_offer_type,
-                SubmissionAttemptJournalRow.match_flags,
-                SubmissionAttemptJournalRow.started_at_ms,
-                TransportOutcomeJournalRow.completed_at_ms,
-            )
-            .join(
-                TransportOutcomeJournalRow,
-                TransportOutcomeJournalRow.attempt_id == SubmissionAttemptJournalRow.attempt_id,
-            )
-            .where(
-                SubmissionAttemptJournalRow.attempt_id == attempt_id,
-                SubmissionAttemptJournalRow.exchange_account_id == scope.exchange_account_id,
-                SubmissionAttemptJournalRow.deployment_environment == scope.deployment_environment,
-                TransportOutcomeJournalRow.kind == "unknown",
-            )
-        )
-    ).one_or_none()
-    if row is None:
-        return None
-    terms = resolver.preview_terms(*row)
-    if terms is None:
-        return None
-    evidence = await resolver.load_match_evidence(session, observation)
+    evidence = await load_match_evidence(session, observation)
     if evidence is None:
         raise ResolutionRejected("stale_reconcile_fence")
     return match_unknown(terms, evidence)

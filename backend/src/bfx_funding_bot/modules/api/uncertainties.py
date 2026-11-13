@@ -26,7 +26,11 @@ from bfx_funding_bot.modules.api.account_scope import (
     command_error,
     require_account_member,
 )
-from bfx_funding_bot.modules.api.deps import ReadModels, get_read_models, get_session
+from bfx_funding_bot.modules.api.deps import (
+    ReadModels,
+    get_read_models,
+    get_session,
+)
 from bfx_funding_bot.modules.api.ratelimit import shared_rate_limit_dependency
 from bfx_funding_bot.modules.api.schemas import Envelope, ResponseModel
 from bfx_funding_bot.modules.execution import operator_commands as commands
@@ -81,10 +85,9 @@ class UncertaintyResolutionContext(ResponseModel):
 
 
 class BlockedScope(ResponseModel):
-    """The account, environment and symbol an open uncertainty blocks."""
+    """The account and symbol an open uncertainty blocks."""
 
     exchange_account_id: str = Field(serialization_alias="exchangeAccountId")
-    environment: str
     symbol: str
 
 
@@ -166,7 +169,6 @@ def _response(detail: UncertaintyDetail, scope: Scope) -> UncertaintyResponse:
         evidence_summary=commands.evidence_summary(row.evidence),
         blocked_scope=BlockedScope(
             exchange_account_id=str(scope.exchange_account_id),
-            environment=scope.deployment_environment,
             symbol=row.symbol,
         ),
         resolved_by_operator_id=row.resolved_by_operator_id,

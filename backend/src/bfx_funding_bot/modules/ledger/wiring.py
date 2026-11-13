@@ -1,4 +1,7 @@
-"""Construct the ledger ports; ``apps/bot_ports.py`` and ``apps/read_models.py`` bind them."""
+"""Construct the ledger's writing ports; ``apps/bot_ports.py`` binds them.
+
+The read ports are built by ``ledger.read`` (``apps/read_models.py`` composes only those).
+"""
 
 from __future__ import annotations
 
@@ -25,7 +28,6 @@ from bfx_funding_bot.modules.ledger import (
     CommandOutcome,
     CommandRefused,
     CycleResult,
-    ExecutionHistory,
     ForeignOffers,
     LedgerCapitalRead,
     LedgerCapitalReader,
@@ -43,8 +45,6 @@ from bfx_funding_bot.modules.ledger import (
     ObservationSink,
     ObservationWindow,
     OpenUncertainty,
-    OperatorEvidence,
-    OperatorReads,
     OperatorResolution,
     Outcome,
     OutcomeAlreadyRecorded,
@@ -66,19 +66,19 @@ from bfx_funding_bot.modules.ledger._internal import (
     clock,
     conservation_read,
     cycle_reads,
-    execution_history,
     journal,
     observation,
-    operator_evidence,
-    operator_reads,
     operator_resolution,
     policy_store,
     ports,
     quarantine,
-    reads,
     resolver,
 )
 from bfx_funding_bot.modules.ledger._internal.venue_hints import LedgerVenueHintSink
+from bfx_funding_bot.modules.ledger.read import (
+    operator_reads,
+    reads,
+)
 from bfx_funding_bot.modules.ledger.tables import SubmissionAttemptJournalRow
 from bfx_funding_bot.modules.trading import CapitalScope
 
@@ -138,9 +138,7 @@ class _SqlCommandJournal:
             attempt = await session.get(SubmissionAttemptJournalRow, attempt_id)
             if attempt is None:
                 raise ValueError("attempt does not exist")
-            if (attempt.exchange_account_id, attempt.deployment_environment) != (
-                scope.exchange_account_id, scope.deployment_environment,
-            ):
+            if attempt.exchange_account_id != scope.exchange_account_id:
                 raise ValueError("attempt scope mismatch")
             stored = await journal.read_back_outcome(session, attempt_id)
             if stored is not None and stored.attempt_id != attempt_id:
@@ -373,28 +371,9 @@ def build_observation_sink(
     )
 
 
-def build_operator_evidence() -> OperatorEvidence:
-    """Operator evidence with the attempt match preview, which reads granted columns only
-    (any role may run it); the worker's authority is ``build_operator_resolution().apply``."""
-    return operator_evidence.LedgerOperatorEvidence(
-        operator_reads.LedgerOperatorReads(), operator_resolution.preview_match
-    )
-
-
 def build_operator_resolution() -> OperatorResolution:
     """The ledger operator request path."""
     return operator_resolution.LedgerOperatorResolution(operator_reads.LedgerOperatorReads())
-
-
-def build_operator_reads() -> OperatorReads:
-    """The ledger operator read model."""
-    return operator_reads.LedgerOperatorReads()
-
-
-def build_execution_history(archive: ExecutionHistory) -> ExecutionHistory:
-    """The ledger's execution history: the journal above the switch, ``archive`` (the frozen
-    legacy event log) below it, behind one cursor (plan Q4)."""
-    return execution_history.LedgerExecutionHistory(archive)
 
 
 def build_capital_authority(

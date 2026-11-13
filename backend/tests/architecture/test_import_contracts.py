@@ -5,13 +5,14 @@ constant to make a new violation pass silently.
 """
 
 import ast
+import re
 import tomllib
 from pathlib import Path
 
 CORE_IS_LEAF_MAX_IGNORES = 0
-VENUE_BELOW_MODULES_MAX_IGNORES = 7
+VENUE_BELOW_MODULES_MAX_IGNORES = 0
 RUNTIME_NOT_RESEARCH_MAX_IGNORES = 0
-MODULES_ACYCLIC_MAX_IGNORES = 7
+MODULES_ACYCLIC_MAX_IGNORES = 0
 APPS_IS_TOP_MAX_IGNORES = 0
 STRATEGY_IS_PURE_MAX_IGNORES = 0
 STRATEGY_LOWER_ONLY_MAX_IGNORES = 0
@@ -26,10 +27,13 @@ MAX_IGNORES_BY_ID = {
     "simulated-venue-no-internal-access": 0,
     "simulated-venue-wiring-is-top": 0,
     "runtime-not-simulated-venue": 0,
+    "runtime-composition-boundary": 0,
     "trading-not-ledger": 0,
     "control-plane-exposure": 0,
+    "xact-lock-owner": 0,
     "execution-acyclic": 0,
     "market-contracts-are-pure": 0,
+    "performance-is-pure": 0,
     "market-contracts-no-sibling-dependencies": 0,
     "market-contracts-via-facade": 0,
     "strategy-wiring-is-top": 0,
@@ -88,6 +92,16 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     ):
         assert set(contracts_by_id[contract_id]["source_modules"]) == market_sources
         assert contracts_by_id[contract_id]["as_packages"] is False
+    assert contracts_by_id["performance-is-pure"]["source_modules"] == [
+        "bfx_funding_bot.modules.performance",
+    ]
+    assert set(contracts_by_id["performance-is-pure"]["forbidden_modules"]) == {
+        "sqlalchemy",
+        "httpx",
+        "asyncpg",
+        "yaml",
+        "bfx_funding_bot.core.settings",
+    }
     assert set(contracts_by_id["market-contracts-are-pure"]["forbidden_modules"]) == {
         "sqlalchemy",
         "httpx",
@@ -164,23 +178,88 @@ def test_import_contracts_keep_ignore_ratchet() -> None:
     assert {
         "bfx_funding_bot.modules.ledger", "bfx_funding_bot.modules.execution",
         "bfx_funding_bot.modules.trading", "bfx_funding_bot.modules.marketfeed",
-        "bfx_funding_bot.apps",
+        "bfx_funding_bot.modules.market._internal", "bfx_funding_bot.apps",
     } <= set(independent["forbidden_modules"])
 
 
-def test_research_scripts_obtain_strategy_wiring_through_apps() -> None:
+def test_runtime_reaches_no_other_composition_root() -> None:
+    """Before R9a the runtime lived under modules, where apps-is-top kept every apps module
+    and the wiring-is-top contracts kept module wiring out of it. The contract keeps that
+    scope: every other top-level apps module (indirectly too) and module wiring, so a new
+    apps module cannot slip past it by not being listed."""
+    root = Path(__file__).resolve().parents[2]
+    with (root / "pyproject.toml").open("rb") as config_file:
+        contracts = tomllib.load(config_file)["tool"]["importlinter"]["contracts"]
+    boundary = {contract["id"]: contract for contract in contracts}["runtime-composition-boundary"]
+    apps_dir = root / "src" / "bfx_funding_bot" / "apps"
+    roots = {
+        f"bfx_funding_bot.apps.{path.stem}"
+        for path in apps_dir.iterdir()
+        if (path.suffix == ".py" and path.stem != "__init__")
+        or (path.is_dir() and (path / "__init__.py").is_file() and path.name != "runtime")
+    }
+    assert boundary["source_modules"] == ["bfx_funding_bot.apps.runtime"]
+    assert set(boundary["forbidden_modules"]) == roots | {
+        "bfx_funding_bot.modules.backtest", "bfx_funding_bot.modules.simulated_venue",
+        "bfx_funding_bot.modules.ledger.wiring", "bfx_funding_bot.modules.strategy.wiring",
+    }
+    assert boundary.get("allow_indirect_imports", False) is False
+
+
+def test_contract_modules_exist() -> None:
+    """import-linter keeps a contract naming a module that does not exist: a forbidden entry
+    whose module was renamed or moved would pass silently. Every in-package module any
+    contract field names (a wildcard entry: the part before its first wildcard segment)
+    must exist, so the PR that moves a module also moves its entries."""
+    root = Path(__file__).resolve().parents[2]
+    with (root / "pyproject.toml").open("rb") as config_file:
+        contracts = tomllib.load(config_file)["tool"]["importlinter"]["contracts"]
+
+    def strings(value: object) -> list[str]:
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, list):
+            return [item for element in value for item in strings(element)]
+        return []
+
+    missing: list[str] = []
+    for contract in contracts:
+        for value in contract.values():
+            for text in strings(value):
+                for module in re.findall(r"bfx_funding_bot[\w.*]*", text):
+                    segments = module.split(".")
+                    if any("*" in segment for segment in segments):
+                        segments = segments[: next(i for i, seg in enumerate(segments) if "*" in seg)]
+                    path = root / "src" / "/".join(segments)
+                    if not (path.with_suffix(".py").is_file() or (path / "__init__.py").is_file()):
+                        missing.append(f"{contract['id']}: {module}")
+    assert missing == []
+
+
+# What a script (``backend/scripts``, a composition root outside the import-linter root
+# package until R11 adds it) must not import: a module's wiring, which only apps assemble
+# (brief D-F ``wiring-is-top``); a module's ``_internal``, which includes the ledger clock
+# that ``xact-lock-owner`` lets take the lock; and the scope lock primitive itself, taken
+# only through the ledger's ``ScopeLock`` (ADR 2026-10-19 D4). Delete this test when
+# ``scripts`` becomes a root package and the contracts see it.
+SCRIPTS_MAY_NOT_IMPORT = re.compile(
+    r"bfx_funding_bot\.(modules\.\w+\.(wiring|_internal)|core\.xact_lock)(\..*)?"
+)
+
+
+def test_scripts_import_no_module_wiring_internals_or_the_lock_primitive() -> None:
     scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
     violations: list[str] = []
     for script in scripts_dir.rglob("*.py"):
         tree = ast.parse(script.read_text())
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module == (
-                "bfx_funding_bot.modules.strategy.wiring"
-            ):
-                violations.append(str(script.relative_to(scripts_dir)))
-            if isinstance(node, ast.Import) and any(
-                alias.name == "bfx_funding_bot.modules.strategy.wiring"
-                for alias in node.names
-            ):
-                violations.append(str(script.relative_to(scripts_dir)))
+            names: list[str] = []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module, *(f"{node.module}.{alias.name}" for alias in node.names)]
+            elif isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            violations += [
+                f"{script.relative_to(scripts_dir)}: {name}"
+                for name in names if SCRIPTS_MAY_NOT_IMPORT.fullmatch(name)
+            ]
     assert violations == []

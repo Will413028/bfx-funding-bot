@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.modules.ledger import LedgerReadUnbounded, ObservationWindow, Scope
-from bfx_funding_bot.modules.ledger._internal import reads
+from bfx_funding_bot.modules.ledger.read import reads
 from bfx_funding_bot.modules.ledger.tables import SubmissionAttemptJournalRow
 
 
@@ -33,7 +33,7 @@ async def test_no_basis_still_reads_the_earliest_attempt(monkeypatch) -> None:
     monkeypatch.setattr(reads, "attempts_by_id", AsyncMock(return_value=[]))
     monkeypatch.setattr(reads, "live_offer_candidates", AsyncMock(return_value=()))
     session = AsyncMock()
-    scope = Scope(uuid4(), "ci")
+    scope = Scope(uuid4())
     monkeypatch.setattr(reads, "previous_basis", AsyncMock(return_value=None))
     tail = AsyncMock(
         return_value=[
@@ -46,7 +46,7 @@ async def test_no_basis_still_reads_the_earliest_attempt(monkeypatch) -> None:
         100_000, None, 40_000, frozenset({"fUST", "fUSD"})
     )
     tail.assert_awaited_once_with(
-        session, scope.exchange_account_id, "ci", 0, limit=reads.MAX_TAIL_ATTEMPTS + 1
+        session, scope.exchange_account_id, 0, limit=reads.MAX_TAIL_ATTEMPTS + 1
     )
 
 
@@ -60,14 +60,14 @@ async def test_no_basis_tail_cap_fails_closed(monkeypatch) -> None:
         AsyncMock(return_value=[SubmissionAttemptJournalRow(), SubmissionAttemptJournalRow()]),
     )
     with pytest.raises(LedgerReadUnbounded):
-        await reads.observation_window(AsyncMock(), Scope(uuid4(), "ci"))
+        await reads.observation_window(AsyncMock(), Scope(uuid4()))
 
 
 @pytest.mark.asyncio
 async def test_window_includes_only_unresolved_r6_source_attempts(monkeypatch) -> None:
     from types import SimpleNamespace
 
-    scope = Scope(uuid4(), "ci")
+    scope = Scope(uuid4())
     source = uuid4()
     basis = SimpleNamespace(observation_id=uuid4())
     monkeypatch.setattr(reads, "_candidates", AsyncMock(

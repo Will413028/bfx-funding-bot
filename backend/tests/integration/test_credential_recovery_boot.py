@@ -26,12 +26,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import insert, select, text
 
 from bfx_funding_bot.apps import bot
-from bfx_funding_bot.apps.venue import VenueSeam
+from bfx_funding_bot.apps.runtime.healthz import make_app
 from bfx_funding_bot.modules.execution.protocols import Credentials
 from bfx_funding_bot.modules.execution.safety.tables import TradingControlRequestRow
-from bfx_funding_bot.modules.marketfeed.healthz import make_app
+from tests.apps.runtime.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
 from tests.async_wait import until
-from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
 
 from . import test_ledger_schema_roles as _schema_roles
 from .sim_daemon import close_sim_env, make_sim_env
@@ -50,7 +49,7 @@ async def _queue_kill(factory: Any) -> Any:
     async with factory.begin() as session:
         await session.execute(insert(TradingControlRequestRow).values(
             request_id=request_id, exchange_account_id=TEST_EXCHANGE_ACCOUNT_ID,
-            deployment_environment="ci", action="kill", reason="kill during recovery",
+            action="kill", reason="kill during recovery",
             requested_by="operator", created_at_ms=1))
     return request_id
 
@@ -73,11 +72,7 @@ async def test_a_refused_key_at_boot_holds_in_recovery_mode_and_a_kill_waits_for
     sim, engine = await make_sim_env(ledger_db, monkeypatch, httpx_mock, tmp_path)
     try:
         stop = asyncio.Event()
-        daemon = await bot.build_daemon(
-            cells_yaml_path=sim.cells_path, skip_ws=True, stop_event=stop,
-            venue_seam=VenueSeam(feed=sim.feed, client_credentials=REVOKED))
-        sim.daemons.append(daemon)
-        sim.give_the_bot_a_book(daemon)
+        daemon = await sim.build(client_credentials=REVOKED, stop_event=stop)
 
         compose = bot.build_daemon
 

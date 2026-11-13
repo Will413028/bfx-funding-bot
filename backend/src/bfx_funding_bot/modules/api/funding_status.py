@@ -6,7 +6,7 @@ halt; user mutations use durable release sessions.
 
 The daemon's ``/admin/trading-status`` and ``/admin/dry-evaluate`` bodies are forwarded
 as they are, but only once they parse as ``FundingStatus``: the fields the console reads
-are typed (the daemon builds them in ``modules/admin/trading_status.py``), the rest passes
+are typed (the daemon builds them in ``modules/execution/trading_status.py``), the rest passes
 through untouched (``extra="allow"``). A body the console could misread is refused like
 an unreachable daemon, never forwarded.
 """
@@ -99,7 +99,6 @@ class DryRunSymbol(_Forwarded):
 
 class DryRun(_Forwarded):
     account_id: str
-    deployment_environment: str
     symbols: dict[str, DryRunSymbol]
 
 
@@ -107,7 +106,6 @@ class FundingStatus(_Forwarded):
     """``/admin/trading-status`` with the dry run of ``/admin/dry-evaluate`` under ``dry_run``."""
 
     account_id: str
-    deployment_environment: str
     halt: HaltStatus
     symbols: dict[str, CapitalUnavailable | CapitalAvailable]
     configured_cells: list[ConfiguredCell]
@@ -140,8 +138,7 @@ def build_funding_status_router(*,
         context: ExchangeAccountContext = Depends(require_account_member),  # noqa: B008
     ) -> Envelope[FundingStatus]:
         def require_scope(value: dict[str, Any]) -> None:
-            if (value.get("account_id") != str(context.exchange_account_id)
-                    or value.get("deployment_environment") != context.deployment_environment):
+            if value.get("account_id") != str(context.exchange_account_id):
                 raise RuntimeError("daemon_scope_mismatch")
 
         try:

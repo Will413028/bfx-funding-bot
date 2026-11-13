@@ -8,11 +8,11 @@ from pathlib import Path
 
 import yaml
 
-from bfx_funding_bot.apps.sim_faults import ENV_NAME, parse_sim_faults
+from bfx_funding_bot.apps.runtime.config import MarketfeedConfig
 from bfx_funding_bot.core.secret_files import read_secret
+from bfx_funding_bot.core.settings import require_deployment_environment
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.modules.execution.contracts import ExecutionPolicy
-from bfx_funding_bot.modules.marketfeed.config import MarketfeedConfig
 from bfx_funding_bot.modules.observability.resource import DeploymentEnvironment
 from bfx_funding_bot.modules.strategy import CellConfig
 
@@ -36,20 +36,58 @@ QUALIFIED_PAIRS = {
 }
 
 
-def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
+def require_simulated_realm(phase: str, realm: str) -> None:
+    """Phase <-> realm fail-fast guard, before any database work.
+
+    phase = which venue (live = Bitfinex, shadow = the simulated venue through a test seam);
+    realm = the data-isolation realm. The simulated phase runs only in ci, an allow-list, so
+    a realm added later is refused until it is allowed here; fake fills in prod would
+    corrupt real-money data. ci is the simulated venue's ``SIMULATED_REALM``, not imported
+    because only apps/venue.py and apps/schema.py may import that module
+    (tests/architecture/test_simulated_venue_composition.py). The venue's store checks the database's
+    own realm stamp when it opens.
+    """
+    if phase == "shadow" and realm != DeploymentEnvironment.CI:
+        raise ValueError(
+            f"BFX_PHASE={phase} (simulated) must not run in the {realm} realm "
+            f"(BFX_DEPLOYMENT_ENV={realm}) -- it would corrupt real-money data. "
+            f"Use {DeploymentEnvironment.CI.value}."
+        )
+
+
+def load_config(
+    *, cells_yaml_path: Path | None = None, simulated_venue: bool = False,
+) -> MarketfeedConfig:
+    """Read the bot's configuration from the environment.
+
+    The venue is chosen by the caller alone: ``simulated_venue`` is true exactly when a test
+    passes a ``VenueSeam`` to ``build_daemon``; production passes nothing and trades Bitfinex.
+    ``BFX_PHASE`` must agree with that choice in both directions (shadow needs the seam, a
+    seam needs shadow), checked here before the database or alerts are touched, so no
+    environment alone can select the simulated venue (ADR
+    2026-11-08-retire-the-simulation-soak).
+    """
     phase_str = os.environ.get("BFX_PHASE", "").strip()
     if not phase_str:
         raise ValueError("BFX_PHASE env var required")
     if phase_str == "paper":
-        # The paper phase and its echo executor were removed; simulation is the
-        # shadow phase (ADR 2026-10-03 D4).
-        raise ValueError(
-            "BFX_PHASE=paper was removed; use BFX_PHASE=shadow (simulation runs on the "
-            "simulated venue)"
-        )
+        # The paper phase and its echo executor were removed; a deployed bot runs live
+        # (ADR 2026-10-03 D4, ADR 2026-11-08-retire-the-simulation-soak).
+        raise ValueError("BFX_PHASE=paper was removed; a deployed bot runs BFX_PHASE=live")
     if phase_str not in {"shadow", "live"}:
         # canary was retired with the per-build ceremony (ADR 2026-09-25).
         raise ValueError(f"BFX_PHASE must be shadow or live, got {phase_str!r}")
+    if phase_str == "shadow" and not simulated_venue:
+        raise ValueError(
+            "BFX_PHASE=shadow selects the simulated venue, which only tests compose through "
+            "a VenueSeam; a deployed bot runs BFX_PHASE=live (ADR "
+            "2026-11-08-retire-the-simulation-soak)"
+        )
+    if phase_str != "shadow" and simulated_venue:
+        raise ValueError(
+            f"a VenueSeam selects the simulated venue, which runs only as BFX_PHASE=shadow; "
+            f"got BFX_PHASE={phase_str}"
+        )
     # A set legacy knob is a configuration error in every phase, never silently ignored:
     # the capital limits are the applied CapitalPolicy's, the executor is not chosen by env,
     # the authenticated WebSocket follows the venue's capabilities, and the REST fill tracker
@@ -71,37 +109,9 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     if database_url is None:
         raise ValueError("DATABASE_URL required")
 
-    deployment_env_str = os.environ.get("BFX_DEPLOYMENT_ENV", "").strip()
-    if not deployment_env_str:
-        raise ValueError("BFX_DEPLOYMENT_ENV required (one of: prod, shadow, ci)")
-    try:
-        deployment_environment = DeploymentEnvironment(deployment_env_str)
-    except ValueError:
-        valid = ", ".join(e.value for e in DeploymentEnvironment)
-        raise ValueError(
-            f"BFX_DEPLOYMENT_ENV must be one of {valid}, got {deployment_env_str!r}"
-        ) from None
+    deployment_environment = DeploymentEnvironment(require_deployment_environment())
 
-    # Phase <-> realm fail-fast guard (defense in depth; the deploy env sets
-    # the realm explicitly per phase, but reject obviously-wrong combos in case
-    # an env is set by hand). phase = rollout/real-money dimension;
-    # deployment_environment = data-isolation realm (prod/shadow/ci). live is
-    # real money -> must land in prod (never shadow, which holds the Phase 4.3
-    # calibration dataset). shadow is simulated -> must never land in
-    # prod (fake fills would corrupt real-money analytics). ci is the universal
-    # test/dev realm and is always allowed.
-    if phase_str == "live" and deployment_environment is DeploymentEnvironment.SHADOW:
-        raise ValueError(
-            f"BFX_PHASE={phase_str} (real money) must not run in the shadow realm "
-            "(BFX_DEPLOYMENT_ENV=shadow) -- it would pollute the simulated "
-            "calibration dataset. Use prod (or ci for tests)."
-        )
-    if phase_str == "shadow" and deployment_environment is DeploymentEnvironment.PROD:
-        raise ValueError(
-            f"BFX_PHASE={phase_str} (simulated) must not run in the prod realm "
-            "(BFX_DEPLOYMENT_ENV=prod) -- it would corrupt real-money analytics. "
-            "Use shadow (or ci for tests)."
-        )
+    require_simulated_realm(phase_str, deployment_environment)
 
     execution_policy_raw = os.environ.get("BFX_EXECUTION_POLICY", "").strip()
     if not execution_policy_raw:
@@ -249,13 +259,8 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
     if not any((c.strategy.value, c.cell_id) in QUALIFIED_PAIRS for c in cells):
         log.warning("cells.yaml has no Phase 3b qualified pair -- all entries are exploratory")
 
-    sim_faults = parse_sim_faults(os.environ.get(ENV_NAME, ""))
     config_kwargs: dict[str, object] = {
         "phase": phase,
-        "simulated_initial_wallets": _initial_wallets(),
-        "simulated_faults": dict(sim_faults.rates),
-        "simulated_fault_seed": sim_faults.seed,
-        "simulated_fault_ordinals": dict(sim_faults.ordinals),
         "cells": cells,
         "database_url": database_url,
         "deployment_environment": deployment_environment,
@@ -275,32 +280,6 @@ def load_config(*, cells_yaml_path: Path | None = None) -> MarketfeedConfig:
         if cell.staleness_budget_hours is None:
             cell.staleness_budget_hours = config.staleness_budget_hours_default
     return config
-
-
-def _initial_wallets() -> dict[str, Decimal]:
-    """``BFX_SIM_INITIAL_WALLETS=UST:10000,USD:500``, funded on an empty simulated log.
-
-    Only the simulated venue's wiring accepts it (``build_venue`` refuses it elsewhere).
-    """
-    raw = os.environ.get("BFX_SIM_INITIAL_WALLETS", "").strip()
-    if not raw:
-        return {}
-    wallets: dict[str, Decimal] = {}
-    for item in raw.split(","):
-        currency, sep, amount_raw = item.strip().partition(":")
-        try:
-            amount = Decimal(amount_raw)
-        except Exception:
-            amount = Decimal(0)
-        if not sep or not currency or not amount.is_finite() or amount <= 0:
-            raise ValueError(
-                f"BFX_SIM_INITIAL_WALLETS entries are CURRENCY:AMOUNT with a positive amount, "
-                f"got {item!r}"
-            )
-        if currency in wallets:
-            raise ValueError(f"BFX_SIM_INITIAL_WALLETS names {currency} twice")
-        wallets[currency] = amount
-    return wallets
 
 
 def load_cells_only(cells_yaml_path: Path) -> list[CellConfig]:

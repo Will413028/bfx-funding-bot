@@ -47,7 +47,7 @@ async def ledger(book: Book):
 def _input(book: Book) -> LedgerDeploymentInput:
     return LedgerDeploymentInput(
         session_factory=book.factory, account_id=book.scope.exchange_account_id,
-        environment=book.scope.deployment_environment, offers=build_ledger_managed_offers(),
+        offers=build_ledger_managed_offers(),
     )
 
 
@@ -124,7 +124,7 @@ async def test_a_provenance_conflict_stops_only_its_symbol(ledger: Book, monkeyp
     planner._conflict_alerted = set()
     planner._managed_sweep = ManagedOfferSweep(
         session_factory=ledger.factory, account_id=ledger.scope.exchange_account_id,
-        environment=ledger.scope.deployment_environment, canceller=canceller, ctx=ctx,
+        canceller=canceller, ctx=ctx,
         offers=build_managed_offer_reader(),
     )
 

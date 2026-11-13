@@ -31,6 +31,7 @@ from bfx_funding_bot.apps.bot_ports import build_policy_ports
 from bfx_funding_bot.apps.read_models import build_read_models
 from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmitAcknowledged,
+    SubmitOutcome,
     SubmitOutcomeUnknown,
 )
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
@@ -42,7 +43,6 @@ from bfx_funding_bot.modules.execution.contracts import (
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
-    SubmittedOrder,
 )
 from bfx_funding_bot.modules.ledger import (
     CapitalAvailable,
@@ -53,16 +53,16 @@ from bfx_funding_bot.modules.ledger import (
 )
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.trading import CapitalPolicy, CapitalScope
-from tests.modules.marketfeed.account_test_helpers import (
+from tests.apps.runtime.account_test_helpers import (
     TEST_EXCHANGE_ACCOUNT_ID,
     configure_account_env,
     seed_exchange_account,
 )
-from tests.modules.marketfeed.test_daemon_wiring import _write_cells_yaml
+from tests.apps.runtime.test_daemon_wiring import _write_cells_yaml
 
 from .test_ledger_schema_roles import ledger_db
 
-SCOPE = Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci")
+SCOPE = Scope(TEST_EXCHANGE_ACCOUNT_ID)
 CELL = "fUST_a30"
 POLICY = CapitalPolicy(enabled=True, reserve_amount=Decimal("100"), max_cell_fraction=Decimal(1))
 T0 = 1_700_000_000_000  # far from the wall clock: any time source off the composition shows
@@ -149,10 +149,10 @@ class GateVenue:
         self.calls = 0
         self.outcome = outcome
 
-    async def submit(self, ready: Any, ctx: Any, *, reservation_ref: Any) -> SubmittedOrder:
+    async def submit(self, offer: Any, account: Any, *, pre_send: Any = None) -> SubmitOutcome:
         self.calls += 1
-        return SubmittedOrder(venue_offer_id=None, outcome=self.outcome(None),
-                              reservation_ref=reservation_ref)
+        outcome: SubmitOutcome = self.outcome(None)
+        return outcome
 
 
 def lost_response() -> GateVenue:
@@ -165,7 +165,7 @@ class ProcessDied(BaseException):
 
 
 class DyingVenue(GateVenue):
-    async def submit(self, ready: Any, ctx: Any, *, reservation_ref: Any) -> SubmittedOrder:
+    async def submit(self, offer: Any, account: Any, *, pre_send: Any = None) -> SubmitOutcome:
         self.calls += 1
         raise ProcessDied
 
@@ -219,7 +219,7 @@ class BotEnv:
         return daemon.periodic_reconcile._deployment.venue_offers
 
     def capital_scope(self, symbol: str = "fUST") -> CapitalScope:
-        return CapitalScope(TEST_EXCHANGE_ACCOUNT_ID, "ci", symbol, CELL)
+        return CapitalScope(TEST_EXCHANGE_ACCOUNT_ID, symbol, CELL)
 
     async def capital(self, daemon: Any) -> CapitalAvailable | CapitalBlocked:
         authority = daemon.trading_status._exposure.authority  # the bot's own capital authority
@@ -259,8 +259,7 @@ class BotEnv:
         async with self.factory.begin() as session:
             session.add(ExecutionDecisionRow(
                 decision_id=decision_id, account_id=str(TEST_EXCHANGE_ACCOUNT_ID),
-                exchange_account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci",
-                reconcile_id="gate", cell_id=CELL, symbol="fUST",
+                exchange_account_id=TEST_EXCHANGE_ACCOUNT_ID, reconcile_id="gate", cell_id=CELL, symbol="fUST",
                 signal_correlation_id=str(correlation), outcome="ready",
                 signal_rate=Decimal("0.0001"), applied_rate=Decimal("0.0001"),
                 amount_usdt=amount, duration_days=2, model_evidence={}, safety_result={},

@@ -25,7 +25,7 @@ async def test_reappearance_never_merges_into_r6_quarantine(monkeypatch, plain):
     session = AsyncMock()
     session.scalar.return_value = None
     await observation._quarantine_reappearance(
-        session, Scope(uuid4(), "ci"), uuid4(), "offer", "returned", "fUST", Decimal("10"), 123,
+        session, Scope(uuid4()), uuid4(), "offer", "returned", "fUST", Decimal("10"), 123,
     )
     added = member.await_args.args[2]
     assert added.quarantine_id != r6

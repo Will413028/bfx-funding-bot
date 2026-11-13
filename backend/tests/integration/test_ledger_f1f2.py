@@ -264,7 +264,7 @@ async def test_an_offer_older_than_the_window_that_ends_is_observed_and_conserve
     found = await verdict(book)
     assert (found.conservation, found.fill_conflicts) == ("conserved", 0)
     async with book.factory() as session:
-        mirror = await session.get(VenueOfferMirrorRow, (SCOPE.exchange_account_id, "ci", str(offer_id)))
+        mirror = await session.get(VenueOfferMirrorRow, (SCOPE.exchange_account_id, str(offer_id)))
         assert mirror is not None and mirror.terminal_kind == first.offer_history[0].terminal_kind
         assert not mirror.present_in_latest_accepted_snapshot
 
@@ -373,7 +373,7 @@ async def test_after_the_grace_a_plain_cancel_with_no_trades_is_conserved_and_no
     assert (found.conservation, found.fill_conflicts, found.lent_unexplained) == (
         "conserved", 0, Decimal(0))
     async with book.factory() as session:
-        mirror = await session.get(VenueOfferMirrorRow, (SCOPE.exchange_account_id, "ci", str(offer_id)))
+        mirror = await session.get(VenueOfferMirrorRow, (SCOPE.exchange_account_id, str(offer_id)))
         assert mirror is not None and not mirror.present_in_latest_accepted_snapshot
         assert mirror.terminal_evidence_id is None and mirror.terminal_kind is None  # nothing made up
         stored = await session.scalar(select(LedgerObservationRow.evidence).where(

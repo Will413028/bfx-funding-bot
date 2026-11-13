@@ -33,8 +33,8 @@ from bfx_funding_bot.modules.ledger import (
     UncertaintyView,
     observation_evidence_ref,
 )
-from bfx_funding_bot.modules.ledger._internal.provenance import offer_provenance
-from bfx_funding_bot.modules.ledger.wiring import build_operator_evidence, build_operator_reads
+from bfx_funding_bot.modules.ledger.read import build_operator_evidence, build_operator_reads
+from bfx_funding_bot.modules.ledger.read.provenance import offer_provenance
 
 from .test_ledger_capital_reader import JOURNAL, SCOPE, Book
 from .test_ledger_capital_reader import book as book
@@ -200,7 +200,7 @@ async def test_detail_returns_none_for_everything_that_is_not_an_uncertainty(
     in_flight = await book.attempt("50", outcome=None)
     for subject in (in_flight, scenario.acked, uuid4()):
         assert await _get(book, subject) is None
-    other = Scope(uuid4(), "ci")
+    other = Scope(uuid4())
     for subject in (scenario.open_unknown, scenario.orphan, scenario.resolved_quarantine):
         assert await _get(book, subject, other) is None
         assert await _get(book, subject) is not None
@@ -297,7 +297,6 @@ async def test_the_router_serves_the_ledger_read_model_as_the_web_api_role(
     from bfx_funding_bot.modules.api.deps import get_session
     from bfx_funding_bot.modules.api.uncertainties import build_uncertainties_router
 
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     account = SCOPE.exchange_account_id
     async with book.factory.begin() as session:
         await grant_membership(

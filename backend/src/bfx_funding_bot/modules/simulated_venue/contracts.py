@@ -1,6 +1,6 @@
 """Public contracts of the simulated venue: scope, config, fault plan, ports.
 
-This module imports nothing from the bot (ledger, execution, trading, marketfeed):
+This module imports nothing from the bot (ledger, execution, trading, market recorders, the runtime):
 the venue is an independent counterparty and the ledger is only its test oracle.
 """
 from __future__ import annotations
@@ -14,9 +14,10 @@ from typing import Literal, Protocol
 
 from bfx_funding_bot.modules.simulated_venue.events import VenueEvent
 
-# The only realms a simulated venue may run in. `prod` is refused here and by the
-# `sim_venue_event` CHECK constraint.
-ALLOWED_REALMS = ("shadow", "ci")
+# The only realm a simulated venue may run in. Every other realm (`prod` above all) is
+# refused here and by the `sim_venue_event` CHECK constraint (ADR 2026-11-08 remove the
+# shadow realm).
+SIMULATED_REALM = "ci"
 REQUIRED_AUTHORITY_EPOCH = "ledger"
 
 _SYMBOL = re.compile(r"^f[A-Z0-9]{2,10}$")
@@ -54,7 +55,7 @@ class FeedFailureError(SimulatedVenueInternalError):
 
 @dataclass(frozen=True, slots=True)
 class InternalFailure:
-    """One simulator-internal failure; soak and CI count these separately from venue faults."""
+    """One simulator-internal failure; CI counts these separately from venue faults."""
 
     kind: str  # "no_market_data" | "feed" | "store" | "bug"
     detail: str
@@ -62,19 +63,18 @@ class InternalFailure:
 
 @dataclass(frozen=True, slots=True)
 class SimAccount:
-    """One simulated venue account: `(exchange_account_id, deployment_environment)`."""
+    """One simulated venue account.
+
+    It names no realm: the configuration refuses the simulated venue outside
+    `SIMULATED_REALM` (`require_simulated_realm`), and the store refuses a database
+    stamped with any other.
+    """
 
     exchange_account_id: str
-    deployment_environment: str
 
     def __post_init__(self) -> None:
         if not self.exchange_account_id:
             raise ValueError("simulated account needs an exchange_account_id")
-        if self.deployment_environment not in ALLOWED_REALMS:
-            raise RealmRefusedError(
-                f"simulated venue refuses realm {self.deployment_environment!r}; "
-                f"allowed: {ALLOWED_REALMS}"
-            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,21 +103,20 @@ class BookSnapshot:
 
 
 class MarketFeed(Protocol):
-    """The venue's own market input. P1a has fixtures only; the live feed is P2.
+    """The venue's own market input: recorded fixtures, injected by the composition root.
 
     Contract for every implementation:
 
     - Both methods are non-blocking reads of data already held locally. They run
-      inside the venue's request lock, so they must not do network I/O: a live feed
-      polls public data on its own task and only fills an in-memory buffer. The
+      inside the venue's request lock, so they must not do network I/O (a feed that
+      polls public data does so on its own task and only fills an in-memory buffer). The
       venue enforces this with `SimulatedVenueConfig.feed_deadline_s`; a call that
       exceeds it is an internal failure, not a venue answer.
     - `complete_through` is the event-time watermark of the trades: the feed holds EVERY
       public trade with `mts <= complete_through(symbol)`, so the venue may consume trades
       up to `min(now, watermark)` and treat that range as final. `None` means nothing is
       known to be complete yet (the venue consumes no trades and moves nothing); a feed of
-      recorded history is complete forever and answers a value at or beyond any `now`. A
-      live feed that has lost its source stops advancing it until the gap is filled.
+      recorded history is complete forever and answers a value at or beyond any `now`.
     - `book` returns the latest valid snapshot at or before `at_ms`. A snapshot
       older than `SimulatedVenueConfig.max_book_age_ms` is not usable: a submit then
       ends in the explicit "no market data" outcome instead of freezing a queue
@@ -137,14 +136,6 @@ class MarketFeed(Protocol):
     async def book(self, symbol: str, *, at_ms: int) -> BookSnapshot | None:
         """The latest valid snapshot taken at or before `at_ms`, or None."""
         ...
-
-
-class VenueObserver(Protocol):
-    """Where the venue reports what a soak must count (metrics are injected, never imported)."""
-
-    def internal_failure(self, kind: str) -> None: ...
-
-    def unexpected_request(self) -> None: ...
 
 
 class VenueEventStore(Protocol):

@@ -5,7 +5,8 @@ gate, safety chain, reconciler, ledger authority and ``BitfinexLiveExecutor`` ta
 simulated venue through its own ``httpx`` client. What a test controls:
 
 * the composition clock (``bot.now_ms_utc`` is patched, and the venue follows it);
-* the venue's market feed and fault plan, through ``VenueSeam`` (production passes neither);
+* the venue's market feed and fault plan, through ``VenueSeam`` (a simulated boot
+  without one is refused);
 * the bot's own funding book, written into its store with the same clock.
 
 The ledger epoch is the migrated database's own (the genesis); a test that wants another latest
@@ -31,25 +32,27 @@ from bfx_funding_bot.apps import bot
 from bfx_funding_bot.apps.venue import VenueSeam
 from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 from bfx_funding_bot.modules.execution.deployment.standing_quote import StandingQuote
+from bfx_funding_bot.modules.execution.protocols import Credentials
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.ledger.tables import ExecutionResolutionJournalRow
-from bfx_funding_bot.modules.ledger.wiring import build_policy_store
+from bfx_funding_bot.modules.ledger.wiring import build_policy_store, build_scope_lock
 from bfx_funding_bot.modules.simulated_venue import (
     BookSnapshot,
     FaultPlan,
     FixtureMarketFeed,
     PublicTrade,
+    SimulatedVenue,
 )
 from bfx_funding_bot.modules.strategy import DecisionOutcome
 from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
-from tests.modules.marketfeed.account_test_helpers import (
+from tests.apps.runtime.account_test_helpers import (
     TEST_EXCHANGE_ACCOUNT_ID,
     seed_exchange_account,
 )
-from tests.modules.marketfeed.test_daemon_wiring import _write_cells_yaml
+from tests.apps.runtime.test_daemon_wiring import _write_cells_yaml
 
 _IDS = itertools.count(1)
-SCOPE = Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci")
+SCOPE = Scope(TEST_EXCHANGE_ACCOUNT_ID)
 CELL = "fUST_a30"
 T0 = 1_704_067_200_000  # 2024-01-01T00:00Z, a UTC midnight, far from the wall clock
 HOUR = 3_600_000
@@ -67,8 +70,8 @@ ENV = {
     "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
     "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
     "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
-    "BFX_SIM_INITIAL_WALLETS": "UST:1000",
 }
+INITIAL_WALLETS = {"UST": Decimal(1000)}
 LEGACY_ENV = (
     "BFX_ALLOCATION_CAP_USDT", "BFX_BALANCE_BUFFER_USDT", "BFX_CONCENTRATION_PCT",
     "BFX_VENUE_FLOOR_USD", "BFX_MIN_OFFER_BUFFER_PCT", "BFX_EXECUTOR", "BFX_VAULT_KEK",
@@ -97,11 +100,26 @@ class SimEnv:
     httpx_mock: Any
     alerts: list[str]
     daemons: list[Any] = field(default_factory=list)
+    # The simulated venue each built daemon trades against, handed over by the seam.
+    venues: dict[int, SimulatedVenue] = field(default_factory=dict)
 
-    async def build(self, *, faults: FaultPlan | None = None, feed: Any = None) -> Any:
+    def seam(self, *, faults: FaultPlan | None = None, feed: Any = None,
+             client_credentials: Credentials | None = None) -> tuple[VenueSeam, list[SimulatedVenue]]:
+        """The only way a test selects the simulated venue; the list receives the built venue."""
+        built: list[SimulatedVenue] = []
+        return VenueSeam(feed=feed or self.feed, faults=faults, initial_wallets=INITIAL_WALLETS,
+                         on_built=built.append, client_credentials=client_credentials), built
+
+    async def build(self, *, faults: FaultPlan | None = None, feed: Any = None,
+                    client_credentials: Credentials | None = None,
+                    stop_event: Any = None) -> Any:
+        """The one place a test composes a simulated daemon: seam, ``bot.build_daemon``, then
+        the built venue and daemon registered and the bot given its book."""
+        seam, built = self.seam(faults=faults, feed=feed, client_credentials=client_credentials)
         daemon = await bot.build_daemon(
-            cells_yaml_path=self.cells_path, skip_ws=True,
-            venue_seam=VenueSeam(feed=feed or self.feed, faults=faults))
+            cells_yaml_path=self.cells_path, skip_ws=True, stop_event=stop_event,
+            venue_seam=seam)
+        [self.venues[id(daemon)]] = built
         self.daemons.append(daemon)
         self.give_the_bot_a_book(daemon)
         return daemon
@@ -150,16 +168,18 @@ class SimEnv:
 
     async def activate(self) -> None:
         """The operator's ACTIVE: a fresh account is HALTED until someone says otherwise."""
-        from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+        from bfx_funding_bot.modules.execution.safety.trading_state_store import (
+            TradingStateRepository,
+        )
 
         await TradingStateRepository(
-            self.factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci",
+            self.factory, account_id=TEST_EXCHANGE_ACCOUNT_ID, scope_lock=build_scope_lock(),
         ).transition("ACTIVE", cause="operator", actor="test", reason="simulated run",
                      now_ms=self.clock.now)
 
     # -- invariants ------------------------------------------------------------------
-    def venue(self, daemon: Any) -> Any:
-        return daemon.venue_diagnostics
+    def venue(self, daemon: Any) -> SimulatedVenue:
+        return self.venues[id(daemon)]
 
     async def assert_sound(self, daemon: Any, *, allow_unknown: bool = False) -> None:
         """After a cycle: every accepted basis conserved, nothing unexplained or quarantined."""

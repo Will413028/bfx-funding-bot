@@ -124,7 +124,9 @@ async def test_submit_ack_has_the_documented_notification_shape_with_text_at_ind
     outcome = classify_submit_response(response.status_code, body, True)
     assert isinstance(outcome, SubmitAcknowledged)
     assert outcome.venue_offer_id == str(body[4][0])
-    assert parse_offer_response(body).venue_offer_id == outcome.venue_offer_id
+    parsed = parse_offer_response(body)
+    assert isinstance(parsed, SubmitAcknowledged)
+    assert parsed.venue_offer_id == outcome.venue_offer_id
 
 
 async def test_insufficient_balance_defaults_to_the_live_5xx_refusal_the_client_rejects() -> None:

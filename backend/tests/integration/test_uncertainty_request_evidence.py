@@ -46,6 +46,8 @@ from .test_ledger_schema_roles import (
     _O,
     _build,
     _build_reversible,
+    _has_realm_column,
+    _realm,
     _seed,
     pre_switch,
     reversible_ledger_db,  # noqa: F401 - fixture re-export
@@ -85,30 +87,34 @@ def _seeded(url: str):
 
 def _request(
     *, seq: int | None = 7, observation: str | None = None, request_id=None, uncertainty=None,
-    extra: str = "", extra_values: str = "",
+    extra: str = "", extra_values: str = "", realm_column: bool = False,
 ) -> str:
+    """``realm_column`` for a revision before 545b2877e9bd dropped the column."""
+    column, value = _realm(realm_column)
     # The closed column is named only when it is set: naming it at all needs a grant.
     seq_column = "" if seq is None else " reconcile_event_seq,"
     seq_sql = "" if seq is None else f" {seq},"
     obs_sql = "NULL" if observation is None else f"'{observation}'"
-    return f"""INSERT INTO {_TABLE}(request_id, exchange_account_id, deployment_environment,
+    return f"""INSERT INTO {_TABLE}(request_id, exchange_account_id, {column}
       uncertainty_id, action,{seq_column} observation_id, requested_by, created_at_ms{extra})
-      VALUES ('{request_id or uuid4()}', '{_A}', 'ci', '{uncertainty or uuid4()}',
+      VALUES ('{request_id or uuid4()}', '{_A}', {value}'{uncertainty or uuid4()}',
       'mark_not_accepted',{seq_sql} {obs_sql}, 'op', 1000{extra_values})"""
 
 
 def _ledger_request(conn, request_id=None) -> str:
     request_id = str(request_id or uuid4())
-    conn.exec_driver_sql(_request(seq=None, observation=_O, request_id=request_id))
+    conn.exec_driver_sql(_request(seq=None, observation=_O, request_id=request_id,
+                                  realm_column=_has_realm_column(conn)))
     return request_id
 
 
 def _quarantine(conn, quarantine: str | None = None) -> str:
     quarantine = quarantine or str(uuid4())
+    column, value = _realm(_has_realm_column(conn))
     conn.exec_driver_sql(
         f"""INSERT INTO quarantine_opening(quarantine_id, exchange_account_id,
-      deployment_environment, symbol, intended_amount, opened_at_ms, opened_revision, evidence)
-      VALUES ('{quarantine}', '{_A}', 'ci', 'fUST', 1, 4, 1, '{{}}')"""
+      {column}symbol, intended_amount, opened_at_ms, opened_revision, evidence)
+      VALUES ('{quarantine}', '{_A}', {value}'fUST', 1, 4, 1, '{{}}')"""
     )
     return quarantine
 
@@ -125,11 +131,12 @@ def _journal(conn, request_id: str | None, *, quarantine: str | None = None) -> 
         quarantine = named if exists else _quarantine(conn, named)
     quarantine = quarantine or _quarantine(conn)
     request_sql = "NULL" if request_id is None else f"'{request_id}'"
+    column, value = _realm(_has_realm_column(conn))
     conn.exec_driver_sql(
         f"""INSERT INTO execution_resolution_journal(id, quarantine_id, exchange_account_id,
-      deployment_environment, symbol, action, observation_id, actor_kind, actor_id,
+      {column}symbol, action, observation_id, actor_kind, actor_id,
       operator_request_id, resolved_at_ms, reason, evidence)
-      VALUES ('{uuid4()}', '{quarantine}', '{_A}', 'ci', 'fUST', 'not_accepted', '{_O}',
+      VALUES ('{uuid4()}', '{quarantine}', '{_A}', {value}'fUST', 'not_accepted', '{_O}',
       'operator', 'test', {request_sql}, 6, 'test', '{{}}')"""
     )
 
@@ -156,7 +163,7 @@ def test_a_request_cites_an_observation_and_never_a_reconcile_event(seeded) -> N
 def test_insert_request_raises_an_evidence_violation(seeded) -> None:
     url = seeded.url.render_as_string(hide_password=False)
     values = {
-        "request_id": uuid4(), "exchange_account_id": _A, "deployment_environment": "ci",
+        "request_id": uuid4(), "exchange_account_id": _A,
         "uncertainty_id": uuid4(), "action": "mark_not_accepted",
         "observation_id": None, "venue_offer_id": None, "decision": None, "reason": None,
         "requested_by": "op", "created_at_ms": 1,
@@ -359,7 +366,7 @@ def test_contract_refuses_a_request_with_pre_switch_evidence(before_contract) ->
             conn.exec_driver_sql(
                 f"INSERT INTO exchange_accounts(id,venue,label) VALUES ('{_A}','bitfinex','x')")
             # The owner: the evidence epoch trigger exempts it.
-            conn.exec_driver_sql(_request(seq=7))
+            conn.exec_driver_sql(_request(seq=7, realm_column=True))
             conn.exec_driver_sql(
                 f"UPDATE {_TABLE} SET state='applied', processed_at_ms=2, resolved_event_seq=8")
         with pytest.raises(Exception, match="refuse to close the pre-switch evidence columns: 1"):
@@ -409,7 +416,7 @@ def test_drop_refuses_a_request_with_pre_switch_evidence(closed) -> None:
             conn.exec_driver_sql(
                 f"INSERT INTO exchange_accounts(id,venue,label) VALUES ('{_A}','bitfinex','x')")
             conn.exec_driver_sql(f"ALTER TABLE {_TABLE} ALTER COLUMN observation_id DROP NOT NULL")
-            conn.exec_driver_sql(_request(seq=7))
+            conn.exec_driver_sql(_request(seq=7, realm_column=True))
         with pytest.raises(Exception, match="refuse to drop the pre-switch evidence columns: 1"):
             upgrade_head_after_w3(closed)
         with engine.connect() as conn:

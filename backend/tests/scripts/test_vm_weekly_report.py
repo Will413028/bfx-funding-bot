@@ -39,7 +39,6 @@ FAKE_ENV = {
     "BFX_SOURCE_REVISION": REV,
     "DATABASE_URL": "postgresql://example@bfx-postgres:5432/example",
     "BFX_EXCHANGE_ACCOUNT_ID": "00000000-0000-4000-8000-000000000000",
-    "BFX_DEPLOYMENT_ENV": "prod",
 }
 
 # The chain exactly as docker-compose.bot.yml defined it before the move
@@ -130,7 +129,7 @@ def test_no_tag_no_env_file_and_the_runner_supplies_every_variable() -> None:
     assert re.search(r"bfx-bot:local|ghcr\.io/\S+:(main|sha-|latest)", COMPOSE_TEXT) is None
     required = set(re.findall(r"\$\{([A-Z_]+):\?", COMPOSE_TEXT))
     assert required == set(FAKE_ENV)
-    assert set(weekly.SECRET_KEYS + weekly.LIVE_KEYS) | {
+    assert set(weekly.SECRET_KEYS) | {
         "BFX_BACKEND_IMAGE", "BFX_BACKEND_DIGEST", "BFX_SOURCE_REVISION"} == required
 
 
@@ -180,7 +179,7 @@ REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {
     "reports_mount": lambda s: s["volumes"].append(
         {"type": "bind", "source": "/", "target": "/host"}),
     "network": lambda s: s["networks"].__setitem__("other", {}),
-    "runtime_env": lambda s: s["environment"].pop("BFX_DEPLOYMENT_ENV"),
+    "runtime_env": lambda s: s["environment"].pop("BFX_EXCHANGE_ACCOUNT_ID"),
     "loader_injection_blanked": lambda s: s["environment"].pop("LD_PRELOAD"),
     "interpreter_injection_blanked": lambda s: s["environment"].pop("PYTHONPATH"),
 }
@@ -326,13 +325,12 @@ def host(tmp_path: Path) -> dict[str, Path]:
     state = tmp_path / "state"
     for revision in (REV, OLD_REV):
         (state / "releases" / revision).mkdir(parents=True)
-        shutil.copy(ROOT / "deploy/vm/live.env", state / "releases" / revision / "live.env")
     return {"ops": release / "ops", "runtime": runtime, "state": state, "reports": reports}
 
 
 def _plan(host: dict[str, Path], ledger: FakeLedger, checked: list[Path] | None = None) -> Any:
     return weekly.build_plan(
-        ops_dir=host["ops"], ledger=ledger, runtime_dir=host["runtime"], state_dir=host["state"],
+        ops_dir=host["ops"], ledger=ledger, runtime_dir=host["runtime"],
         backend_repository=BACKEND, reports_dir=host["reports"],
         secret_check=(checked.append if checked is not None else lambda _path: None))
 
@@ -350,7 +348,7 @@ def test_plan_runs_the_deployed_digest_with_only_the_needed_env(host: dict[str, 
                          "run", "--rm", "weekly-report"]
     assert plan.env["DATABASE_URL"] == "postgresql://bfx_research:pw$x@bfx-postgres:5432/bfx"  # literal
     assert plan.env["BFX_EXCHANGE_ACCOUNT_ID"] == "00000000-0000-4000-8000-000000000001"
-    assert plan.env["BFX_DEPLOYMENT_ENV"] == "prod"
+    assert "BFX_DEPLOYMENT_ENV" not in plan.env  # no one-shot job reads it
     assert plan.env["BFX_BACKEND_DIGEST"] == DIGEST and plan.env["BFX_SOURCE_REVISION"] == REV
     assert "BFX_VAULT_KEK" not in plan.env and "BFX_ADMIN_TOKEN" not in plan.env
     described = json.dumps(plan.describe())
@@ -397,8 +395,6 @@ def test_heartbeat_path_is_the_one_backup_check_defaults_to() -> None:
     (lambda h, ledger: setattr(ledger, "rows", [(REV, "latest", "deployed")]), "ledger_row_invalid"),
     (lambda h, ledger: (h["runtime"] / "research.env").write_text("DATABASE_URL=x\n"),
      "env_key_missing:research.env:BFX_EXCHANGE_ACCOUNT_ID"),
-    (lambda h, ledger: (h["state"] / "releases" / REV / "live.env").unlink(),
-     "env_file_unreadable:live.env"),
     (lambda h, ledger: (h["ops"] / "docker-compose.weekly-report.yml").unlink(), "weekly_compose_missing"),
     (lambda h, ledger: (h["ops"].parent / ".installed").unlink(), "tooling_release_unknown"),
     # Never let Docker create it: 2.x and v5 read an unset create_host_path differently.
@@ -421,7 +417,7 @@ def _checked_plan(host: dict[str, Path]) -> Any:
     uid = os.getuid()
     return weekly.build_plan(
         ops_dir=host["ops"], ledger=FakeLedger([(REV, DIGEST, "deployed")]),
-        runtime_dir=host["runtime"], state_dir=host["state"], backend_repository=BACKEND,
+        runtime_dir=host["runtime"], backend_repository=BACKEND,
         reports_dir=host["reports"],
         secret_check=lambda path: bfx.protected_secret_file(path, owner_uid=uid))
 
@@ -462,6 +458,5 @@ def test_a_symlinked_research_env_stops_the_run(host: dict[str, Path]) -> None:
 def test_defaults_are_the_deployers() -> None:
     args = weekly._parser().parse_args([])
     defaults = bfx.Settings()
-    assert (args.runtime_dir, args.state_dir, args.backend_repository, args.postgres_container) == (
-        defaults.runtime_dir, defaults.state_dir, defaults.backend_repository,
-        defaults.postgres_container)
+    assert (args.runtime_dir, args.backend_repository, args.postgres_container) == (
+        defaults.runtime_dir, defaults.backend_repository, defaults.postgres_container)

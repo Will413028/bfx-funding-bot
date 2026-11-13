@@ -26,6 +26,8 @@ from bfx_funding_bot.modules.execution.uncertainty_requests import (
     ResolutionRequestPending,
     ResolutionScope,
     UncertaintyResolutionRequests,
+)
+from bfx_funding_bot.modules.execution.uncertainty_resolution_worker import (
     UncertaintyResolutionWorker,
 )
 from bfx_funding_bot.modules.execution.uncertainty_tables import UncertaintyResolutionRequestRow
@@ -41,12 +43,9 @@ from bfx_funding_bot.modules.ledger import (
     observation_evidence_ref,
 )
 from bfx_funding_bot.modules.ledger._internal import operator_resolution as resolution_module
+from bfx_funding_bot.modules.ledger.read import build_operator_evidence, build_operator_reads
 from bfx_funding_bot.modules.ledger.tables import ExecutionResolutionJournalRow
-from bfx_funding_bot.modules.ledger.wiring import (
-    build_operator_evidence,
-    build_operator_reads,
-    build_operator_resolution,
-)
+from bfx_funding_bot.modules.ledger.wiring import build_operator_resolution, build_scope_lock
 
 from .test_ledger_capital_reader import (
     book,  # noqa: F401 - fixture re-export
@@ -72,7 +71,7 @@ pytestmark = pytest.mark.integration
 OPERATOR = "operator-1"
 RESOLUTION = build_operator_resolution()
 READS = build_operator_reads()
-RSCOPE = ResolutionScope(SCOPE.exchange_account_id, SCOPE.deployment_environment)
+RSCOPE = ResolutionScope(SCOPE.exchange_account_id)
 # After the UNKNOWN (1_050_000) and inside the settle window (STARTED + 120_000): the
 # automatic resolver leaves the attempt open, so only an operator can resolve it.
 OPEN_AT = 1_100_000
@@ -88,7 +87,7 @@ class Allow:
 def make_worker(factory: Any, resolution: Any = RESOLUTION) -> UncertaintyResolutionWorker:
     return UncertaintyResolutionWorker(
         session_factory=factory, scope=RSCOPE, authority=Allow(), clock=lambda: WORKER_NOW,
-        resolution=resolution,
+        resolution=resolution, scope_lock=build_scope_lock(),
     )
 
 

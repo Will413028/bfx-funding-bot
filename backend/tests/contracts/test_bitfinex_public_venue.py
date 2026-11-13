@@ -90,20 +90,6 @@ async def test_funding_book_parses_with_both_sides(rest: BitfinexREST, symbol: s
         assert lv.count >= 1
 
 
-@pytest.mark.parametrize("symbol", SYMBOLS)
-async def test_funding_trades_parse_and_are_current(rest: BitfinexREST, symbol: str) -> None:
-    now = _now_ms()
-    trades = await rest.get_funding_trades(symbol=symbol, start=now - DAY_MS, limit=50)
-    assert trades, "no public funding trades in the last day"
-    assert [t.mts for t in trades] == sorted(t.mts for t in trades), "sort=1 is no longer oldest first"
-    for t in trades:
-        assert t.trade_id > 0
-        assert now - DAY_MS <= t.mts <= now + 60_000
-        assert t.amount != 0
-        assert 0 < t.rate <= MAX_DAILY_RATE
-        assert t.period in PERIODS
-
-
 async def test_ust_usd_fx_meets_the_funding_rule() -> None:
     async with httpx.AsyncClient() as http:
         evidence = await FundingRules(http=http, clock=_now_ms).observe("fUST")

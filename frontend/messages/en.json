@@ -80,7 +80,6 @@
     "uncertaintySymbolClear": "clear",
     "uncertaintyDetails": "View evidence and next operator action",
     "uncertaintyAmount": "Intended amount",
-    "uncertaintyScope": "Environment",
     "uncertaintyEvidence": "Evidence",
     "uncertaintyObserved": "Observed",
     "uncertaintyCandidates": "Server-derived candidate offers",

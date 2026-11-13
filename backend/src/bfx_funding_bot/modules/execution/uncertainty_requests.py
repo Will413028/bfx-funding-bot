@@ -1,4 +1,5 @@
-"""Operator uncertainty adjudication: the request outbox and its daemon worker.
+"""Operator uncertainty adjudication: the request outbox (the daemon worker is
+``execution.uncertainty_resolution_worker``).
 
 ADR D4' (2026-09-22 amendment to the account-isolated execution target): every
 operator adjudication is written by the web API as a request row and applied by
@@ -8,7 +9,8 @@ to every read model it touches, and that process must be the account's writer,
 not the control plane.
 
 The queue, worker loop and outcome recording are the shared operator-request
-contract (``operator_requests``); this module adds what adjudication means.
+contract (``operator_requests``, ``operator_request_worker``); this module adds what
+adjudication means.
 What a resolution validates and writes is the ledger's ``OperatorResolution`` port.
 
 The validation is shared. The web API runs it before accepting a request
@@ -22,29 +24,19 @@ same bounded code, never collapsed into one opaque conflict.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from bfx_funding_bot.modules.execution.operator_requests import (
-    APPLIED,
-    OperatorAuthority,
-    OperatorRequestWorker,
-    Outcome,
-    RequestRejected,
-    insert_request,
-    root_cause_name,
-)
+from bfx_funding_bot.modules.execution.operator_requests import RequestRejected, insert_request
 from bfx_funding_bot.modules.execution.uncertainty_tables import (
     ResolutionAction,
     UncertaintyResolutionRequestRow,
 )
 from bfx_funding_bot.modules.ledger import (
     OperatorResolution,
-    QueuedResolution,
     RequestColumns,
     ResolutionIntent,
     Scope,
@@ -69,7 +61,6 @@ class ResolutionRequestPending(ResolutionRejected):
 @dataclass(frozen=True, slots=True)
 class ResolutionScope:
     account_id: UUID
-    environment: str
 
 
 def intent_from_request(row: UncertaintyResolutionRequestRow) -> ResolutionIntent:
@@ -127,7 +118,6 @@ class UncertaintyResolutionRequests:
             .where(
                 UncertaintyResolutionRequestRow.request_id == request_id,
                 UncertaintyResolutionRequestRow.exchange_account_id == self.scope.account_id,
-                UncertaintyResolutionRequestRow.deployment_environment == self.scope.environment,
             )
             .execution_options(populate_existing=True)
         )
@@ -143,7 +133,6 @@ class UncertaintyResolutionRequests:
         rows = await session.scalars(
             select(UncertaintyResolutionRequestRow).where(
                 UncertaintyResolutionRequestRow.exchange_account_id == self.scope.account_id,
-                UncertaintyResolutionRequestRow.deployment_environment == self.scope.environment,
                 UncertaintyResolutionRequestRow.uncertainty_id.in_(uncertainty_ids),
                 UncertaintyResolutionRequestRow.state == "requested",
             )
@@ -160,7 +149,6 @@ class UncertaintyResolutionRequests:
             select(UncertaintyResolutionRequestRow)
             .where(
                 UncertaintyResolutionRequestRow.exchange_account_id == self.scope.account_id,
-                UncertaintyResolutionRequestRow.deployment_environment == self.scope.environment,
                 UncertaintyResolutionRequestRow.uncertainty_id.in_(uncertainty_ids),
             )
             .order_by(
@@ -212,7 +200,7 @@ class UncertaintyResolutionRequests:
             return pending
         try:
             columns = await self.resolution.prepare(
-                session, Scope(self.scope.account_id, self.scope.environment), intent,
+                session, Scope(self.scope.account_id), intent,
                 now_ms=now_ms,
             )
         except EvidenceRejected as exc:
@@ -237,7 +225,6 @@ def request_values(
     return {
         "request_id": uuid4(),
         "exchange_account_id": scope.account_id,
-        "deployment_environment": scope.environment,
         "uncertainty_id": intent.uncertainty_id,
         "action": intent.action,
         "observation_id": columns.observation_id,
@@ -249,48 +236,6 @@ def request_values(
     }
 
 
-class UncertaintyResolutionWorker(OperatorRequestWorker[UncertaintyResolutionRequestRow, None]):
-    """Applies queued adjudications inside the account's single writer."""
-
-    model = UncertaintyResolutionRequestRow
-    name = "uncertainty_resolution"
-
-    def __init__(
-        self,
-        *,
-        session_factory: async_sessionmaker[AsyncSession],
-        scope: ResolutionScope,
-        authority: OperatorAuthority,
-        clock: Callable[[], int] | None = None,
-        ownership: Callable[[], Awaitable[bool]] | None = None,
-        poll_interval_s: float = 2.0,
-        resolution: OperatorResolution,
-    ) -> None:
-        super().__init__(session_factory=session_factory, account_id=scope.account_id,
-                         environment=scope.environment, authority=authority, clock=clock,
-                         ownership=ownership, poll_interval_s=poll_interval_s)
-        self.scope = scope
-        self.requests = UncertaintyResolutionRequests(scope, resolution)
-
-    async def apply(self, session: AsyncSession, row: UncertaintyResolutionRequestRow,
-                    prepared: None) -> Outcome:
-        try:
-            await self.requests.resolution.apply(
-                session, Scope(self.scope.account_id, self.scope.environment),
-                QueuedResolution(
-                    row.request_id, intent_from_request(row),
-                    RequestColumns(row.observation_id),
-                ),
-                now_ms=self.clock(),
-            )
-        except EvidenceRejected as exc:
-            raise request_rejection(exc) from exc
-        return Outcome(APPLIED)
-
-    def failure_reason(self, exc: BaseException) -> str:
-        return "resolution_failed:" + root_cause_name(exc)
-
-
 __all__ = [
     "ResolutionAction",
     "ResolutionIntent",
@@ -298,7 +243,6 @@ __all__ = [
     "ResolutionRequestPending",
     "ResolutionScope",
     "UncertaintyResolutionRequests",
-    "UncertaintyResolutionWorker",
     "intent_from_request",
     "request_rejection",
     "request_values",

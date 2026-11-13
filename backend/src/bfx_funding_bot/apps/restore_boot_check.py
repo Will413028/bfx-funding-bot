@@ -8,9 +8,9 @@ restored copy the way a bot of this image would at boot, in one REPEATABLE READ 
 transaction:
 
 1. schema at the image's single migration head (``assert_schema_head``);
-2. the stamped realm, and every ledger scope in it;
+2. the realm stamp is readable (a ledger scope is one exchange account of that realm);
 3. the capital authority is ``ledger`` (``require_ledger_authority``);
-4. the epoch guard a Bitfinex bot boots through (``require_ledger_epoch``: a known writer);
+4. the epoch guard every bot boots through (``require_ledger_epoch``: a known writer);
 5. the ledger capital reader (``read_capital``) for every (symbol, cell) of each scope's newest
    accepted basis, as of that scope's newest query: it must fold a basis, or say the newest
    query is still pending (the restore point fell inside an observation cycle). A basis with
@@ -28,12 +28,9 @@ import asyncio
 import json
 import os
 import sys
-from typing import Any, Final
-
-from bfx_funding_bot.core.venue import Venue
+from typing import Any
 
 EXIT_REFUSED = 3
-VENUE: Final[Venue] = "bitfinex"
 _PENDING = "snapshot_query_pending"
 
 
@@ -54,11 +51,10 @@ async def _scopes(session: Any) -> list[Any]:
 
     owners = (CapitalCommandClockRow, LedgerObservationQueryRow, SubmissionAttemptJournalRow,
               QuarantineOpeningRow)
-    statement = union(*(select(row.exchange_account_id, row.deployment_environment)
-                        for row in owners))
+    statement = union(*(select(row.exchange_account_id) for row in owners))
     rows = (await session.execute(statement)).all()
-    return sorted((Scope(row[0], row[1]) for row in rows),
-                  key=lambda scope: (str(scope.exchange_account_id), scope.deployment_environment))
+    return sorted((Scope(row[0]) for row in rows),
+                  key=lambda scope: str(scope.exchange_account_id))
 
 
 async def _reads(session: Any, scope: Any) -> tuple[str, list[dict[str, object]]]:
@@ -74,10 +70,7 @@ async def _reads(session: Any, scope: Any) -> tuple[str, list[dict[str, object]]
     from bfx_funding_bot.modules.ledger.wiring import build_ledger_capital_reader
     from bfx_funding_bot.modules.trading.capital import Available, CapitalScope
 
-    in_scope = (
-        LedgerObservationQueryRow.exchange_account_id == scope.exchange_account_id,
-        LedgerObservationQueryRow.deployment_environment == scope.deployment_environment,
-    )
+    in_scope = (LedgerObservationQueryRow.exchange_account_id == scope.exchange_account_id,)
     basis_id = await session.scalar(
         select(AcceptedCapitalBasisRow.id)
         .join(LedgerObservationRow, LedgerObservationRow.id == AcceptedCapitalBasisRow.observation_id)
@@ -101,8 +94,7 @@ async def _reads(session: Any, scope: Any) -> tuple[str, list[dict[str, object]]
     reader = build_ledger_capital_reader()
     reads: list[dict[str, object]] = []
     for symbol, cell_id in cells:
-        capital_scope = CapitalScope(scope.exchange_account_id, scope.deployment_environment,
-                                     symbol, cell_id)
+        capital_scope = CapitalScope(scope.exchange_account_id, symbol, cell_id)
         try:
             read = await reader.read_capital(session, capital_scope, now_ms=now_ms,
                                              max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS)
@@ -150,20 +142,17 @@ async def _check(database_url: str) -> dict[str, object]:
             except AuthorityMismatch:
                 raise RefusedError("boot_authority_not_ledger") from None
             try:
-                await require_ledger_epoch(session, venue=VENUE)
+                await require_ledger_epoch(session)
             except AuthorityMismatch:
                 raise RefusedError("boot_epoch_writer_unknown") from None
             scopes = await _scopes(session)
             if not scopes:
                 raise RefusedError("boot_ledger_empty")
-            if any(scope.deployment_environment != realm for scope in scopes):
-                raise RefusedError("boot_realm_mismatch")
             checked: list[dict[str, object]] = []
             for scope in scopes:
                 basis_id, reads = await _reads(session, scope)
                 checked.append({
                     "exchange_account_id": str(scope.exchange_account_id),
-                    "deployment_environment": scope.deployment_environment,
                     "basis_id": basis_id, "reads": reads,
                 })
     finally:

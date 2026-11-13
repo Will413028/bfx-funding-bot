@@ -41,7 +41,7 @@ class UncertaintyResolutionRequestRow(Base):
     # The operator-request column split (operator_requests): the web API's
     # column-scoped INSERT grant, and the daemon's UPDATE grant.
     REQUEST_COLUMNS: ClassVar[tuple[str, ...]] = (
-        "request_id", "exchange_account_id", "deployment_environment", "uncertainty_id",
+        "request_id", "exchange_account_id", "uncertainty_id",
         "action", "observation_id", "venue_offer_id", "decision", "reason", "requested_by",
         "created_at_ms",
     )
@@ -64,7 +64,6 @@ class UncertaintyResolutionRequestRow(Base):
         ),
         nullable=False,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     uncertainty_id: Mapped[UUID] = mapped_column(_UUID, nullable=False)
     action: Mapped[str] = mapped_column(Text, nullable=False)
     # The ledger observation the operator cited.
@@ -115,7 +114,6 @@ class UncertaintyResolutionRequestRow(Base):
         Index(
             "uq_uncertainty_resolution_requests_pending",
             "exchange_account_id",
-            "deployment_environment",
             "uncertainty_id",
             unique=True,
             postgresql_where=text("state = 'requested'"),
@@ -124,7 +122,6 @@ class UncertaintyResolutionRequestRow(Base):
         Index(
             "ix_uncertainty_resolution_requests_queue",
             "exchange_account_id",
-            "deployment_environment",
             "state",
             "created_at_ms",
         ),
@@ -132,7 +129,6 @@ class UncertaintyResolutionRequestRow(Base):
         UniqueConstraint(
             "request_id",
             "exchange_account_id",
-            "deployment_environment",
             "uncertainty_id",
             name="uq_uncertainty_resolution_requests_scope",
         ),

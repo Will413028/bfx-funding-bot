@@ -66,7 +66,7 @@ from bfx_funding_bot.modules.ledger.wiring import build_ledger_journal, build_le
 from .test_ledger_schema_roles import _A, _P, ledger_db  # noqa: F401 - fixture re-export
 
 pytestmark = pytest.mark.integration
-SCOPE = Scope(UUID(_A), "ci")
+SCOPE = Scope(UUID(_A))
 JOURNAL = build_ledger_journal()
 OBSERVATIONS = build_ledger_observations()
 _IDS = count(1)
@@ -290,11 +290,11 @@ class Ledger:
             await session.execute(
                 text(
                     "INSERT INTO execution_decisions(decision_id, account_id, "
-                    "exchange_account_id, deployment_environment, reconcile_id, cell_id, "
+                    "exchange_account_id, reconcile_id, cell_id, "
                     "symbol, signal_correlation_id, outcome, signal_rate, amount_usdt, "
                     "duration_days, model_evidence, safety_result, execution_policy, "
                     "service_version, config_hash, occurred_at_ms, recorded_at_ms) VALUES "
-                    "(:d, 'account', :a, 'ci', 'r', :cell, :symbol, :d, 'submitted', 0, "
+                    "(:d, 'account', :a, 'r', :cell, :symbol, :d, 'submitted', 0, "
                     ":amount, 2, '{}', '{}', 'policy', 'test', 'hash', 0, 0)"
                 ),
                 {"d": decision_id, "a": _A, "cell": cell, "symbol": symbol, "amount": amount},
@@ -367,8 +367,8 @@ async def ledger(ledger_db):  # noqa: F811
         conn.execute(
             text(
                 "INSERT INTO capital_policy_revisions(id, exchange_account_id, "
-                "deployment_environment, symbol, revision, schema_version, policy, digest, "
-                "source) VALUES (:p, :a, 'ci', 'fUST', 1, 1, '{}', 'p', '{}')"
+                "symbol, revision, schema_version, policy, digest, "
+                "source) VALUES (:p, :a, 'fUST', 1, 1, '{}', 'p', '{}')"
             ),
             {"p": _P, "a": _A},
         )
@@ -457,8 +457,8 @@ async def test_only_observed_trades_attribute_credits(ledger) -> None:
         await session.execute(
             text(
                 "INSERT INTO funding_trades(exchange_account_id, trade_id, "
-                "deployment_environment, symbol, mts_create, offer_id, amount, rate, period) "
-                "VALUES (:a, 1, 'ci', 'fUST', 101150, 101, 200, 0.0001, 2)"
+                "symbol, mts_create, offer_id, amount, rate, period) "
+                "VALUES (:a, 1, 'fUST', 101150, 101, 200, 0.0001, 2)"
             ),
             {"a": _A},
         )

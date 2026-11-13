@@ -44,13 +44,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bfx_funding_bot.apps.read_models import build_read_models
 from bfx_funding_bot.core.auth import Principal, require_operator
 from bfx_funding_bot.modules.accounts.exchange_accounts import grant_membership
+from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.api.deps import ReadModels, get_session
 from bfx_funding_bot.modules.api.projections import build_projections_router
 from bfx_funding_bot.modules.execution.archived_execution_history import (
     ArchivedExecutionHistory,
 )
 from bfx_funding_bot.modules.ledger import CreditHistory, OfferHistory, Scope
-from tests.pg_templates import DISABLE_REALM_TRIGGERS_SQL, OPEN_LEGACY_ARCHIVE_SQL
+from tests.pg_templates import OPEN_LEGACY_ARCHIVE_SQL
 
 from .test_ledger_basis import _credit, _observation, _offer
 from .test_ledger_capital_reader import SCOPE, Book
@@ -59,24 +60,27 @@ from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture dependen
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 WATERMARK = 1_000
+ENVIRONMENT = "ci"  # the database's realm stamp, the only realm an archived row carries
+OTHER_ACCOUNT = UUID("aaaaaaaa-bbbb-4ccc-8ddd-0000000000ff")
 
 
 async def _plant_archive(
-    book: Book, *events: tuple[str, int], environment: str = SCOPE.deployment_environment
+    book: Book, *events: tuple[str, int], account: UUID | None = None,
+    environment: str = ENVIRONMENT,
 ) -> None:
-    """Pre-switch ``event_log`` rows ``(event_type, occurred_at_ms)`` of SCOPE's account, planted
-    in the frozen archive opened on this clone (another environment with the realm trigger off)."""
+    """Pre-switch ``event_log`` rows ``(event_type, occurred_at_ms)`` of SCOPE's account (or
+    ``account``'s), planted in the frozen archive opened on this clone. The archive keeps its
+    environment column; every row carries the database's realm (migration 545b2877e9bd)."""
     async with book.factory.begin() as session:
         await session.execute(text(OPEN_LEGACY_ARCHIVE_SQL))
-        if environment != SCOPE.deployment_environment:
-            await session.execute(text(DISABLE_REALM_TRIGGERS_SQL))
         for etype, at in events:
             await session.execute(text(
                 "INSERT INTO legacy_archive.event_log (account_id, exchange_account_id, "
                 "deployment_environment, event_type, venue_offer_id, cid, payload, occurred_at_ms) "
                 "VALUES ('account', :account, :environment, :etype, 'legacy-1', 7, :payload, :at)"
             ), {
-                "account": SCOPE.exchange_account_id, "environment": environment, "etype": etype,
+                "account": account or SCOPE.exchange_account_id, "environment": environment,
+                "etype": etype,
                 "payload": json.dumps({"symbol": "fUST", "amount": "50", "fill_rate": 0.0002}),
                 "at": at,
             })
@@ -105,7 +109,6 @@ async def _scenario(book: Book) -> dict[str, UUID]:
 async def _client(
     book: Book, monkeypatch: pytest.MonkeyPatch, read_models: ReadModels | None = None
 ) -> httpx.AsyncClient:
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", SCOPE.deployment_environment)
     async with book.factory.begin() as session:
         await grant_membership(session, exchange_account_id=SCOPE.exchange_account_id,
                                user_id="operator-1", role="owner")
@@ -290,25 +293,22 @@ async def test_a_seeded_offer_filled_after_the_switch_is_a_fill(book, monkeypatc
 
 
 async def test_another_scopes_observations_and_journal_add_nothing(book, monkeypatch) -> None:
-    """Another exchange account and another deployment environment: their observations hold
-    SCOPE's offer and a closed credit, their journal names an offer SCOPE observed executed."""
+    """Another exchange account (one database holds one realm): its observations hold SCOPE's
+    offer and a closed credit, its journal names an offer SCOPE observed executed."""
     await _scenario(book)
     own = await _history(book, monkeypatch)
     async with book.factory.begin() as session:
-        # Foreign realms in one database: plant them with the realm trigger off.
-        await session.execute(text(DISABLE_REALM_TRIGGERS_SQL))
         account = uuid4()
         await session.execute(
             text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','other')"),
             {"id": account})
-    for other in (Book(book.factory, Scope(account, SCOPE.deployment_environment)),
-                  Book(book.factory, Scope(SCOPE.exchange_account_id, "ci2"))):
-        await other.accept()
-        await other.attempt("11", outcome="ack", venue_offer_id="theirs", started_at_ms=2_000,
-                            completed_at_ms=2_010)
-        await _observe(other, 3_300, history=(_fill("o-1", 2_900),), credit_history=(
-            CreditHistory(_credit("99", "10", opening=2_000), "closed", 2_900),))
-    # SCOPE's own observation sees the offer only the other scopes' journals name.
+    other = Book(book.factory, Scope(account))
+    await other.accept()
+    await other.attempt("11", outcome="ack", venue_offer_id="theirs", started_at_ms=2_000,
+                        completed_at_ms=2_010)
+    await _observe(other, 3_300, history=(_fill("o-1", 2_900),), credit_history=(
+        CreditHistory(_credit("99", "10", opening=2_000), "closed", 2_900),))
+    # SCOPE's own observation sees the offer only the other scope's journal names.
     await _observe(book, 3_400, history=(_fill("theirs", 2_950),))
     assert await _history(book, monkeypatch) == own
 
@@ -330,13 +330,18 @@ async def test_the_web_api_cannot_read_the_credit_history_payload(book) -> None:
 
 
 async def _archive_client(book: Book, monkeypatch: pytest.MonkeyPatch) -> httpx.AsyncClient:
-    """SCOPE's four archived events and another environment's fill, served by the archive alone."""
+    """SCOPE's four archived events and another account's fill, served by the archive alone."""
     await _plant_archive(book, ("RESERVATION_INTENT", 10_000), ("RESERVATION_CLAIMED", 10_001),
-                         ("ORDER_FILL", 10_002), ("CREDIT_CLOSED", 10_003))
-    await _plant_archive(book, ("ORDER_FILL", 99_999), environment="canary")
+                         ("ORDER_FILL", 10_002))
+    # The read does not filter on the archive's realm column: a row carrying another value
+    # (the migration refuses a database that holds one) is served like the rest.
+    await _plant_archive(book, ("CREDIT_CLOSED", 10_003), environment="prod")
+    async with book.factory.begin() as session:
+        session.add(ExchangeAccount(id=OTHER_ACCOUNT, venue="bitfinex", label="other"))
+    await _plant_archive(book, ("ORDER_FILL", 99_999), account=OTHER_ACCOUNT)
     unused = object()
     return await _client(book, monkeypatch, ReadModels(
-        unused, unused, unused, ArchivedExecutionHistory(), unused))  # type: ignore[arg-type]
+        unused, unused, ArchivedExecutionHistory(), unused))  # type: ignore[arg-type]
 
 
 async def test_the_archive_pages_newest_first_within_its_scope(book, monkeypatch) -> None:
@@ -345,7 +350,7 @@ async def test_the_archive_pages_newest_first_within_its_scope(book, monkeypatch
         assert response.status_code == 200, response.text
         body = response.json()
         data = body["data"]
-        assert [row["eventType"] for row in data] == ["CREDIT_CLOSED", "ORDER_FILL"]  # no canary
+        assert [row["eventType"] for row in data] == ["CREDIT_CLOSED", "ORDER_FILL"]  # not the other account's
         assert (data[0]["amount"], data[0]["rate"], data[0]["cid"]) == ("50", 0.0002, 7)
         assert body["pagination"]["hasMore"] is True
         before = body["pagination"]["nextBefore"]
@@ -364,7 +369,7 @@ async def test_the_archive_filters_by_event_type_within_its_scope(book, monkeypa
     async with await _archive_client(book, monkeypatch) as client:
         body = (await client.get(_path(), params={"event_type": "ORDER_FILL"})).json()
     assert [(row["eventType"], row["occurredAtMs"]) for row in body["data"]] == [
-        ("ORDER_FILL", 10_002)]  # the canary fill excluded
+        ("ORDER_FILL", 10_002)]  # the other account's fill excluded
     assert body["pagination"]["hasMore"] is False
 
 

@@ -79,7 +79,8 @@ from bfx_funding_bot.modules.execution.safety.protection import (
     ProtectionPort,
     capital_block_trigger,
 )
-from bfx_funding_bot.modules.execution.safety.trading_state import HALTED, read_current
+from bfx_funding_bot.modules.execution.safety.trading_state import HALTED
+from bfx_funding_bot.modules.execution.safety.trading_state_store import read_current
 from bfx_funding_bot.modules.ledger import (
     CapitalAuthority,
     CapitalAvailable,
@@ -151,15 +152,6 @@ class FillModelEvidenceProvider(Protocol):
         period_agg: str,
         horizon_h: int,
     ) -> FillModelEvidence | FillModelUnavailable | None: ...
-
-
-def _http_status(raw_response: object) -> int | None:
-    """The HTTP status the executor recorded next to a failed submit, when it did."""
-    if isinstance(raw_response, Mapping):
-        status = raw_response.get("http_status")
-        if isinstance(status, int) and not isinstance(status, bool):
-            return status
-    return None
 
 
 class DeploymentReconciler:
@@ -273,9 +265,11 @@ class DeploymentReconciler:
                 applied = await self._capital.read_policy(session, scope, symbol)
                 if isinstance(applied, CapitalBlocked):
                     return False
-                state = await read_current(session, account_id=scope.exchange_account_id,
-                                           environment=scope.deployment_environment)
+                state = await read_current(session, account_id=scope.exchange_account_id)
         except Exception:
+            # Not "stopped" (see above), but never silent: a programming error here once
+            # left a halted currency's offers standing without a trace.
+            log.warning("deployment_stop_state_unreadable symbol=%s", symbol, exc_info=True)
             return False
         halted = state is not None and state.state == HALTED
         if applied.policy.enabled and not halted:
@@ -382,8 +376,7 @@ class DeploymentReconciler:
                     views: dict[str, CapitalAvailable] = {}
                     for cell in active:
                         read = await self._capital.read(
-                            CapitalScope(self._scope.exchange_account_id,
-                                         self._scope.deployment_environment, symbol, cell),
+                            CapitalScope(self._scope.exchange_account_id, symbol, cell),
                             now_ms=self._clock(), session=session,
                         )
                         if isinstance(read, CapitalBlocked):
@@ -643,8 +636,7 @@ class DeploymentReconciler:
                     # would add another UNKNOWN. Stop now, as a refused read does: the daemon
                     # exits 78 and boots into credential recovery mode. The attempt is
                     # already durable as UNKNOWN (the command gate wrote it).
-                    refused = key_refused_on_submit(
-                        result.outcome, http_status=_http_status(result.raw_response))
+                    refused = key_refused_on_submit(result.outcome)
                     if refused is not None:
                         log.critical("deployment_submit_key_refused cell=%s amount=%s",
                                      cell_id, amount)
@@ -824,8 +816,7 @@ class DeploymentReconciler:
         # OrderSubmitPayload requires a failure_reason whenever status != submitted.
         failure_reason = (
             None if result.status == "submitted"
-            else getattr(result.outcome, "reason", None)
-            or (str(result.raw_response) if result.raw_response else "submit_outcome_unknown")
+            else getattr(result.outcome, "reason", None) or "submit_outcome_unknown"
         )
         await emit_order_submit(
             event_sink=self._event_sink,

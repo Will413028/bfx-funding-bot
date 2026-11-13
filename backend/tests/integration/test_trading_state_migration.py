@@ -14,6 +14,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy import create_engine, text
 
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, upgrade_head_after_w3
 
 pytestmark = pytest.mark.integration
@@ -71,14 +72,24 @@ def _halt(conn, account: str, env: str, halted: bool, kind: str, reason: str, ac
          "actor": actor, "at": at})
 
 
-def _insert(conn, account: str, state: str, cause: str, *, env: str = "prod",
+def _realm(conn) -> tuple[str, str]:
+    """The realm column and its value where this database still has it (before 545b2877e9bd).
+    Read from ``pg_attribute``, which every role may read (a test calls this as a runtime role)."""
+    has = conn.scalar(text(
+        "SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'public.trading_state'::regclass "
+        "AND attname = 'deployment_environment' AND NOT attisdropped)"))
+    return ("deployment_environment, ", "'prod', ") if has else ("", "")
+
+
+def _insert(conn, account: str, state: str, cause: str, *,
             explicit_id: int | None = None) -> int:
-    columns = "exchange_account_id, deployment_environment, state, cause, actor, reason, created_at_ms"
-    values = ":a, :env, :state, :cause, 'test', 'test', 9000"
+    column, value = _realm(conn)
+    columns = f"exchange_account_id, {column}state, cause, actor, reason, created_at_ms"
+    values = f":a, {value}:state, :cause, 'test', 'test', 9000"
     if explicit_id is not None:
         columns, values = "id, " + columns, ":id, " + values
     return conn.scalar(text(f"INSERT INTO trading_state ({columns}) VALUES ({values}) RETURNING id"),
-                       {"a": account, "env": env, "state": state, "cause": cause, "id": explicit_id})
+                       {"a": account, "state": state, "cause": cause, "id": explicit_id})
 
 
 def _build_migrated(url: str, target: str = "head") -> dict[str, int]:
@@ -139,17 +150,17 @@ def _migrated(pg_templates, pg_clone, name, build):
 def test_current_halt_rows_carry_over_verbatim(migrated):
     _, engine, ids = migrated
     with engine.begin() as conn:
-        rows = conn.execute(text("""SELECT exchange_account_id::text, deployment_environment, state, cause,
+        rows = conn.execute(text("""SELECT exchange_account_id::text, state, cause,
             actor, reason, legacy_halt_id FROM trading_state ORDER BY id""")).all()
         pause_id = conn.scalar(text("SELECT id FROM trading_state WHERE legacy_halt_id = :h"),
                                {"h": ids["pause"]})
     assert [tuple(r) for r in rows] == [
-        (_A, "prod", "HALTED", "operator", "worker", _PRODUCTION_REASON, ids["prod"]),
-        (_D, "prod", "REDUCING", "operator", "will", "pg 18.6 upgrade", ids["pause"]),
-        (_B, "prod", "ACTIVE", "operator", "will", "release_promoted:x", ids["resumed"]),
-        (_C, "prod", "HALTED", "operator", "worker", "release_command_terminal", ids["release"]),
+        (_A, "HALTED", "operator", "worker", _PRODUCTION_REASON, ids["prod"]),
+        (_D, "REDUCING", "operator", "will", "pg 18.6 upgrade", ids["pause"]),
+        (_B, "ACTIVE", "operator", "will", "release_promoted:x", ids["resumed"]),
+        (_C, "HALTED", "operator", "worker", "release_command_terminal", ids["release"]),
         # 5b1e7c9d2a40: the carried pause becomes the stricter stop.
-        (_D, "prod", "HALTED", "operator", "migration 5b1e7c9d2a40",
+        (_D, "HALTED", "operator", "migration 5b1e7c9d2a40",
          f"REDUCING retired (lending envelope ADR); carried over from trading_state {pause_id}: "
          "pg 18.6 upgrade", None),
     ]
@@ -189,7 +200,7 @@ def test_trigger_orders_rows_by_decision_not_by_supplied_id(migrated):
         assigned = _insert(conn, _A, "ACTIVE", "operator", explicit_id=1)
         assert assigned > latest
         assert conn.scalar(text(
-            "SELECT state FROM trading_state WHERE exchange_account_id=:a AND deployment_environment='prod' "
+            "SELECT state FROM trading_state WHERE exchange_account_id=:a "
             "ORDER BY id DESC LIMIT 1"), {"a": _A}) == "ACTIVE"
 
 
@@ -223,14 +234,14 @@ def test_repository_on_postgres_survives_restart_and_serialises_reassertion(migr
     async def scenario():
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-        from bfx_funding_bot.modules.execution.safety.trading_state import (
-            IllegalTradingTransition,
+        from bfx_funding_bot.modules.execution.safety.trading_state import IllegalTradingTransition
+        from bfx_funding_bot.modules.execution.safety.trading_state_store import (
             TradingStateRepository,
         )
 
         def repo(engine):
             return TradingStateRepository(async_sessionmaker(engine, expire_on_commit=False),
-                                          account_id=UUID(_B), deployment_environment="prod")
+                                          account_id=UUID(_B), scope_lock=build_scope_lock())
 
         first = create_async_engine(url)
         try:
@@ -262,14 +273,14 @@ def test_the_database_clock_decides_an_automatic_resume(migrated):
 
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-        from bfx_funding_bot.modules.execution.safety.trading_state import (
-            AutoResumeTooSoon,
+        from bfx_funding_bot.modules.execution.safety.trading_state import AutoResumeTooSoon
+        from bfx_funding_bot.modules.execution.safety.trading_state_store import (
             TradingStateRepository,
         )
 
         engine = create_async_engine(url)
         repo = TradingStateRepository(async_sessionmaker(engine, expire_on_commit=False),
-                                      account_id=UUID(_E), deployment_environment="prod")
+                                      account_id=UUID(_E), scope_lock=build_scope_lock())
         try:
             now = int(time.time() * 1000)
             await repo.transition("ACTIVE", cause="operator", actor="will", reason="start")
@@ -304,10 +315,11 @@ def test_downgrade_keeps_decisions_made_after_the_migration(migrated_reversible)
 
 def _audit(conn, attempt: str, phase: str, *, detail: str | None = None) -> None:
     state_id = conn.scalar(text("SELECT max(id) FROM trading_state WHERE exchange_account_id=:a"), {"a": _A})
-    conn.execute(text("""INSERT INTO funding_cancel_all_audit
-        (exchange_account_id, deployment_environment, trading_state_id, attempt_id, currency, phase,
+    column, value = _realm(conn)
+    conn.execute(text(f"""INSERT INTO funding_cancel_all_audit
+        (exchange_account_id, {column}trading_state_id, attempt_id, currency, phase,
          detail, actor, occurred_at_ms)
-        VALUES (:a, 'prod', :s, :attempt, 'UST', :phase, :detail, 'test', 1)"""),
+        VALUES (:a, {value}:s, :attempt, 'UST', :phase, :detail, 'test', 1)"""),
         {"a": _A, "s": state_id, "attempt": attempt, "phase": phase, "detail": detail})
 
 
@@ -347,9 +359,10 @@ _REQ = "00000000-0000-0000-0000-0000000000d1"
 
 
 def _insert_request(conn, request_id=_REQ, account=_A, action="resume") -> None:
-    conn.execute(text("""INSERT INTO trading_control_requests
-        (request_id, exchange_account_id, deployment_environment, action, reason,
-         requested_by, created_at_ms) VALUES (:r, :a, 'prod', :act, 'x', 'operator', 1)"""),
+    column, value = _realm(conn)
+    conn.execute(text(f"""INSERT INTO trading_control_requests
+        (request_id, exchange_account_id, {column}action, reason,
+         requested_by, created_at_ms) VALUES (:r, :a, {value}:act, 'x', 'operator', 1)"""),
         {"r": request_id, "a": account, "act": action})
 
 
@@ -361,15 +374,15 @@ def test_web_api_can_only_queue_a_request(migrated):
         assert conn.scalar(text("SELECT count(*) FROM trading_control_requests")) == 1
     for sql in (
         "UPDATE trading_control_requests SET state='applied', processed_at_ms=2",
-        "INSERT INTO trading_control_requests (request_id, exchange_account_id, deployment_environment,"
+        "INSERT INTO trading_control_requests (request_id, exchange_account_id,"
         " action, reason, requested_by, created_at_ms, state, processed_at_ms)"
-        f" VALUES ('00000000-0000-0000-0000-0000000000d2', '{_A}', 'prod', 'kill', 'x',"
+        f" VALUES ('00000000-0000-0000-0000-0000000000d2', '{_A}', 'kill', 'x',"
         " 'operator', 1, 'applied', 2)",
-        f"INSERT INTO trading_state (exchange_account_id, deployment_environment, state, cause, actor,"
-        f" reason, created_at_ms) VALUES ('{_A}', 'prod', 'ACTIVE', 'operator', 'x', 'x', 1)",
-        "INSERT INTO funding_cancel_all_audit (exchange_account_id, deployment_environment,"
+        f"INSERT INTO trading_state (exchange_account_id, state, cause, actor,"
+        f" reason, created_at_ms) VALUES ('{_A}', 'ACTIVE', 'operator', 'x', 'x', 1)",
+        "INSERT INTO funding_cancel_all_audit (exchange_account_id,"
         " trading_state_id, attempt_id, currency, phase, actor, occurred_at_ms) VALUES"
-        f" ('{_A}', 'prod', 1, '00000000-0000-0000-0000-0000000000f9', 'UST', 'requested', 'x', 1)",
+        f" ('{_A}', 1, '00000000-0000-0000-0000-0000000000f9', 'UST', 'requested', 'x', 1)",
     ):
         with engine.begin() as conn, pytest.raises(Exception, match="permission denied"):
             conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")

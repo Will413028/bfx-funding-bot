@@ -5,11 +5,8 @@ from uuid import uuid4
 import pytest
 
 from bfx_funding_bot.core.errors import WriterLockUnacquired
-from bfx_funding_bot.core.writer_lock import (
-    WriterLock,
-    derive_lock_key,
-    derive_transaction_lock_key,
-)
+from bfx_funding_bot.core.writer_lock import WriterLock, derive_lock_key
+from bfx_funding_bot.core.xact_lock import derive_transaction_lock_key
 
 pytestmark = pytest.mark.integration
 
@@ -19,24 +16,24 @@ def _url(pg_engine) -> str:
 
 
 async def test_key_is_stable_and_namespaced() -> None:
-    k1 = derive_lock_key("acct-A", "prod")
-    k2 = derive_lock_key("acct-A", "prod")
-    k3 = derive_lock_key("acct-A", "shadow")
+    k1 = derive_lock_key("acct-A")
+    k2 = derive_lock_key("acct-A")
+    k3 = derive_lock_key("acct-B")
     assert k1 == k2 and k1 != k3
     assert -(2**63) <= k1 < 2**63
 
 
 async def test_transaction_key_is_stable_but_does_not_self_conflict() -> None:
-    session_key = derive_lock_key("acct-A", "prod")
-    transaction_key = derive_transaction_lock_key("acct-A", "prod")
-    assert transaction_key == derive_transaction_lock_key("acct-A", "prod")
+    session_key = derive_lock_key("acct-A")
+    transaction_key = derive_transaction_lock_key("acct-A")
+    assert transaction_key == derive_transaction_lock_key("acct-A")
     assert transaction_key != session_key
     assert -(2**63) <= transaction_key < 2**63
 
 
 async def test_acquire_then_second_contends_then_release(pg_engine) -> None:
     acct = f"wl-{uuid4().hex[:8]}"
-    key = derive_lock_key(acct, "prod")
+    key = derive_lock_key(acct)
     a = WriterLock(database_url=_url(pg_engine), key=key)
     await a.acquire()
     assert await a.verify_held() is True
@@ -54,7 +51,7 @@ async def test_acquire_then_second_contends_then_release(pg_engine) -> None:
 
 async def test_verify_held_false_after_release(pg_engine) -> None:
     acct = f"wl-{uuid4().hex[:8]}"
-    lock = WriterLock(database_url=_url(pg_engine), key=derive_lock_key(acct, "prod"))
+    lock = WriterLock(database_url=_url(pg_engine), key=derive_lock_key(acct))
     await lock.acquire()
     await lock.release()
     assert await lock.verify_held() is False
@@ -62,7 +59,7 @@ async def test_verify_held_false_after_release(pg_engine) -> None:
 
 async def test_refresh_reacquires_after_transient_loss(pg_engine) -> None:
     acct = f"wl-{uuid4().hex[:8]}"
-    lock = WriterLock(database_url=_url(pg_engine), key=derive_lock_key(acct, "prod"))
+    lock = WriterLock(database_url=_url(pg_engine), key=derive_lock_key(acct))
     await lock.acquire()
     # Simulate a dropped connection: closing ends the server-side session, which
     # releases the session-scoped advisory lock.

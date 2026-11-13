@@ -21,7 +21,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -29,7 +29,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import OfferView, Outcome, PositionView, Scope
-from bfx_funding_bot.modules.ledger.wiring import build_operator_reads
+from bfx_funding_bot.modules.ledger.read import build_operator_reads
 
 from .test_ledger_basis import _credit, _observation, _offer
 from .test_ledger_capital_reader import JOURNAL, Book
@@ -121,7 +121,7 @@ async def test_positions_use_only_the_latest_basis(book) -> None:
 @pytest.mark.asyncio
 async def test_positions_are_scoped(book) -> None:
     await book.accept(_observation("1000", credits=(_credit("c1", "50", opening=101_100),)))
-    other = Scope(book.scope.exchange_account_id, "ci2")
+    other = Scope(uuid4())
     assert await _positions(book, other) == ()
     assert len(await _positions(book)) == 1
 
@@ -279,7 +279,6 @@ async def test_the_router_serves_the_ledger_wire_as_the_web_api_role(
     from bfx_funding_bot.modules.api.deps import get_session
     from bfx_funding_bot.modules.api.projections import build_projections_router
 
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     account = book.scope.exchange_account_id
     async with book.factory.begin() as session:
         await grant_membership(

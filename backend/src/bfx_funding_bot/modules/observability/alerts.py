@@ -107,12 +107,12 @@ CREDENTIAL_ROTATION_REJECTED: Final = "credential_rotation_rejected"
 CREDENTIAL_ROTATION_FAILED: Final = "credential_rotation_failed"
 # The venue refused the account's key at boot: the bot trades nothing and runs only the
 # credential rotation worker and its liveness until the key works again or is replaced
-# (marketfeed/daemon.py, credential recovery mode).
+# (apps/runtime/daemon.py, credential recovery mode).
 CREDENTIAL_RECOVERY_MODE: Final = "credential_recovery_mode"
 # The running bot's 6-hourly key recheck has reached no verdict N times in a row (the venue
 # did not answer, an unparseable answer, a refusal other than the key's): the bot keeps
 # trading and retrying, but the key's permissions are not being verified. Sent once per
-# streak; ``recovered=True`` (INFO) once a recheck passes again (marketfeed/daemon.py).
+# streak; ``recovered=True`` (INFO) once a recheck passes again (apps/runtime/daemon.py).
 CREDENTIAL_RECHECK_FAILING: Final = "credential_recheck_failing"
 # A venue history stream could not be read completely (execution/venue_observation.py).
 VENUE_OBSERVATION_HISTORY_INCOMPLETE: Final = "venue_observation_history_incomplete"
@@ -301,12 +301,15 @@ class AlertSink:
         self._worker: asyncio.Task[None] | None = None
 
     @classmethod
-    def from_environment(cls, environ: Mapping[str, str], **options: Any) -> AlertSink:
-        """Telegram when both keys are valid; otherwise log-only (said once, at boot)."""
+    def from_environment(cls, environ: Mapping[str, str], *, context: str,
+                         **options: Any) -> AlertSink:
+        """Telegram when both keys are valid; otherwise log-only (said once, at boot).
+
+        ``context`` is the deployment environment the caller read; it heads every alert.
+        """
         # The bot's secret file in production (BFX_SECRETS_DIR), else the env.
         token = read_secret("TELEGRAM_BOT_TOKEN", environ) or ""
         chat_id = environ.get("TELEGRAM_CHAT_ID", "").strip()
-        context = options.pop("context", None) or environ.get("BFX_DEPLOYMENT_ENV", "")
         options.setdefault("secrets", secret_values(environ))
         if not token and not chat_id:
             log.warning("alerts_telegram_not_configured: alerts are logged only "

@@ -45,15 +45,15 @@ async def _rotation_fixture(factory) -> tuple[UUID, UUID]:
             lifecycle_status="active", verified_at=datetime.now(UTC), bitfinex_user_id=4242)
         s.add(old)
         s.add(BotRunRow(run_id=run_id, exchange_account_id=_ROTATION_ACCOUNT,
-                        deployment_environment="ci", started_at_ms=1, host_name="t", pid=1))
+                        started_at_ms=1, host_name="t", pid=1))
         await s.flush()
         s.add(CredentialRotationRecipientRow(
             recipient_id=recipient_id, exchange_account_id=_ROTATION_ACCOUNT,
-            deployment_environment="ci", run_id=run_id, public_key=b"\x01" * 32, created_at_ms=1))
+            run_id=run_id, public_key=b"\x01" * 32, created_at_ms=1))
         await s.flush()
         s.add(CredentialRotationRequestRow(
             request_id=request_id, exchange_account_id=_ROTATION_ACCOUNT,
-            deployment_environment="ci", recipient_id=recipient_id,
+            recipient_id=recipient_id,
             replaces_credential_id=old.id, sealed_credential=b"\x00" * 80, label="new",
             reason="rotate", requested_by="operator", created_at_ms=1))
         return old.id, request_id

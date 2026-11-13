@@ -42,7 +42,6 @@ from bfx_funding_bot.modules.ledger import (
 from bfx_funding_bot.modules.ledger._internal.journal import record_attempt
 from bfx_funding_bot.modules.ledger.tables import CapitalCommandClockRow
 from bfx_funding_bot.modules.ledger.wiring import build_ledger_journal
-from tests.pg_templates import disable_realm_triggers
 
 from .test_ledger_schema_roles import (
     _A,
@@ -62,7 +61,7 @@ from .test_ledger_schema_roles import (
 )
 
 pytestmark = pytest.mark.integration
-SCOPE = Scope(UUID(_A), "ci")
+SCOPE = Scope(UUID(_A))
 OBSERVATION_ID = UUID(_O)
 JOURNAL = build_ledger_journal()
 
@@ -113,15 +112,16 @@ def _resolution(
 
 @pytest.mark.asyncio
 async def test_clock_transaction_and_scope_queries(ledger_db_fixture) -> None:  # noqa: F811
-    # The other scope is another realm in this one database; the realm trigger would refuse it.
-    disable_realm_triggers(ledger_db_fixture)
+    # The other scope is another exchange account: one database holds one realm.
     engine = _engine(ledger_db_fixture)
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    other_account = uuid4()
     with ledger_db_fixture.begin() as conn:
-        conn.execute(
-            text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','ledger')"),
-            {"id": _A},
-        )
+        for account in (_A, str(other_account)):
+            conn.execute(
+                text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','ledger')"),
+                {"id": account},
+            )
     try:
         async with factory() as session:
             async with session.begin():
@@ -136,7 +136,7 @@ async def test_clock_transaction_and_scope_queries(ledger_db_fixture) -> None:  
                 assert (first.query_revision, second.query_revision) == (1, 2)
                 assert first.start_revision == second.start_revision == 2
             async with session.begin():
-                other = await JOURNAL.begin_query(session, Scope(UUID(_A), "other"), 12)
+                other = await JOURNAL.begin_query(session, Scope(other_account), 12)
                 assert (other.query_revision, other.start_revision) == (1, 0)
     finally:
         await engine.dispose()
@@ -144,10 +144,15 @@ async def test_clock_transaction_and_scope_queries(ledger_db_fixture) -> None:  
 
 @pytest.mark.asyncio
 async def test_begin_query_refuses_pending_attempt(seeded_fixture) -> None:  # noqa: F811
-    # The other scope is another realm in this one database; the realm trigger would refuse it.
-    disable_realm_triggers(seeded_fixture)
+    # The other scope is another exchange account: one database holds one realm.
     engine = _engine(seeded_fixture)
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    other_account = uuid4()
+    with seeded_fixture.begin() as conn:
+        conn.execute(
+            text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','other')"),
+            {"id": other_account},
+        )
     attempt = _attempt()
     try:
         async with factory.begin() as session:
@@ -155,7 +160,7 @@ async def test_begin_query_refuses_pending_attempt(seeded_fixture) -> None:  # n
         async with factory.begin() as session:
             with pytest.raises(QueryAdmissionRefused):
                 await JOURNAL.begin_query(session, SCOPE, 10)
-            assert await JOURNAL.begin_query(session, Scope(SCOPE.exchange_account_id, "other"), 10)
+            assert await JOURNAL.begin_query(session, Scope(other_account), 10)
         async with factory.begin() as session:
             await JOURNAL.record_outcome(
                 session, SCOPE, Outcome(attempt.attempt_id, "unknown", None, None, 11, {})
@@ -274,8 +279,6 @@ async def test_journal_writes_and_first_write_errors(seeded_fixture) -> None:  #
                 await session.scalar(
                     select(CapitalCommandClockRow.revision).where(
                         CapitalCommandClockRow.exchange_account_id == SCOPE.exchange_account_id,
-                        CapitalCommandClockRow.deployment_environment
-                        == SCOPE.deployment_environment,
                     )
                 )
                 == 5
@@ -310,7 +313,7 @@ async def test_resolution_structural_rejections(seeded_fixture) -> None:  # noqa
             with pytest.raises(ResolutionRejected, match="scope"):
                 await JOURNAL.record_resolution(
                     session,
-                    Scope(SCOPE.exchange_account_id, "other"),
+                    Scope(uuid4()),
                     _resolution(quarantine_id=quarantine.quarantine_id),
                 )
             with pytest.raises(ResolutionRejected, match="scope"):

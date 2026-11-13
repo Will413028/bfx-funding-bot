@@ -8,12 +8,11 @@ daemon's workers do, re-checking the operator under the account lock (ADR D4').
 
 A refusal is an :class:`OperatorCommandError` with a bounded code; each adapter
 maps its ``kind`` to its own surface (an HTTP status, an exit code). The checks run
-in a fixed order that is part of the contract: account and membership before the
-deployment environment, so a non-member learns nothing about the host; write role
+in a fixed order that is part of the contract: account and membership first; write role
 before validation; the evidence reference before the operator named in the request.
 
 The ledger's ports (``OperatorReads``, ``OperatorEvidence``, ``OperatorResolution``,
-the policy store) are passed in: only ``apps`` may build them.
+the policy reader) are passed in, so tests can replace their I/O; ``apps`` composes them.
 """
 from __future__ import annotations
 
@@ -33,7 +32,6 @@ from bfx_funding_bot.core.sealed_credential import (
     seal,
     validate_credential,
 )
-from bfx_funding_bot.core.settings import require_deployment_environment
 from bfx_funding_bot.modules.accounts.exchange_accounts import (
     AccountNotFound,
     AccountRetired,
@@ -70,8 +68,8 @@ from bfx_funding_bot.modules.ledger import (
     OperatorEvidence,
     OperatorReads,
     OperatorResolution,
+    PolicyReader,
     PolicyRefused,
-    PolicyStore,
     ResolutionEvidence,
     ResolutionIntent,
     ResolutionSubject,
@@ -124,7 +122,6 @@ class OperatorContext:
     user_id: str
     role: AccountRole
     lifecycle_status: Literal["active", "halted"]
-    deployment_environment: str
 
     @property
     def can_write(self) -> bool:
@@ -132,11 +129,11 @@ class OperatorContext:
 
     @property
     def scope(self) -> Scope:
-        return Scope(self.exchange_account_id, self.deployment_environment)
+        return Scope(self.exchange_account_id)
 
     @property
     def resolution_scope(self) -> ResolutionScope:
-        return ResolutionScope(self.exchange_account_id, self.deployment_environment)
+        return ResolutionScope(self.exchange_account_id)
 
 
 def _not_found() -> OperatorCommandError:
@@ -155,11 +152,7 @@ def _rejected(exc: ResolutionRejected) -> OperatorCommandError:
 async def resolve_context(
     session: AsyncSession, *, exchange_account_id: UUID, user_id: str,
 ) -> OperatorContext:
-    """The account ``user_id`` may act on; absent, retired and foreign accounts look alike.
-
-    The deployment environment is read last: a non-member is refused before
-    anything about the host is.
-    """
+    """The account ``user_id`` may act on; absent, retired and foreign accounts look alike."""
     try:
         account = await get_exchange_account(session, exchange_account_id=exchange_account_id)
         membership = await require_account_membership(
@@ -171,17 +164,11 @@ async def resolve_context(
     # explicit so a new lifecycle state cannot gain a command path without a decision.
     if account.lifecycle_status not in {"active", "halted"}:
         raise _not_found()
-    try:
-        environment = require_deployment_environment()
-    except ValueError as exc:
-        raise OperatorCommandError(
-            "deployment_environment_not_configured", kind="unavailable") from exc
     return OperatorContext(
         exchange_account_id=exchange_account_id,
         user_id=user_id,
         role=membership.role,  # type: ignore[arg-type]  # DB check narrows this set
         lifecycle_status=account.lifecycle_status,  # type: ignore[arg-type]
-        deployment_environment=environment,
     )
 
 
@@ -210,7 +197,7 @@ async def request_trading_control(
     request_id = uuid4()
     if not await insert_request(session, TradingControlRequestRow, {
         "request_id": request_id, "exchange_account_id": context.exchange_account_id,
-        "deployment_environment": context.deployment_environment, "action": action,
+        "action": action,
         "reason": reason, "requested_by": context.user_id, "created_at_ms": now_ms,
     }):
         raise OperatorCommandError("request_pending", kind="conflict")
@@ -229,13 +216,13 @@ async def request_currency(
     # Only a currency with an applied policy can be toggled; the daemon re-reads it under
     # the account lock anyway.
     head = await session.get(CapitalPolicyHeadRow, (
-        context.exchange_account_id, context.deployment_environment, symbol))
+        context.exchange_account_id, symbol))
     if head is None:
         raise OperatorCommandError("policy_unavailable", kind="not_found")
     request_id = uuid4()
     if not await insert_request(session, CapitalPolicyRequestRow, {
         "request_id": request_id, "exchange_account_id": context.exchange_account_id,
-        "deployment_environment": context.deployment_environment, "symbol": symbol,
+        "symbol": symbol,
         "action": action, "reason": reason, "requested_by": context.user_id,
         "created_at_ms": now_ms,
     }):
@@ -267,7 +254,6 @@ async def get_trading_request(
     row = await session.scalar(select(TradingControlRequestRow).where(
         TradingControlRequestRow.request_id == request_id,
         TradingControlRequestRow.exchange_account_id == context.exchange_account_id,
-        TradingControlRequestRow.deployment_environment == context.deployment_environment,
     ).execution_options(populate_existing=True))
     if row is None:
         raise _not_found()
@@ -280,7 +266,6 @@ async def get_currency_request(
     row = await session.scalar(select(CapitalPolicyRequestRow).where(
         CapitalPolicyRequestRow.request_id == request_id,
         CapitalPolicyRequestRow.exchange_account_id == context.exchange_account_id,
-        CapitalPolicyRequestRow.deployment_environment == context.deployment_environment,
     ).execution_options(populate_existing=True))
     if row is None:
         raise _not_found()
@@ -288,7 +273,7 @@ async def get_currency_request(
 
 
 async def _currencies(session: AsyncSession, scope: Scope,
-                      store: PolicyStore) -> list[dict[str, Any]]:
+                      reader: PolicyReader) -> list[dict[str, Any]]:
     """Every currency with an applied policy, as the daemon reads it.
 
     An unreadable policy is shown as such (the daemon refuses its offers too);
@@ -296,7 +281,6 @@ async def _currencies(session: AsyncSession, scope: Scope,
     """
     heads = (await session.scalars(select(CapitalPolicyHeadRow).where(
         CapitalPolicyHeadRow.exchange_account_id == scope.exchange_account_id,
-        CapitalPolicyHeadRow.deployment_environment == scope.deployment_environment,
     ).order_by(CapitalPolicyHeadRow.symbol))).all()
     currencies = []
     for head in heads:
@@ -306,7 +290,7 @@ async def _currencies(session: AsyncSession, scope: Scope,
         # Unlocked: a view only (the command boundary re-reads and binds the revision under
         # the account lock before any intent).
         try:
-            policy = (await store.read_applied(session, symbol=head.symbol)).policy
+            policy = (await reader.read_applied(session, symbol=head.symbol)).policy
         except PolicyRefused as exc:
             entry["policy_error"] = str(exc)
         else:
@@ -317,7 +301,6 @@ async def _currencies(session: AsyncSession, scope: Scope,
                 envelope=None if policy.envelope is None else envelope_payload(policy.envelope))
         requests = (await session.scalars(select(CapitalPolicyRequestRow).where(
             CapitalPolicyRequestRow.exchange_account_id == scope.exchange_account_id,
-            CapitalPolicyRequestRow.deployment_environment == scope.deployment_environment,
             CapitalPolicyRequestRow.symbol == head.symbol,
         ).order_by(CapitalPolicyRequestRow.created_at_ms.desc(),
                    CapitalPolicyRequestRow.request_id.desc()).limit(CURRENCY_REQUESTS))).all()
@@ -351,24 +334,22 @@ async def _cancel_all(session: AsyncSession, row: TradingStateRow | None) -> lis
 
 
 async def trading_overview(
-    session: AsyncSession, context: OperatorContext, store: PolicyStore,
+    session: AsyncSession, context: OperatorContext, reader: PolicyReader,
 ) -> dict[str, Any]:
     """The trading state in force, its cancel-all, the latest requests and every currency."""
     scope = context.scope
     state = await session.scalar(select(TradingStateRow).where(
         TradingStateRow.exchange_account_id == scope.exchange_account_id,
-        TradingStateRow.deployment_environment == scope.deployment_environment,
     ).order_by(TradingStateRow.id.desc()).limit(1))
     requests = (await session.scalars(select(TradingControlRequestRow).where(
         TradingControlRequestRow.exchange_account_id == scope.exchange_account_id,
-        TradingControlRequestRow.deployment_environment == scope.deployment_environment,
     ).order_by(TradingControlRequestRow.created_at_ms.desc(),
                TradingControlRequestRow.request_id.desc()).limit(CONTROL_REQUESTS))).all()
     return {
         "trading_state": _state(state),
         "cancel_all": await _cancel_all(session, state),
         "requests": [trading_request_view(r) for r in requests],
-        "currencies": await _currencies(session, scope, store),
+        "currencies": await _currencies(session, scope, reader),
     }
 
 
@@ -406,7 +387,6 @@ async def _current_recipient(session: AsyncSession, context: OperatorContext) ->
     """
     run = (await session.execute(select(BotRunRow.run_id, BotRunRow.end_recorded_at_ms).where(
         BotRunRow.exchange_account_id == context.exchange_account_id,
-        BotRunRow.deployment_environment == context.deployment_environment,
     ).order_by(BotRunRow.started_at_ms.desc(), BotRunRow.run_id.desc()).limit(1))).first()
     if run is None or run.end_recorded_at_ms is not None:
         return None
@@ -414,7 +394,6 @@ async def _current_recipient(session: AsyncSession, context: OperatorContext) ->
         CredentialRotationRecipientRow.recipient_id, CredentialRotationRecipientRow.public_key,
     ).where(
         CredentialRotationRecipientRow.exchange_account_id == context.exchange_account_id,
-        CredentialRotationRecipientRow.deployment_environment == context.deployment_environment,
         CredentialRotationRecipientRow.run_id == run.run_id,
     ).order_by(CredentialRotationRecipientRow.created_at_ms.desc(),
                CredentialRotationRecipientRow.recipient_id.desc()).limit(1))).first()
@@ -446,13 +425,11 @@ async def request_credential_rotation(
     request_id = uuid4()
     try:
         sealed = seal(api_key, api_secret, public_key=recipient.public_key, context=SealContext(
-            context.exchange_account_id, context.deployment_environment,
-            recipient.recipient_id, request_id))
+            context.exchange_account_id, recipient.recipient_id, request_id))
     except SealedPayloadError as exc:
         raise _invalid(exc.code) from None
     if not await insert_request(session, CredentialRotationRequestRow, {
         "request_id": request_id, "exchange_account_id": context.exchange_account_id,
-        "deployment_environment": context.deployment_environment,
         "recipient_id": recipient.recipient_id, "replaces_credential_id": active.id,
         "sealed_credential": sealed, "label": label, "reason": reason,
         "requested_by": context.user_id, "created_at_ms": now_ms,
@@ -475,7 +452,6 @@ async def get_credential_request(
     row = (await session.execute(_credential_request_select().where(
         CredentialRotationRequestRow.request_id == request_id,
         CredentialRotationRequestRow.exchange_account_id == context.exchange_account_id,
-        CredentialRotationRequestRow.deployment_environment == context.deployment_environment,
     ))).first()
     if row is None:
         raise _not_found()
@@ -489,7 +465,6 @@ async def active_credential_view(
     active = await _active_credential(session, context)
     latest = (await session.execute(_credential_request_select().where(
         CredentialRotationRequestRow.exchange_account_id == context.exchange_account_id,
-        CredentialRotationRequestRow.deployment_environment == context.deployment_environment,
     ).order_by(CredentialRotationRequestRow.created_at_ms.desc(),
                CredentialRotationRequestRow.request_id.desc()).limit(1))).first()
     return {

@@ -40,7 +40,12 @@ EVENT_LOG = Table(
 
 
 class ArchivedExecutionHistory:
-    """The scope's ``event_log``, newest first; the cursor is the last row's ``event_seq``."""
+    """The scope's ``event_log``, newest first; the cursor is the last row's ``event_seq``.
+
+    The archive keeps its per-row ``deployment_environment`` (its rows are frozen), but
+    the read does not filter on it: migration ``545b2877e9bd`` asserted that every row
+    carries the database's own realm, and the table has been frozen since.
+    """
 
     async def list_executions(
         self,
@@ -53,9 +58,7 @@ class ArchivedExecutionHistory:
     ) -> ExecutionPage:
         log = EVENT_LOG.c
         stmt = select(*EVENT_LOG.c).where(
-            log.exchange_account_id == scope.exchange_account_id,
-            log.deployment_environment == scope.deployment_environment,
-        )
+            log.exchange_account_id == scope.exchange_account_id)
         if before is not None:
             if not before.isascii() or not before.isdigit():
                 raise ExecutionCursorError(before)

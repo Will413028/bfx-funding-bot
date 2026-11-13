@@ -6,8 +6,10 @@ private key, in memory, so a sealed credential outlives neither the run nor a re
 (forward secrecy: nothing in the database ever decrypts it again).
 
 Suite ``DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20-Poly1305`` from the locked
-``cryptography``. The ``info`` binds the ciphertext to its account, environment, recipient
-and request (:meth:`SealContext.info`): moved to any other row it does not open.
+``cryptography``. The ``info`` binds the ciphertext to its account, recipient and request
+(:meth:`SealContext.info`): moved to any other row it does not open. It names no
+deployment environment: a database holds one realm, and the recipient key already ties the
+ciphertext to one run of one bot.
 
 The plaintext is ``{"api_key": ..., "api_secret": ...}`` as JSON. Every error here is a
 :class:`SealedPayloadError` with a fixed code and never carries the plaintext.
@@ -24,7 +26,8 @@ from cryptography.hazmat.primitives import hpke
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-INFO_LABEL: Final = b"bfx-credential-rotation/v1"
+# v2: the info lost its environment field. A request sealed under v1 does not open.
+INFO_LABEL: Final = b"bfx-credential-rotation/v2"
 PUBLIC_KEY_BYTES: Final = 32
 FIELD_MAX: Final = 128
 # The sealed size the outbox accepts (the migration's CHECK): encapsulated key (32) and tag
@@ -48,17 +51,13 @@ class SealContext:
     """What a sealed credential is bound to."""
 
     exchange_account_id: UUID
-    deployment_environment: str
     recipient_id: UUID
     request_id: UUID
 
     def info(self) -> bytes:
-        if not self.deployment_environment or "\x00" in self.deployment_environment:
-            raise SealedPayloadError("invalid_seal_context")
         return b"\x00".join((
             INFO_LABEL, str(self.exchange_account_id).encode(),
-            self.deployment_environment.encode(), str(self.recipient_id).encode(),
-            str(self.request_id).encode(),
+            str(self.recipient_id).encode(), str(self.request_id).encode(),
         ))
 
 

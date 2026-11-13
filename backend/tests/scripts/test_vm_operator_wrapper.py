@@ -109,18 +109,14 @@ def host(tmp_path: Path, monkeypatch) -> dict[str, Path]:
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     (runtime / "operator.env").write_text("DATABASE_URL=postgresql://bfx_operator:pw@x/bfx\n")
-    state = tmp_path / "state"
-    (state / "releases" / REV).mkdir(parents=True)
-    shutil.copy(ROOT / "deploy/vm/live.env", state / "releases" / REV / "live.env")
     monkeypatch.setattr(op, "_HERE", release / "ops")
-    monkeypatch.setattr(op, "_parser", lambda: _parser_for(runtime, state))
-    return {"ops": release / "ops", "runtime": runtime, "state": state}
+    monkeypatch.setattr(op, "_parser", lambda: _parser_for(runtime))
+    return {"ops": release / "ops", "runtime": runtime}
 
 
-def _parser_for(runtime: Path, state: Path) -> Any:
+def _parser_for(runtime: Path) -> Any:
     parser = op.argparse.ArgumentParser(add_help=False)
     parser.add_argument("--runtime-dir", type=Path, default=runtime)
-    parser.add_argument("--state-dir", type=Path, default=state)
     parser.add_argument("--backend-repository", default=BACKEND)
     parser.add_argument("--postgres-container", default="bfx-postgres")
     parser.add_argument("--db-user", default="owner")
@@ -210,11 +206,11 @@ def test_the_child_gets_only_path_home_and_what_the_wrapper_builds(host) -> None
                LD_PRELOAD="/tmp/x.so", COMPOSE_FILE="/tmp/evil.yml")
     _, _, execute, _ = _call(["status"], env=env)
     (_, child_env, _), = execute.calls
-    assert set(child_env) == {"PATH", "HOME", "BFX_DEPLOYMENT_ENV", "BFX_BACKEND_IMAGE",
+    assert set(child_env) == {"PATH", "HOME", "BFX_BACKEND_IMAGE",
                               "BFX_BACKEND_DIGEST", "BFX_SOURCE_REVISION",
                               "BFX_OPERATOR_TAILNET_IDENTITY"}
     assert child_env["BFX_BACKEND_IMAGE"] == f"{BACKEND}@{DIGEST}"
-    assert child_env["BFX_DEPLOYMENT_ENV"] == "prod" and child_env["PATH"] == "/usr/bin:/bin"
+    assert child_env["PATH"] == "/usr/bin:/bin"
 
 
 def test_the_child_env_fills_every_variable_the_compose_file_requires(host) -> None:
@@ -273,7 +269,7 @@ def _rotate(stdin: io.StringIO) -> tuple[int, list[str], FakeExecute, str]:
         f"action=rotate tailnet_identity={TAILNET_ID}\n",))
     plan = op.build_plan(
         ops_dir=op._HERE, ledger=FakeLedger([(REV, DIGEST, "deployed")]),
-        runtime_dir=Path("/unused"), state_dir=op._parser().parse_args([]).state_dir,
+        runtime_dir=Path("/unused"),
         backend_repository=BACKEND, secret_check=lambda _p: None,
         identity=op.Identity(str(TAILNET_ID), "Will413028@github", "mac", PEER), caller_env=_env())
     call = op.parse_args(["rotate-credential", "--reason", "drill"])
@@ -340,7 +336,6 @@ def test_a_tooling_release_behind_the_deploy_runs_and_says_so(host, capsys) -> N
 
 @pytest.mark.parametrize(("mutate", "code"), [
     (lambda h: None, "no_deployed_release"),
-    (lambda h: (h["state"] / "releases" / REV / "live.env").unlink(), "env_file_unreadable:live.env"),
     (lambda h: (h["ops"] / "docker-compose.operator.yml").unlink(), "operator_compose_missing"),
     (lambda h: (h["ops"].parent / ".installed").unlink(), "tooling_release_unknown"),
 ])
@@ -372,9 +367,8 @@ def test_the_real_secret_check_is_the_deployers() -> None:
 def test_defaults_are_the_deployers() -> None:
     args = op._parser().parse_args([])
     defaults = bfx.Settings()
-    assert (args.runtime_dir, args.state_dir, args.backend_repository, args.postgres_container) == (
-        defaults.runtime_dir, defaults.state_dir, defaults.backend_repository,
-        defaults.postgres_container)
+    assert (args.runtime_dir, args.backend_repository, args.postgres_container) == (
+        defaults.runtime_dir, defaults.backend_repository, defaults.postgres_container)
 
 
 @pytest.mark.parametrize(("stdin_text", "expected"), [

@@ -50,12 +50,6 @@ export function UncertaintyDetails({ uncertainty }: UncertaintyDetailsProps) {
           </dd>
         </div>
         <div>
-          <dt className="text-zinc-500">{t("uncertaintyScope")}</dt>
-          <dd className="mt-0.5 text-zinc-200">
-            {uncertainty.blockedScope.environment}
-          </dd>
-        </div>
-        <div>
           <dt className="text-zinc-500">{t("uncertaintyEvidence")}</dt>
           <dd className="mt-0.5 text-zinc-200">
             {uncertainty.evidenceSummary.outcomeReason ?? uncertainty.kind}

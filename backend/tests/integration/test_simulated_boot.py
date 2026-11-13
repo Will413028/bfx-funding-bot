@@ -17,7 +17,7 @@ from bfx_funding_bot.core.database_realm import DatabaseRealmMismatch
 from bfx_funding_bot.core.errors import ConfigurationError
 from bfx_funding_bot.core.schema_head import SchemaHeadMismatch
 from bfx_funding_bot.modules.ledger import PolicyRefused
-from tests.modules.marketfeed.account_test_helpers import TEST_VAULT_KEK_B64
+from tests.apps.runtime.account_test_helpers import TEST_VAULT_KEK_B64
 
 from .sim_daemon import close_sim_env, make_sim_env
 from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture dependency
@@ -44,11 +44,27 @@ async def _refused(ledger_db, monkeypatch, httpx_mock, tmp_path, exc: type[BaseE
         await close_sim_env(sim, engine)
 
 
-async def test_a_simulated_boot_on_a_legacy_epoch_is_refused(
-        ledger_db, monkeypatch, httpx_mock, tmp_path) -> None:  # noqa: F811
-    """Mutation: the simulated venue's supported set includes ``legacy``."""
-    await _refused(ledger_db, monkeypatch, httpx_mock, tmp_path, AuthorityMismatch,
-                   "authority_unsupported value=legacy build=ledger", epoch="legacy")
+async def _unknown_writer(engine) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(text(
+            "INSERT INTO capital_authority_epoch "
+            "(epoch_seq, authority, set_at_ms, actor, reason) "
+            "SELECT max(epoch_seq) + 1, 'ledger', max(epoch_seq) + 1, 'retired_tool', 't' "
+            "FROM capital_authority_epoch"))
+
+
+@pytest.mark.parametrize(("match", "options"), [
+    ("authority_unsupported value=legacy build=ledger", {"epoch": "legacy"}),
+    ("ledger_epoch_writer_unknown actor='retired_tool'", {"before": _unknown_writer}),
+], ids=["legacy_epoch", "unknown_writer"])
+async def test_a_simulated_boot_on_an_unsupported_epoch_is_refused(
+        ledger_db, monkeypatch, httpx_mock, tmp_path, match, options) -> None:  # noqa: F811
+    """The epoch rule is venue-independent: a ``legacy`` epoch, or a ``ledger`` epoch appended
+    by a writer that is neither the genesis nor the switch, refuses a seam boot as it refuses
+    Bitfinex. Mutations: the simulated venue's supported set includes ``legacy``; exempt the
+    simulated venue from the writer check (``unknown_writer`` fails)."""
+    await _refused(ledger_db, monkeypatch, httpx_mock, tmp_path, AuthorityMismatch, match,
+                   **options)
 
 
 async def test_a_simulated_boot_refuses_a_vault_key_in_the_environment(
@@ -97,7 +113,6 @@ async def test_both_venues_compose_the_same_guard_chain_and_workers(
         await simulated.writer_lock.release()  # same account and realm: one advisory lock
         simulated.writer_lock = None
 
-        monkeypatch.delenv("BFX_SIM_INITIAL_WALLETS")
         monkeypatch.setenv("BFX_PHASE", "live")
         monkeypatch.setenv("BFX_VAULT_KEK", TEST_VAULT_KEK_B64)
 

@@ -32,7 +32,7 @@ from bfx_funding_bot.modules.execution.safety import trading_state
 from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
 from bfx_funding_bot.modules.execution.uncertainty_tables import ResolutionAction
 from bfx_funding_bot.modules.ledger import OfferState, UncertaintyKind, UncertaintyState
-from bfx_funding_bot.modules.ledger._internal.reads import UNCERTAINTY_KINDS
+from bfx_funding_bot.modules.ledger.read.reads import UNCERTAINTY_KINDS
 from bfx_funding_bot.modules.trading.policy import CapitalPolicy
 
 

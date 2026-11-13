@@ -43,7 +43,7 @@ class _RefusingCapital:
         return CapitalBlocked(self.reason)
 
 
-SCOPE = Scope(UUID(int=7), "test")
+SCOPE = Scope(UUID(int=7))
 
 
 class _NoUncertainty:
@@ -89,7 +89,7 @@ class _Lock:
 async def test_liveness_loop_exits_when_the_writer_lock_is_lost(monkeypatch) -> None:
     """Process fencing, not a trading decision (lending envelope D3): the loop
     raises, the task group ends the daemon, and nothing is tripped or halted."""
-    from bfx_funding_bot.modules.marketfeed import daemon as daemon_module
+    from bfx_funding_bot.apps.runtime import daemon as daemon_module
 
     rounds = 0
 
@@ -117,7 +117,7 @@ async def test_liveness_loop_exits_when_the_writer_lock_is_lost(monkeypatch) -> 
 
 
 async def test_a_refused_boot_observation_makes_its_trips_durable_before_exit() -> None:
-    from bfx_funding_bot.modules.marketfeed.daemon import Daemon
+    from bfx_funding_bot.apps.runtime.daemon import Daemon
 
     protection = AutomaticProtection()
     engaged: list[str] = []

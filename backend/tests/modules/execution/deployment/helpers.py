@@ -1,7 +1,7 @@
 """Builders for one funding decision passing through the execution gate.
 
 Shared by the eligibility tests and by tests that drive the gate from elsewhere
-(dependency outages in tests/modules/marketfeed).
+(dependency outages in tests/apps/runtime).
 """
 from __future__ import annotations
 
@@ -32,7 +32,6 @@ def make_candidate() -> DecisionPayload:
 def make_audit_context(candidate: DecisionPayload) -> AuditContext:
     return AuditContext(
         account_id="acct",
-        deployment_environment="test",
         reconcile_id="reconcile-1",
         cell_id="cell-1",
         symbol=candidate.symbol,

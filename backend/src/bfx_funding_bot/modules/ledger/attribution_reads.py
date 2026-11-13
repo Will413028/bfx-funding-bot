@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.modules.ledger import Scope
-from bfx_funding_bot.modules.ledger._internal.provenance import offer_provenance
+from bfx_funding_bot.modules.ledger.read.provenance import offer_provenance
 from bfx_funding_bot.modules.ledger.tables import (
     SubmissionAttemptJournalRow,
     VenueCreditMirrorRow,
@@ -89,7 +89,6 @@ async def journal_offer_cells(
             ).where(
                 SubmissionAttemptJournalRow.attempt_id.in_(wanted[start:start + _BATCH]),
                 SubmissionAttemptJournalRow.exchange_account_id == scope.exchange_account_id,
-                SubmissionAttemptJournalRow.deployment_environment == scope.deployment_environment,
             )
         )
         for attempt_id, cell, decision, seeded in rows.tuples():
@@ -119,7 +118,6 @@ async def mirror_credits(session: AsyncSession, scope: Scope) -> tuple[MirrorCre
         )
         .where(
             VenueCreditMirrorRow.exchange_account_id == scope.exchange_account_id,
-            VenueCreditMirrorRow.deployment_environment == scope.deployment_environment,
         )
         .order_by(VenueCreditMirrorRow.source_kind, VenueCreditMirrorRow.venue_credit_id)
     )

@@ -34,7 +34,6 @@ class AttributionWeeklyRow(Base):
 
     __tablename__ = "attribution_weekly"
 
-    deployment_environment: Mapped[str] = mapped_column(Text, primary_key=True)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
     exchange_account_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, nullable=True
@@ -68,7 +67,6 @@ class ConfigRegimeRow(Base):
 
     __tablename__ = "config_regime"
 
-    deployment_environment: Mapped[str] = mapped_column(Text, primary_key=True)
     account_id: Mapped[str] = mapped_column(Text, nullable=False)
     exchange_account_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, nullable=True
@@ -96,7 +94,6 @@ class FundingInterestPaymentRow(Base):
     ledger_id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer(), "sqlite"), primary_key=True,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     currency: Mapped[str] = mapped_column(Text, nullable=False)
     mts: Mapped[int] = mapped_column(BigInteger, nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
@@ -127,7 +124,6 @@ class FundingCreditHistoryRow(Base):
     credit_id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer(), "sqlite"), primary_key=True,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     side: Mapped[int | None] = mapped_column(Integer, nullable=True)
     mts_create: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -160,7 +156,6 @@ class FundingTradeRow(Base):
     trade_id: Mapped[int] = mapped_column(
         BigInteger().with_variant(Integer(), "sqlite"), primary_key=True,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     mts_create: Mapped[int] = mapped_column(BigInteger, nullable=False)
     offer_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
@@ -175,7 +170,7 @@ class FundingTradeRow(Base):
     __table_args__ = (
         Index(
             "ix_funding_trades_scope_symbol_created",
-            "exchange_account_id", "deployment_environment", "symbol", "mts_create",
+            "exchange_account_id", "symbol", "mts_create",
         ),
     )
 
@@ -195,7 +190,6 @@ class AttributionLegacyOfferCellRow(Base):
     __tablename__ = "attribution_legacy_offer_cells"
 
     exchange_account_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
-    deployment_environment: Mapped[str] = mapped_column(Text, primary_key=True)
     venue_offer_id: Mapped[str] = mapped_column(Text, primary_key=True)
     cell: Mapped[str] = mapped_column(Text, primary_key=True)
 

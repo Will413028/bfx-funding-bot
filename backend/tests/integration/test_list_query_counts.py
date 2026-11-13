@@ -135,8 +135,7 @@ def _rows(body: dict[str, Any]) -> int:
 
 
 @pytest.mark.asyncio
-async def test_list_endpoints_do_not_query_per_row(book, monkeypatch) -> None:
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
+async def test_list_endpoints_do_not_query_per_row(book) -> None:
     account = book.scope.exchange_account_id
     async with book.factory.begin() as session:
         await grant_membership(session, exchange_account_id=account, user_id=OPERATOR, role="owner")

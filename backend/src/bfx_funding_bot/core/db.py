@@ -93,7 +93,7 @@ def make_async_engine_from_url(raw_url: str) -> AsyncEngine:
     """Async engine + serverless-Postgres pool config + URL transform.
 
     Single source of truth shared by `make_engine` (Settings-driven) and
-    `marketfeed.daemon.build_daemon` (MarketfeedConfig-driven). Both paths
+    `apps.runtime.daemon.build_daemon` (MarketfeedConfig-driven). Both paths
     now apply `_prepare_engine_kwargs` (D2 URL transform: scheme rewrite,
     sslmode checked and lifted into connect_args) and the D3 pool config (`pool_pre_ping=True`, `pool_recycle=600`).
 

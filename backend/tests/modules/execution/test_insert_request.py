@@ -24,7 +24,7 @@ _ACCOUNT = uuid4()
 
 
 def _trading(**extra: object) -> dict[str, object]:
-    return {"request_id": uuid4(), "exchange_account_id": _ACCOUNT, "deployment_environment": "ci",
+    return {"request_id": uuid4(), "exchange_account_id": _ACCOUNT,
             "action": "resume", "reason": "test", "requested_by": "operator",
             "created_at_ms": 1, **extra}
 
@@ -76,19 +76,17 @@ async def test_a_refusal_other_than_the_slot_raises(session: Any) -> None:
 
 
 def _rotation(**extra: object) -> dict[str, object]:
-    return {"request_id": uuid4(), "exchange_account_id": _ACCOUNT, "deployment_environment": "ci",
+    return {"request_id": uuid4(), "exchange_account_id": _ACCOUNT,
             "recipient_id": uuid4(), "replaces_credential_id": uuid4(),
             "sealed_credential": b"\x00" * 80, "label": "", "reason": "rotate",
             "requested_by": "operator", "created_at_ms": 1, **extra}
 
 
 @pytest.mark.asyncio
-async def test_one_pending_rotation_per_account_and_environment(sqlite_engine: Any,
-                                                                sqlite_session: Any) -> None:
+async def test_one_pending_rotation_per_account(sqlite_engine: Any,
+                                                sqlite_session: Any) -> None:
     async with sqlite_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all,
                             tables=[CredentialRotationRequestRow.__table__])
     assert await insert_request(sqlite_session, CredentialRotationRequestRow, _rotation())
     assert not await insert_request(sqlite_session, CredentialRotationRequestRow, _rotation())
-    assert await insert_request(sqlite_session, CredentialRotationRequestRow,
-                                _rotation(deployment_environment="prod"))

@@ -24,14 +24,13 @@ from bfx_funding_bot.modules.execution.deployment.period_pricing import PeriodPr
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
-    SubmittedOrder,
 )
 from bfx_funding_bot.modules.ledger import CapitalAvailable
 from bfx_funding_bot.modules.ledger.tables import (
     SubmissionAttemptJournalRow,
     TransportOutcomeJournalRow,
 )
-from bfx_funding_bot.modules.marketfeed.funding_book import FundingBookStore
+from bfx_funding_bot.modules.market._internal.book import FundingBookStore
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from tests.modules.execution.deployment.test_reconciler import _Readiness, _valid_snapshot
 
@@ -79,10 +78,9 @@ class Venue:
     def __init__(self):
         self.received = []
 
-    async def submit(self, ready, ctx, *, reservation_ref):
-        self.received.append(ready)
-        return SubmittedOrder(venue_offer_id="101", outcome=SubmitAcknowledged("101"),
-                              reservation_ref=reservation_ref)
+    async def submit(self, offer, account, *, pre_send=None):
+        self.received.append(offer)
+        return SubmitAcknowledged("101")
 
 
 async def boundary(stack: Stack):
@@ -95,7 +93,7 @@ async def boundary(stack: Stack):
     async with stack.factory.begin() as session:
         session.add(ExecutionDecisionRow(
             decision_id=decision_id, account_id=str(ACCOUNT), exchange_account_id=ACCOUNT,
-            deployment_environment=ENVIRONMENT, reconcile_id="gate", cell_id=CELL,
+            reconcile_id="gate", cell_id=CELL,
             symbol="fUST", signal_correlation_id=str(correlation), outcome="ready",
             signal_rate=Decimal("0.0001"), applied_rate=Decimal("0.0001"),
             amount_usdt=Decimal(AMOUNT), duration_days=2, model_evidence={}, safety_result={},
@@ -114,8 +112,8 @@ async def boundary(stack: Stack):
     )
     venue = Venue()
     gate = AccountCommandGate(
-        venue, uncertainty_reader=_NoneOpen(), safety_evaluator=_Allow(),
-        deployment_environment=ENVIRONMENT, clock=lambda: NOW,
+        venue, bus=DomainEventBus(), uncertainty_reader=_NoneOpen(), safety_evaluator=_Allow(),
+        clock=lambda: NOW,
         boundary=stack.boundary(LedgerCommandEffects(DomainEventBus())),
         managed_offers=stack.offers,
     )
@@ -163,8 +161,7 @@ async def test_expired_decision_is_durable_not_sent(stack, delay, expiring):
         audit=ExecutionDecisionRecorder(factory), readiness=_Readiness()).prepare(
             candidate, decision_id=str(uuid4()), reconcile_id="test", snapshot=snap,
             price=price, fill_evidence=None, safety=GuardResult(True, "test"),
-            audit_context=AuditContext(account_id=str(ACCOUNT), deployment_environment=ENVIRONMENT,
-                reconcile_id="test", cell_id=CELL, symbol="fUST",
+            audit_context=AuditContext(account_id=str(ACCOUNT), reconcile_id="test", cell_id=CELL, symbol="fUST",
                 signal_correlation_id=str(candidate.signal_correlation_id), service_version="test",
                 config_hash="test", strategy="mean_reversion"))
     assert isinstance(ready, ReadyToSubmit)

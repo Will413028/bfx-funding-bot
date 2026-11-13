@@ -1,10 +1,10 @@
 """The realm a database is stamped with, read at boot.
 
-``database_realm`` is a one-row, insert-only table (ADR 2026-10-03 D1/E2). A trigger on
-every realm table rejects a write whose ``deployment_environment`` differs from the stamp,
-and every write while the database is unstamped. A process refuses to boot on a database
-whose stamp is missing or differs from the realm it runs as, so a ``live`` process under
-realm ``ci`` can no longer write ``ci`` rows into the production database.
+``database_realm`` is a one-row, insert-only table (ADR 2026-10-03 D1/E2). The bot refuses
+to boot on a database whose stamp is missing or differs from the realm it runs as, so a
+``live`` process configured for realm ``ci`` cannot write into the production database.
+The stamp is the only place a realm is stored: no table carries a per-row realm and no
+trigger compares one on write (migration ``545b2877e9bd``, ADR 2026-11-08-drop-realm-columns).
 
 Only the owner writes the stamp, once: the migration derives it from existing data, a fresh
 host or a simulation database is stamped explicitly (docs/runbooks/fresh-host-setup.md).
@@ -19,9 +19,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from bfx_funding_bot.core.db import Base
+from bfx_funding_bot.core.realms import KNOWN_REALMS
 
 DATABASE_REALM_TABLE: Final = "database_realm"
-KNOWN_REALMS: Final[tuple[str, ...]] = ("prod", "shadow", "ci")
 
 
 class DatabaseRealmRow(Base):
@@ -34,7 +34,10 @@ class DatabaseRealmRow(Base):
     actor: Mapped[str] = mapped_column(Text, nullable=False)
     __table_args__ = (
         CheckConstraint("id", name="ck_database_realm_singleton"),
-        CheckConstraint("realm IN ('prod', 'shadow', 'ci')", name="ck_database_realm_realm"),
+        CheckConstraint(
+            "realm IN (" + ", ".join(f"'{realm}'" for realm in KNOWN_REALMS) + ")",
+            name="ck_database_realm_realm",
+        ),
         CheckConstraint("actor <> ''", name="ck_database_realm_actor"),
     )
 

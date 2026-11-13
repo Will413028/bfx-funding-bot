@@ -43,13 +43,12 @@ class NavPeakRow(Base):
     exchange_account_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), nullable=True
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     peak: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     updated_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
     __table_args__ = (
-        PrimaryKeyConstraint("exchange_account_id", "deployment_environment", "symbol"),
+        PrimaryKeyConstraint("exchange_account_id", "symbol"),
     )
 
 
@@ -81,7 +80,6 @@ class TradingStateRow(Base):
         ForeignKey("exchange_accounts.id", ondelete="RESTRICT", name="fk_trading_state_account"),
         nullable=False,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     state: Mapped[str] = mapped_column(Text, nullable=False)
     cause: Mapped[str] = mapped_column(Text, nullable=False)
     actor: Mapped[str] = mapped_column(Text, nullable=False)
@@ -97,16 +95,15 @@ class TradingStateRow(Base):
         CheckConstraint("cause IN ('operator', 'auto')", name="ck_trading_state_cause"),
         CheckConstraint(
             "length(trim(actor)) > 0 AND length(trim(reason)) > 0 "
-            "AND length(trim(deployment_environment)) > 0 AND created_at_ms >= 0",
+            "AND created_at_ms >= 0",
             name="ck_trading_state_evidence",
         ),
         # Unique so that the cancel-all audit's composite foreign key can reference it.
-        Index("ix_trading_state_scope_id", "exchange_account_id", "deployment_environment", "id",
+        Index("ix_trading_state_scope_id", "exchange_account_id", "id",
               unique=True),
         ForeignKeyConstraint(
-            ["operator_request_id", "exchange_account_id", "deployment_environment"],
-            ["trading_control_requests.request_id", "trading_control_requests.exchange_account_id",
-             "trading_control_requests.deployment_environment"],
+            ["operator_request_id", "exchange_account_id"],
+            ["trading_control_requests.request_id", "trading_control_requests.exchange_account_id"],
             ondelete="RESTRICT", name="fk_trading_state_operator_request"),
         # A request is applied by at most one row.
         Index("uq_trading_state_operator_request", "operator_request_id", unique=True,
@@ -134,7 +131,6 @@ class FundingCancelAllAuditRow(Base):
                    name="fk_funding_cancel_all_audit_account"),
         nullable=False,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     # The HALTED decision this cancel-all enforces, in the same scope.
     trading_state_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     attempt_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
@@ -164,7 +160,7 @@ class FundingCancelAllAuditRow(Base):
             name="ck_funding_cancel_all_audit_evidence",
         ),
         Index("ix_funding_cancel_all_audit_scope_id",
-              "exchange_account_id", "deployment_environment", "id"),
+              "exchange_account_id", "id"),
         Index("uq_funding_cancel_all_audit_request", "attempt_id", unique=True,
               postgresql_where=text("phase = 'requested'"),
               sqlite_where=text("phase = 'requested'")),
@@ -172,14 +168,12 @@ class FundingCancelAllAuditRow(Base):
               postgresql_where=text("phase <> 'requested'"),
               sqlite_where=text("phase <> 'requested'")),
         ForeignKeyConstraint(
-            ["trading_state_id", "exchange_account_id", "deployment_environment"],
-            ["trading_state.id", "trading_state.exchange_account_id",
-             "trading_state.deployment_environment"],
+            ["trading_state_id", "exchange_account_id"],
+            ["trading_state.id", "trading_state.exchange_account_id"],
             ondelete="RESTRICT", name="fk_funding_cancel_all_audit_trading_state"),
         ForeignKeyConstraint(
-            ["operator_request_id", "exchange_account_id", "deployment_environment"],
-            ["trading_control_requests.request_id", "trading_control_requests.exchange_account_id",
-             "trading_control_requests.deployment_environment"],
+            ["operator_request_id", "exchange_account_id"],
+            ["trading_control_requests.request_id", "trading_control_requests.exchange_account_id"],
             ondelete="RESTRICT", name="fk_funding_cancel_all_audit_operator_request"),
     )
 
@@ -194,7 +188,7 @@ class TradingControlRequestRow(Base):
 
     __tablename__ = "trading_control_requests"
     REQUEST_COLUMNS: ClassVar[tuple[str, ...]] = (
-        "request_id", "exchange_account_id", "deployment_environment", "action",
+        "request_id", "exchange_account_id", "action",
         "reason", "requested_by", "created_at_ms",
     )
     WORKER_COLUMNS: ClassVar[tuple[str, ...]] = ("state", "processed_at_ms", "outcome_reason")
@@ -213,7 +207,6 @@ class TradingControlRequestRow(Base):
                    name="fk_trading_control_requests_account"),
         nullable=False,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     action: Mapped[str] = mapped_column(Text, nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     requested_by: Mapped[str] = mapped_column(Text, nullable=False)
@@ -239,18 +232,17 @@ class TradingControlRequestRow(Base):
         # One waiting request per scope, plus one kill beside it: a pending
         # resume never makes a kill wait for a 409.
         Index("uq_trading_control_requests_pending", "exchange_account_id",
-              "deployment_environment", unique=True,
+              unique=True,
               postgresql_where=text("state = 'requested' AND action <> 'kill'"),
               sqlite_where=text("state = 'requested' AND action <> 'kill'")),
         Index("uq_trading_control_requests_pending_kill", "exchange_account_id",
-              "deployment_environment", unique=True,
+              unique=True,
               postgresql_where=text("state = 'requested' AND action = 'kill'"),
               sqlite_where=text("state = 'requested' AND action = 'kill'")),
         Index("ix_trading_control_requests_queue", "exchange_account_id",
-              "deployment_environment", "state", "created_at_ms"),
+              "state", "created_at_ms"),
         # What an effect's composite foreign key references.
-        UniqueConstraint("request_id", "exchange_account_id", "deployment_environment",
-                         name="uq_trading_control_requests_scope"),
+        UniqueConstraint("request_id", "exchange_account_id", name="uq_trading_control_requests_scope"),
     )
 
 
@@ -274,12 +266,11 @@ class NavWindowSampleRow(Base):
         PG_UUID(as_uuid=True), ForeignKey("exchange_accounts.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     occurred_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
     nav: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
 
     __table_args__ = (
         Index("ix_nav_window_samples_scope_symbol_time",
-              "exchange_account_id", "deployment_environment", "symbol", "occurred_at_ms"),
+              "exchange_account_id", "symbol", "occurred_at_ms"),
     )

@@ -10,14 +10,14 @@ or process-global realm fallback.
 """
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.external.bitfinex.credentials import Credentials
+from bfx_funding_bot.external.bitfinex.order_port import FundingCancelAllResult
 from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmitAcknowledged,
     SubmitOutcome,
@@ -36,14 +36,12 @@ __all__ = [
     "Credentials",
     "ExecutorPort",
     "FundingCancelAllPort",
-    "FundingCancelAllResult",
     "GuardResult",
     "GuardRule",
     "ReadyToSubmit",
     "SubmitOutcome",
     "SubmitOutcomeKind",
     "SubmittedOrder",
-    "VenueExecutorPort",
     "WriterLockHandle",
 ]
 
@@ -56,8 +54,6 @@ class AccountContext:
     capital_cell_id: str | None = None
     # Only the command boundary supplies this; guards must reuse its replayed state.
     command_session: AsyncSession | None = None
-    before_cancel_transport: Callable[[], Awaitable[None]] | None = None
-    before_submit_transport: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -70,7 +66,6 @@ class SubmittedOrder:
 
     venue_offer_id: str | None
     outcome: SubmitOutcome
-    raw_response: Any | None
     reservation_ref: ReservationRef | None
 
     def __init__(
@@ -78,7 +73,6 @@ class SubmittedOrder:
         *,
         outcome: SubmitOutcome,
         venue_offer_id: str | None = None,
-        raw_response: Any | None = None,
         reservation_ref: ReservationRef | None = None,
     ) -> None:
         if isinstance(outcome, SubmitAcknowledged):
@@ -89,12 +83,8 @@ class SubmittedOrder:
             raise ValueError(
                 f"{outcome.kind.value} outcome cannot carry venue_offer_id"
             )
-        if raw_response is None and hasattr(outcome, "raw_response"):
-            raw_response = outcome.raw_response
-
         object.__setattr__(self, "venue_offer_id", venue_offer_id)
         object.__setattr__(self, "outcome", outcome)
-        object.__setattr__(self, "raw_response", raw_response)
         object.__setattr__(self, "reservation_ref", reservation_ref)
 
     @property
@@ -138,25 +128,12 @@ class ExecutorPort(Protocol):
     async def submit(self, ready: ReadyToSubmit, ctx: AccountContext) -> SubmittedOrder: ...
 
 
-class VenueExecutorPort(Protocol):
-    """The venue transport behind the account command gate (Bitfinex live).
-
-    The gate passes the reservation reference it derived for the durable
-    intent; the result must echo exactly that reference (bound to the venue
-    offer on an acknowledgement) so the gate can attribute it to its intent.
-    """
-    async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref: ReservationRef,
-    ) -> SubmittedOrder: ...
-
-
-@runtime_checkable
 class CancelPort(Protocol):
-    """Venue funding-offer cancel（只有 live executor 實作）。
+    """A managed funding-offer cancel through the account command gate.
 
-    對應 BitfinexLiveExecutor.cancel：CancelRequested/CancelAcknowledged audit
-    都在那一側；offer 結束由 ledger 觀測（WS foc 只是 venue hint），呼叫方不碰 ledger。
+    The gate publishes CancelRequested / CancelAcknowledged around the venue
+    call; the offer's end is observed by the ledger (WS foc is only a venue
+    hint), so callers never touch the ledger.
     """
     async def cancel(
         self,
@@ -166,19 +143,6 @@ class CancelPort(Protocol):
         account_id: str,
         ctx: AccountContext,
     ) -> None: ...
-
-
-@dataclass(frozen=True, slots=True)
-class FundingCancelAllResult:
-    """The venue's answer to "cancel every funding offer in this currency".
-
-    ``acknowledged`` means the venue accepted the request; the offers it
-    cancelled are observed by the next reconcile, like any other cancel.
-    ``rejected`` carries the venue's own status and text.
-    """
-    outcome: str  # "acknowledged" | "rejected"
-    venue_status: str | None = None
-    text: str | None = None
 
 
 @runtime_checkable

@@ -65,11 +65,11 @@ EXPECTED_TABLES: dict[str, set[str]] = {
 EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
     ("capital_authority_epoch", "SELECT"): {"epoch_seq", "authority", "actor"},
     ("capital_policy_revisions", "SELECT"): {
-        "id", "exchange_account_id", "deployment_environment", "symbol", "revision",
+        "id", "exchange_account_id", "symbol", "revision",
         "schema_version", "policy", "digest",
     },
     ("accepted_capital_basis", "SELECT"): {
-        "id", "exchange_account_id", "deployment_environment", "observation_id",
+        "id", "exchange_account_id", "observation_id",
         "accept_revision", "attempt_seq_high_water",
     },
     ("accepted_capital_basis_attempt", "SELECT"): {
@@ -78,11 +78,11 @@ EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
     ("accepted_capital_basis_quarantine", "SELECT"): {"basis_id", "quarantine_id"},
     ("alembic_version", "SELECT"): {"version_num"},
     ("execution_resolution_journal", "SELECT"): {
-        "id", "attempt_id", "quarantine_id", "exchange_account_id", "deployment_environment",
+        "id", "attempt_id", "quarantine_id", "exchange_account_id",
         "symbol", "action", "actor_kind", "actor_id", "resolved_at_ms", "reason",
     },
     ("ledger_observation", "SELECT"): {
-        "id", "query_id", "exchange_account_id", "deployment_environment", "accepted",
+        "id", "query_id", "exchange_account_id", "accepted",
         "query_finished_at_ms", "first_digest", "confirmation_digest", "wallets_complete",
         "offers_complete", "credits_complete", "loans_complete", "offer_history_complete",
         "credit_history_complete", "trades_complete",
@@ -96,15 +96,15 @@ EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
         *_OBSERVED_OFFER, "terminal_kind", "occurred_at_ms",
     },
     ("ledger_observation_query", "SELECT"): {
-        "query_id", "exchange_account_id", "deployment_environment", "query_revision",
+        "query_id", "exchange_account_id", "query_revision",
         "started_at_ms",
     },
     ("quarantine_opening", "SELECT"): {
-        "quarantine_id", "exchange_account_id", "deployment_environment", "symbol",
+        "quarantine_id", "exchange_account_id", "symbol",
         "intended_amount", "opened_at_ms", "opened_revision", "source_attempt_id",
     },
     ("submission_attempt_journal", "SELECT"): {
-        "attempt_id", "execution_decision_id", "exchange_account_id", "deployment_environment",
+        "attempt_id", "execution_decision_id", "exchange_account_id",
         "symbol", "cell_id", "attempt_seq", "started_at_ms", "intended_amount",
         "match_rate", "match_period_days", "match_offer_type", "match_flags",
     },
@@ -124,7 +124,7 @@ EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
         "created_at", "operator_request_id",
     },
     ("bot_runs", "SELECT"): {
-        "run_id", "exchange_account_id", "deployment_environment", "started_at_ms",
+        "run_id", "exchange_account_id", "started_at_ms",
         "end_recorded_at_ms",
     },
 }

@@ -11,14 +11,17 @@ from bfx_funding_bot.external.bitfinex.live_executor import (
     format_venue_decimal,
     parse_offer_response,
 )
-from bfx_funding_bot.external.bitfinex.submit_outcomes import SubmitOutcomeKind
-from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
-from bfx_funding_bot.modules.execution.protocols import SubmittedOrder
+from bfx_funding_bot.external.bitfinex.order_port import OfferRequest
+from bfx_funding_bot.external.bitfinex.submit_outcomes import (
+    SubmitAcknowledged,
+    SubmitOutcomeKind,
+    SubmitRejected,
+)
 
 
-def test_live_executor_submit_accepts_only_ready_to_submit() -> None:
-    assert get_type_hints(BitfinexLiveExecutor.submit)["ready"] is ReadyToSubmit
-    assert list(inspect.signature(BitfinexLiveExecutor.submit).parameters)[1] == "ready"
+def test_live_executor_submit_accepts_only_an_offer_request() -> None:
+    assert get_type_hints(BitfinexLiveExecutor.submit)["offer"] is OfferRequest
+    assert list(inspect.signature(BitfinexLiveExecutor.submit).parameters)[1] == "offer"
 
 
 def test_format_venue_decimal_no_scientific_notation() -> None:
@@ -100,8 +103,8 @@ def test_parse_offer_response_submitted() -> None:
         None, "SUCCESS", "Submitting offer #42",
     ]
     result = parse_offer_response(raw)
-    assert isinstance(result, SubmittedOrder)
-    assert result.status == "submitted"
+    assert isinstance(result, SubmitAcknowledged)
+    assert result.kind is SubmitOutcomeKind.ACKNOWLEDGED
     assert result.venue_offer_id == "42"
 
 
@@ -111,15 +114,17 @@ def test_parse_offer_response_failed() -> None:
         None, None, "ERROR", "Funds insufficient",
     ]
     result = parse_offer_response(raw)
-    assert result.status == "failed"
-    assert result.venue_offer_id is None
+    assert isinstance(result, SubmitRejected)
+    assert result.kind is SubmitOutcomeKind.REJECTED
+    assert not hasattr(result, "venue_offer_id")
 
 
 def test_parse_offer_response_malformed_is_unknown() -> None:
     """Per spec §7.1 — malformed response is ambiguous, not rejected."""
-    result = parse_offer_response({"not": "expected"})  # type: ignore[arg-type]
-    assert result.outcome_kind is SubmitOutcomeKind.UNKNOWN
-    assert result.status == "unknown"
+    result = parse_offer_response({"not": "expected"})
+    assert result.kind is SubmitOutcomeKind.UNKNOWN
+    assert result.reason == "malformed_response"
+    assert result.transport_started is True
 
 
 # Verbatim from docs.bitfinex.com "Submit Funding Offer" / "Cancel Funding Offer"
@@ -136,7 +141,7 @@ DOC_SUBMIT_RESPONSE = [
 
 def test_parse_offer_response_documented_submit_ack_parses_offer_id() -> None:
     result = parse_offer_response(DOC_SUBMIT_RESPONSE)
-    assert result.outcome_kind is SubmitOutcomeKind.ACKNOWLEDGED
+    assert isinstance(result, SubmitAcknowledged)
     assert result.venue_offer_id == "604366339"
 
 
@@ -144,6 +149,6 @@ def test_parse_offer_response_documented_error_keeps_text() -> None:
     raw = [*DOC_SUBMIT_RESPONSE[:4], None, None, "ERROR", "Funds insufficient"]
     assert len(raw) == 8
     result = parse_offer_response(raw)
-    assert result.outcome_kind is SubmitOutcomeKind.REJECTED
-    assert result.venue_offer_id is None
+    assert isinstance(result, SubmitRejected)
+    assert result.kind is SubmitOutcomeKind.REJECTED
     assert "Funds insufficient" in str(result.raw_response)

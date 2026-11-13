@@ -20,6 +20,7 @@ import logging
 import os
 import sys
 
+from bfx_funding_bot.core.settings import deployment_environment_label
 from bfx_funding_bot.modules.observability import alerts
 
 DELIVERY_TIMEOUT_S = 15.0
@@ -46,7 +47,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    return asyncio.run(send(alerts.AlertSink.from_environment(os.environ), note=args.note))
+    return asyncio.run(send(alerts.AlertSink.from_environment(
+        os.environ, context=deployment_environment_label()), note=args.note))
 
 
 if __name__ == "__main__":

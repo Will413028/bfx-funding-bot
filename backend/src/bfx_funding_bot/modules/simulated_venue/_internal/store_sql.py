@@ -6,9 +6,8 @@ database and refuses unless the latest epoch is `ledger`. Nothing the caller pas
 stand in for that read (finding 5 of the P1a design review; ADR 2026-10-03).
 
 `_check_database_realm` reads the database's `database_realm` stamp on the same connection
-and refuses an unstamped database or one stamped for any realm outside `ALLOWED_REALMS`
-(decision E2): a simulated venue never opens on the production database. The trigger on
-`sim_venue_event` then rejects every row whose realm differs from the stamp.
+and refuses an unstamped database or one stamped for any realm but `SIMULATED_REALM`
+(decision E2): a simulated venue never opens on the production database.
 """
 from __future__ import annotations
 
@@ -19,8 +18,8 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from bfx_funding_bot.modules.simulated_venue.contracts import (
-    ALLOWED_REALMS,
     REQUIRED_AUTHORITY_EPOCH,
+    SIMULATED_REALM,
     ConcurrentAppendError,
     RealmRefusedError,
     SimAccount,
@@ -42,11 +41,8 @@ def _sqlstate(exc: DBAPIError) -> str | None:
     return getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
 
 
-def _scope(account: SimAccount) -> tuple[ColumnElement[bool], ColumnElement[bool]]:
-    return (
-        _T.exchange_account_id == account.exchange_account_id,
-        _T.deployment_environment == account.deployment_environment,
-    )
+def _scope(account: SimAccount) -> ColumnElement[bool]:
+    return _T.exchange_account_id == account.exchange_account_id
 
 
 class SqlVenueEventStore:
@@ -99,15 +95,15 @@ class SqlVenueEventStore:
             raise VenueStoreError(f"database realm unreadable: {exc!r}") from exc
         if not stamps:
             raise RealmRefusedError("this database is not stamped with a realm")
-        if stamps[0] not in ALLOWED_REALMS:
+        if stamps[0] != SIMULATED_REALM:
             raise RealmRefusedError(
-                f"the simulated venue refuses a database stamped {stamps[0]!r}; allowed: {ALLOWED_REALMS}"
+                f"the simulated venue refuses a database stamped {stamps[0]!r}; allowed: {SIMULATED_REALM!r}"
             )
 
     async def load(self, account: SimAccount) -> Sequence[VenueEvent]:
         query = (
             select(_T.seq, _T.event_type, _T.schema_version, _T.payload)
-            .where(*_scope(account)).order_by(_T.seq)
+            .where(_scope(account)).order_by(_T.seq)
         )
         try:
             async with self._engine.connect() as conn:
@@ -130,7 +126,7 @@ class SqlVenueEventStore:
         try:
             async with self._engine.begin() as conn:
                 current = await conn.scalar(
-                    select(func.coalesce(func.max(_T.seq), 0)).where(*_scope(account)))
+                    select(func.coalesce(func.max(_T.seq), 0)).where(_scope(account)))
                 if current != expected_seq:
                     raise ConcurrentAppendError(
                         f"{account}: expected seq {expected_seq}, log has {current} events")
@@ -138,7 +134,6 @@ class SqlVenueEventStore:
                     await conn.execute(insert(_T), [
                         {
                             "exchange_account_id": account.exchange_account_id,
-                            "deployment_environment": account.deployment_environment,
                             "seq": expected_seq + offset,
                             "event_type": type(event).event_type,
                             "schema_version": event.schema_version,

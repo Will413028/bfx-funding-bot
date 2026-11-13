@@ -3,80 +3,33 @@
 Contract under test:
 1. Every observe_* method is FAIL-OPEN: a broken metric backend or malformed
    event never raises into the observed path.
-2. Wrappers (MetricsSubmitMiddleware / TimedReconcileRecovery) are transparent:
-   results and exceptions pass through byte-identical; only counters/histograms
-   move on the side.
-3. Per-instance CollectorRegistry — no cross-test / cross-daemon collisions.
+2. Per-instance CollectorRegistry — no cross-test / cross-daemon collisions.
 """
 from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import httpx
 import pytest
 
 from bfx_funding_bot.core.health import HealthProbe
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
-from bfx_funding_bot.external.bitfinex.submit_outcomes import (
-    SubmitAcknowledged,
-    SubmitOutcomeUnknown,
-)
 from bfx_funding_bot.modules.execution.contracts import (
     BlockReason,
+    DecisionOutcome,
     ExecutionPolicy,
-    GuardResult,
-    ReadyToSubmit,
 )
 from bfx_funding_bot.modules.execution.events import CancelAcknowledged, CancelRequested
-from bfx_funding_bot.modules.execution.protocols import (
-    AccountContext,
-    Credentials,
-    SubmittedOrder,
-)
-from bfx_funding_bot.modules.ledger import CycleResult, Scope
+from bfx_funding_bot.modules.observability import metrics as metrics_module
 from bfx_funding_bot.modules.observability.metrics import (
     DaemonMetrics,
     LogMetricsHandler,
-    MetricsSubmitMiddleware,
-    TimedReconcileRecovery,
     attach_httpx_metrics,
     install_log_metrics_handler,
 )
-from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
-
-
-def _ctx() -> AccountContext:
-    return AccountContext(
-        account_id="default",
-        credentials=Credentials(api_key="k", api_secret="s"),
-    )
-
-
-def _decision() -> DecisionPayload:
-    return DecisionPayload(
-        decision_outcome=DecisionOutcome.POST,
-        signal_correlation_id=uuid4(),
-        offer_rate=0.0005,
-        offer_amount_usdt=150.0,
-        offer_duration_days=2,
-        symbol="fUST",
-    )
-
-
-def _ready() -> ReadyToSubmit:
-    return ReadyToSubmit(
-        decision=_decision(),
-        decision_id="d-metrics",
-        policy=ExecutionPolicy.BOOK_GUARDED,
-        market_snapshot_id="snapshot-metrics",
-        model_version=None,
-        evidence={},
-        safety=GuardResult(allowed=True, guard_name="test"),
-    )
-
 
 # ── operational / diagnostic event counters ──────────────────────────────────
 
@@ -111,6 +64,14 @@ def test_execution_metric_labels_are_bounded() -> None:
             "policy": "book_guarded",
         },
     ) == 1.0
+
+
+def test_execution_label_allowlists_match_the_execution_enums() -> None:
+    # observability sits below execution, so the allowlists are literals; this
+    # fails when an enum gains a value the metric would silently fold into "other".
+    assert {o.value for o in DecisionOutcome} == metrics_module._KNOWN_EXECUTION_OUTCOMES
+    assert {"none", *(r.value for r in BlockReason)} == metrics_module._KNOWN_EXECUTION_REASONS
+    assert {p.value for p in ExecutionPolicy} == metrics_module._KNOWN_EXECUTION_POLICIES
 
 
 def test_execution_metrics_fail_open_and_normalize_unknown_labels() -> None:
@@ -208,52 +169,6 @@ async def test_domain_event_handler_counts_by_class() -> None:
 # ── executor submit middleware ───────────────────────────────────────────────
 
 
-class _StubExecutor:
-    def __init__(self, order: SubmittedOrder | None = None,
-                 exc: Exception | None = None) -> None:
-        self._order = order
-        self._exc = exc
-        self.readies: list[ReadyToSubmit] = []
-
-    async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext,
-    ) -> SubmittedOrder:
-        self.readies.append(ready)
-        if self._exc is not None:
-            raise self._exc
-        assert self._order is not None
-        return self._order
-
-
-@pytest.mark.asyncio
-async def test_submit_middleware_passes_result_and_records() -> None:
-    m = DaemonMetrics()
-    order = SubmittedOrder(outcome=SubmitAcknowledged("paper_x"))
-    inner = _StubExecutor(order=order)
-    mw = MetricsSubmitMiddleware(inner, metrics=m)
-    ready = _ready()
-    got = await mw.submit(ready, _ctx())
-    assert got is order                       # byte-identical passthrough
-    assert inner.readies == [ready]            # immutable boundary object is not rebuilt
-    assert m.registry.get_sample_value(
-        "bfx_executor_submits_total", {"status": "submitted"},
-    ) == 1.0
-    assert m.registry.get_sample_value("bfx_executor_submit_duration_seconds_count") == 1.0
-
-
-@pytest.mark.asyncio
-async def test_submit_middleware_reraises_and_counts_exception() -> None:
-    m = DaemonMetrics()
-    boom = ValueError("venue said no")
-    mw = MetricsSubmitMiddleware(_StubExecutor(exc=boom), metrics=m)
-    with pytest.raises(ValueError) as ei:
-        await mw.submit(_ready(), _ctx())
-    assert ei.value is boom                   # exception object unchanged
-    assert m.registry.get_sample_value(
-        "bfx_executor_submits_total", {"status": "exception"},
-    ) == 1.0
-
-
 @pytest.mark.asyncio
 async def test_observe_submit_bounds_an_unrecognized_status_to_other() -> None:
     m = DaemonMetrics()
@@ -263,85 +178,9 @@ async def test_observe_submit_bounds_an_unrecognized_status_to_other() -> None:
     ) == 1.0
 
 
-@pytest.mark.asyncio
-async def test_submit_middleware_keeps_unknown_as_first_class_metric() -> None:
-    m = DaemonMetrics()
-    order = SubmittedOrder(
-        venue_offer_id=None,
-        outcome=SubmitOutcomeUnknown("timeout", True),
-        raw_response=None,
-    )
-    mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
-
-    await mw.submit(_ready(), _ctx())
-
-    assert m.registry.get_sample_value(
-        "bfx_executor_submits_total", {"status": "unknown"},
-    ) == 1.0
-
-
-@pytest.mark.asyncio
-async def test_submit_middleware_fail_open_when_metrics_broken() -> None:
-    m = DaemonMetrics()
-
-    def _boom(**kwargs: Any) -> None:
-        raise RuntimeError("metrics down")
-
-    m.observe_submit = _boom  # type: ignore[method-assign]
-    order = SubmittedOrder(outcome=SubmitAcknowledged("x"))
-    mw = MetricsSubmitMiddleware(_StubExecutor(order=order), metrics=m)
-    got = await mw.submit(_ready(), _ctx())   # must NOT raise
-    assert got is order
-
-
 # ── reconcile tick timing wrapper ────────────────────────────────────────────
 
 
-_SCOPE = Scope(UUID("00000000-0000-0000-0000-00000000a001"), "ci")
-
-
-def _reconcile_result() -> CycleResult:
-    return CycleResult("accepted")
-
-
-class _StubRecovery:
-    def __init__(self, result: CycleResult | None = None,
-                 exc: Exception | None = None) -> None:
-        self._result = result
-        self._exc = exc
-
-    async def run(self, scope: Scope) -> CycleResult:
-        assert scope == _SCOPE
-        if self._exc is not None:
-            raise self._exc
-        assert self._result is not None
-        return self._result
-
-
-@pytest.mark.asyncio
-async def test_timed_recovery_passes_result_through() -> None:
-    m = DaemonMetrics()
-    result = _reconcile_result()
-    wrapped = TimedReconcileRecovery(_StubRecovery(result=result), metrics=m)
-    got = await wrapped.run(_SCOPE)
-    assert got is result
-    assert m.registry.get_sample_value(
-        "bfx_reconcile_ticks_total", {"result": "ok"},
-    ) == 1.0
-    assert m.registry.get_sample_value("bfx_reconcile_tick_duration_seconds_count") == 1.0
-
-
-@pytest.mark.asyncio
-async def test_timed_recovery_reraises_and_counts_error() -> None:
-    m = DaemonMetrics()
-    boom = ConnectionError("venue unreachable")
-    wrapped = TimedReconcileRecovery(_StubRecovery(exc=boom), metrics=m)
-    with pytest.raises(ConnectionError) as ei:
-        await wrapped.run(_SCOPE)
-    assert ei.value is boom
-    assert m.registry.get_sample_value(
-        "bfx_reconcile_ticks_total", {"result": "error"},
-    ) == 1.0
 
 
 # ── probe collector: heartbeat age / thresholds / health status ──────────────
@@ -533,30 +372,6 @@ async def test_a_429_is_counted_on_its_own_and_as_a_4xx() -> None:
         "bfx_venue_rest_errors_total", {"kind": "http_4xx"}) == 3.0
 
 
-def test_sim_feed_stream_events_are_counted_and_bounded() -> None:
-    m = DaemonMetrics()
-    observer = m.sim_venue_observer()
-    observer.feed_stream("connected")
-    observer.feed_stream("disconnected")
-    observer.feed_stream("disconnected")
-    observer.feed_stream("anything else")  # unbounded labels are dropped
-    sample = m.registry.get_sample_value
-    assert sample("bfx_sim_venue_feed_stream_total", {"event": "connected"}) == 1.0
-    assert sample("bfx_sim_venue_feed_stream_total", {"event": "disconnected"}) == 2.0
-    assert sample("bfx_sim_venue_feed_stream_total", {"event": "anything else"}) is None
-
-
-def test_sim_watermark_lag_is_read_at_scrape_time_and_unknown_has_no_sample() -> None:
-    m = DaemonMetrics()
-    lag: dict[str, float | None] = {"fUST": 3.0, "fUSD": None}
-    m.bind_sim_watermark_lag(lambda: lag)
-    sample = m.registry.get_sample_value
-    assert sample("bfx_sim_venue_feed_watermark_lag_seconds", {"symbol": "fUST"}) == 3.0
-    assert sample("bfx_sim_venue_feed_watermark_lag_seconds", {"symbol": "fUSD"}) is None
-    lag["fUST"] = 90.0
-    assert sample("bfx_sim_venue_feed_watermark_lag_seconds", {"symbol": "fUST"}) == 90.0
-
-
 @pytest.mark.asyncio
 async def test_httpx_hooks_do_not_break_request_when_metrics_broken() -> None:
     m = DaemonMetrics()
@@ -624,33 +439,3 @@ def test_two_instances_are_isolated() -> None:
     ) is None
 
 
-@pytest.mark.asyncio
-async def test_cycle_wrapper_passes_scope_and_result_identity():
-    from unittest.mock import AsyncMock
-
-    from bfx_funding_bot.modules.ledger import CycleResult, Scope
-
-    scope = Scope(uuid4(), "ci")
-    result = CycleResult("fenced")
-    sink = AsyncMock()
-    sink.run.return_value = result
-    metrics = DaemonMetrics()
-    wrapper = TimedReconcileRecovery(sink, metrics=metrics)
-    assert await wrapper.run(scope) is result
-    sink.run.assert_awaited_once_with(scope)
-
-
-def test_the_simulated_venue_observer_feeds_the_soak_counters() -> None:
-    """Mutation: the observer stops incrementing (the soak report would read zero)."""
-    from prometheus_client import generate_latest
-
-    metrics = DaemonMetrics()
-    observer = metrics.sim_venue_observer()
-    observer.internal_failure("no_market_data")
-    observer.internal_failure("no_market_data")
-    observer.unexpected_request()
-    observer.feed_failure("trades")
-    text = generate_latest(metrics.registry).decode()
-    assert 'bfx_sim_venue_internal_failures_total{kind="no_market_data"} 2.0' in text
-    assert "bfx_sim_venue_unexpected_requests_total 1.0" in text
-    assert 'bfx_sim_venue_feed_failures_total{source="trades"} 1.0' in text

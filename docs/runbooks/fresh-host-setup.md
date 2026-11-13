@@ -25,9 +25,6 @@ Placeholder：`<owner>` 是 Postgres owner role（`POSTGRES_USER`，migration �
 | `bfx_operator` | operator CLI（one-off `bfx-operator` compose service） | migration `4ab02765a34b` 的精確 allowlist（換憑證 outbox 由 `1db83367918c` 加上）：四個 operator outbox 的 request 欄位 INSERT 與驗證所需的讀取；沒有 UPDATE／DELETE |
 | `bfx_research` | 每週報告（`bfx-weekly-report`）、研究用一次性容器 | migration `3c5e7a9b1d2f` 的精確 allowlist：只寫研究表（`funding_stats`、`perp_funding_rates`、`liquidations` 的 upsert，`attribution_weekly`、`fill_rate_stats` 的 delete＋insert，`fill_rate_model_artifacts` 的 insert），只讀每週步驟與研究腳本用到的表（migration `638455da00bb` 另加 `deployments` 的 SELECT，給交付指標）；不能寫 ledger、`trading_state`、outbox，讀不到憑證表 |
 
-模擬 soak 另有第五個 login role `bfx_sim`，只連自己的 database `bfx_sim`、在那裡以 `bfx_bot` 身分執行；
-它的建立與 grants 在 [simulation-soak.md](simulation-soak.md) §2，不屬於新主機的必要步驟。
-
 Migration 對 role 的 grant 都包在 `IF EXISTS (SELECT FROM pg_roles ...)` 裡：role 不存在時
 migration 照樣成功但**不會補 grant**。所以順序是：先建 role，再第一次跑 migration。
 
@@ -65,7 +62,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE <owner> IN SCHEMA public
 ```
 
 `bfx` 的 CONNECT 只給上面四個 runtime role（`<owner>` 是 superuser，不受影響）。官方 image 以 `POSTGRES_DB`
-建立的 database 預設對 PUBLIC 開放 CONNECT；收回後，同一 cluster 的其他 login role（例如模擬 soak 的 `bfx_sim`）
+建立的 database 預設對 PUBLIC 開放 CONNECT；收回後，同一 cluster 的其他 login role
 連不進 `bfx`，role membership 也不會帶進來（membership 用 `INHERIT FALSE`）：
 
 ```sql
@@ -95,17 +92,21 @@ docker exec --user postgres bfx-postgres psql -U <owner> -d bfx -Atc "CREATE EXT
 
 ### 1b-1. 蓋 database realm（migration 之後，以 `<owner>` 執行一次）
 
-每個資料庫只屬於一個 realm。`database_realm` 是單列、只能插入的表（migration `a7c3e9f1b2d4`），
-每張帶 `deployment_environment` 的表都有 `database_realm_write` trigger（實際清單可查：
-`SELECT tgrelid::regclass FROM pg_trigger WHERE tgname = 'database_realm_write' ORDER BY 1;`），
-寫入的 realm 與這一列不同、或這一列不存在時一律拒絕（owner 也一樣）；bot 開機時也會拒絕 `BFX_DEPLOYMENT_ENV` 與這一列不同的資料庫，任何 phase 都適用。
+每個資料庫只屬於一個 realm。`database_realm` 是單列、只能插入的表（migration `a7c3e9f1b2d4`）；
+bot 開機時拒絕 `BFX_DEPLOYMENT_ENV` 與這一列不同、或這一列不存在的資料庫，任何 phase 都適用。
+資料表沒有逐列的 realm 欄位，也沒有寫入時比對 realm 的 trigger（migration `545b2877e9bd` 拿掉）：
+拿 stamp 與設定比對的只有 bot 開機（simulated venue 開啟 store 時另外要求 stamp 是 `ci`）；
+還原 drill 的開機檢查與 `scripts/amend_capital_policy.py` 只要求 stamp 存在且是已知的值，不比對；
+webapi、operator CLI 與每週腳本不讀 stamp，也不需要 `BFX_DEPLOYMENT_ENV`（webapi 有設的話只當 Sentry 的標籤）：
+它們連到哪個資料庫只由各自的 `DATABASE_URL` 決定。`scripts/amend_capital_policy.py` 的 dry-run 報告會印出讀到的 stamp（`realm`），
+套用前看一眼是不是預期的資料庫。
 
-- 已有資料的資料庫（例如 prod）：migration 從現有資料推導並蓋章（只有一種 realm 時），不用手動做；
-  有多種 realm 時 migration 失敗，schema 維持原狀。
-- 空的資料庫（新主機、模擬用 `bfx_sim`）：migration 後是未蓋章，所有 realm 寫入都被拒絕，owner 蓋章一次：
+- 已有資料的資料庫（例如 prod）：章在 `a7c3e9f1b2d4` 當時已由 migration 從現有資料推導並蓋上，不用手動做。
+- 空的資料庫（新主機）：migration 後是未蓋章，bot 拒絕開機，但 webapi 已經起來、會接受請求寫入；
+  蓋章前不要從營運 UI 或 operator CLI 送請求。owner 蓋章一次，值要等於 bot 的 `BFX_DEPLOYMENT_ENV`（`deploy/vm/live.env`）：
 
 ```sql
--- <realm> 是 prod（新主機）或 shadow（模擬用資料庫，模擬 venue 只接受 shadow／ci）
+-- <realm> 是 prod（新主機）
 INSERT INTO database_realm (realm, stamped_at_ms, actor)
 VALUES ('<realm>', (extract(epoch FROM clock_timestamp()) * 1000)::bigint, 'owner bootstrap');
 ```
@@ -201,7 +202,7 @@ printf "SET log_statement='none'; SET log_min_error_statement='panic'; CREATE RO
 |---|---|---|
 | `secrets/bot/DATABASE_URL` | `bfx_bot` | bot 的其他秘密檔（`BFX_ADMIN_TOKEN`、`BFX_ADMIN_READ_TOKEN`、`BFX_VAULT_KEK`、`TELEGRAM_BOT_TOKEN`）同目錄；非秘密設定在 `bot.env`（範本 `deploy/vm/bot.env.example`） |
 | `secrets/webapi/DATABASE_URL` | `bfx_webapi` | 同目錄還有 `BFX_ADMIN_READ_TOKEN`（與 bot 的同值，`openssl rand -hex 32`）。`webapi.env` 放開機必填的入口設定（缺任一個 webapi 拒絕開機）：`BFX_OPERATOR_TAILNET_USER_ID`（operator 的 tailnet user id，`tailscale whois --json <operator 裝置的 tailnet IP>` 的 `UserProfile.ID`；也是 operator membership 的 `user_id`）、`BFX_WEBAPI_ALLOWED_HOSTS=<ops-host>`、`BFX_FE_SENTRY_DSN`（與 repository variable `NEXT_PUBLIC_SENTRY_DSN` 同值）。webapi **不可**有 `BFX_ADMIN_TOKEN` 或 `BFX_VAULT_KEK`（env 的 key 或秘密檔都不行），看到任一個（即使值是空的）就拒絕開機（halt token 與 KEK 只給 bot） |
-| `operator.env` | `bfx_operator` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`（照抄 `bot.env`）；誰在操作不寫這裡：`bfx-op` 每次以 `tailscale whois` 取得呼叫者的 tailnet user id 當 `requested_by`，CLI 只接受該帳戶的 member；`BFX_DEPLOYMENT_ENV` 不寫這裡，由 `bfx-op` 從部署中版本的 `live.env` 傳入；compose 檔 `deploy/vm/ops/docker-compose.operator.yml`，只由 `sudo bfx-op` 啟動（[operations §10](operations.md#10-operator-clibfx-op)）。不在 bfx-deploy 的部署前檢查裡：`bfx-op` 每次呼叫時檢查 root 0600 |
+| `operator.env` | `bfx_operator` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`（照抄 `bot.env`）；誰在操作不寫這裡：`bfx-op` 每次以 `tailscale whois` 取得呼叫者的 tailnet user id 當 `requested_by`，CLI 只接受該帳戶的 member；CLI 不讀 `BFX_DEPLOYMENT_ENV`；compose 檔 `deploy/vm/ops/docker-compose.operator.yml`，只由 `sudo bfx-op` 啟動（[operations §10](operations.md#10-operator-clibfx-op)）。不在 bfx-deploy 的部署前檢查裡：`bfx-op` 每次呼叫時檢查 root 0600 |
 | `research.env` | `bfx_research` | 另有 `BFX_EXCHANGE_ACCOUNT_ID`（照抄 `bot.env`），只有這兩個 key。每週報告的 runner（`bfx_weekly_report.py`）每次執行時檢查 root 0600，不存在就拒跑、不會退回 `bot.env`；研究用一次性容器也讀它（[research-one-shot-jobs](research-one-shot-jobs.md)） |
 | `migrate.env` | `<owner>` | 只有 bfx-deploy 的 migration 與 operator one-shot 使用 |
 

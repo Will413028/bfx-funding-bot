@@ -18,7 +18,7 @@ from typing import Any, Literal, TypeVar
 import httpx
 
 from bfx_funding_bot.external.bitfinex.auth_ws import sign_request
-from bfx_funding_bot.external.bitfinex.credentials import Credentials
+from bfx_funding_bot.external.bitfinex.credentials import Credentials, HasCredentials
 from bfx_funding_bot.external.bitfinex.errors import (
     BitfinexAPIError,
     BitfinexShapeError,
@@ -40,7 +40,6 @@ from bfx_funding_bot.external.bitfinex.observations import (
     parse_wallet_observations,
 )
 from bfx_funding_bot.external.bitfinex.submit_wire import response_digest, venue_error
-from bfx_funding_bot.modules.execution.protocols import AccountContext
 
 _Row = TypeVar("_Row")
 
@@ -483,7 +482,7 @@ class BitfinexAuthREST:
         self._auth_gate = auth_gate or AuthRequestGate()
 
     async def _fetch_observation_rows(
-        self, *, ctx: AccountContext, path: str,
+        self, *, ctx: HasCredentials, path: str,
         parse: Callable[[Any], list[_Row]], budget: ObservationRequestBudget | None,
     ) -> list[_Row]:
         if budget is not None:
@@ -491,7 +490,7 @@ class BitfinexAuthREST:
         return parse(await self._post_signed(ctx=ctx, path=path, body={}))
 
     async def fetch_wallet_observations(
-        self, *, ctx: AccountContext, budget: ObservationRequestBudget | None = None,
+        self, *, ctx: HasCredentials, budget: ObservationRequestBudget | None = None,
     ) -> list[WalletObservation]:
         """All wallet types, exact balances, and the full venue rows."""
         return await self._fetch_observation_rows(
@@ -499,7 +498,7 @@ class BitfinexAuthREST:
         )
 
     async def fetch_active_offer_observations(
-        self, *, ctx: AccountContext, symbol: str | None = None,
+        self, *, ctx: HasCredentials, symbol: str | None = None,
         budget: ObservationRequestBudget | None = None,
     ) -> list[OfferObservation]:
         path = _FUNDING_OFFERS_PATH if symbol is None else f"{_FUNDING_OFFERS_PATH}/{symbol}"
@@ -508,7 +507,7 @@ class BitfinexAuthREST:
         )
 
     async def fetch_active_credit_observations(
-        self, *, ctx: AccountContext, symbol: str | None = None,
+        self, *, ctx: HasCredentials, symbol: str | None = None,
         budget: ObservationRequestBudget | None = None,
     ) -> list[CreditObservation]:
         path = _FUNDING_CREDITS_PATH if symbol is None else f"{_FUNDING_CREDITS_PATH}/{symbol}"
@@ -518,7 +517,7 @@ class BitfinexAuthREST:
         )
 
     async def fetch_active_loan_observations(
-        self, *, ctx: AccountContext, symbol: str | None = None,
+        self, *, ctx: HasCredentials, symbol: str | None = None,
         budget: ObservationRequestBudget | None = None,
     ) -> list[CreditObservation]:
         path = _FUNDING_LOANS_PATH if symbol is None else f"{_FUNDING_LOANS_PATH}/{symbol}"
@@ -528,7 +527,7 @@ class BitfinexAuthREST:
         )
 
     async def fetch_offer_history_observations(
-        self, *, ctx: AccountContext, symbol: str, start_ms: int, end_ms: int,
+        self, *, ctx: HasCredentials, symbol: str, start_ms: int, end_ms: int,
         limit: int = 500, max_pages: int = 5, budget: ObservationRequestBudget | None = None,
     ) -> CoveredHistory[OfferObservation]:
         """Per-symbol offers that CHANGED in [start, end], paged by MTS_UPDATE.
@@ -548,7 +547,7 @@ class BitfinexAuthREST:
         )
 
     async def fetch_offer_history_by_ids(
-        self, *, ctx: AccountContext, symbol: str, offer_ids: Iterable[str],
+        self, *, ctx: HasCredentials, symbol: str, offer_ids: Iterable[str],
         budget: ObservationRequestBudget | None = None,
     ) -> OfferIdLookup:
         """Ended offers by venue id (``{"id": [...]}``, probed 2026-10-04): only the
@@ -584,7 +583,7 @@ class BitfinexAuthREST:
         return OfferIdLookup(found, failed)
 
     async def fetch_credit_history_observations(
-        self, *, ctx: AccountContext, symbol: str, start_ms: int, end_ms: int,
+        self, *, ctx: HasCredentials, symbol: str, start_ms: int, end_ms: int,
         limit: int = 500, max_pages: int = 5, budget: ObservationRequestBudget | None = None,
     ) -> CoveredHistory[CreditObservation]:
         """Per-symbol ended credits, paged and filtered by MTS_UPDATE.
@@ -604,7 +603,7 @@ class BitfinexAuthREST:
         )
 
     async def fetch_loan_history_observations(
-        self, *, ctx: AccountContext, symbol: str, start_ms: int, end_ms: int,
+        self, *, ctx: HasCredentials, symbol: str, start_ms: int, end_ms: int,
         limit: int = 500, max_pages: int = 5, budget: ObservationRequestBudget | None = None,
     ) -> CoveredHistory[CreditObservation]:
         """Per-symbol ended loans, with unprefixed ids and explicit source_kind."""
@@ -616,7 +615,7 @@ class BitfinexAuthREST:
         )
 
     async def fetch_trade_observations(
-        self, *, ctx: AccountContext, symbol: str, start_ms: int, end_ms: int,
+        self, *, ctx: HasCredentials, symbol: str, start_ms: int, end_ms: int,
         limit: int = 500, max_pages: int = 5, budget: ObservationRequestBudget | None = None,
     ) -> CoveredHistory[TradeObservation]:
         """Per-symbol funding trades, paged and filtered by MTS_CREATE."""
@@ -634,7 +633,7 @@ class BitfinexAuthREST:
         )
 
     async def _page_covered_history(
-        self, *, ctx: AccountContext, endpoint: str, symbol: str | None,
+        self, *, ctx: HasCredentials, endpoint: str, symbol: str | None,
         parse: Callable[[Any], list[_Row]], mts: Callable[[_Row], int],
         key: Callable[[_Row], str | int], start_ms: int, end_ms: int,
         limit: int, max_pages: int, budget: ObservationRequestBudget | None = None,
@@ -696,7 +695,7 @@ class BitfinexAuthREST:
         )
 
     async def _signed_post(
-        self, *, ctx: AccountContext, path: str, body_bytes: bytes,
+        self, *, ctx: HasCredentials, path: str, body_bytes: bytes,
     ) -> httpx.Response:
         """The only way this client talks to the venue: sign + POST under the
         shared gate, so the request arrives in nonce order. Raises
@@ -744,13 +743,13 @@ class BitfinexAuthREST:
         return resp
 
     async def _fetch_funding_offers_response(
-        self, *, ctx: AccountContext, symbol: str | None = None,
+        self, *, ctx: HasCredentials, symbol: str | None = None,
     ) -> httpx.Response:
         path = _FUNDING_OFFERS_PATH if symbol is None else f"{_FUNDING_OFFERS_PATH}/{symbol}"
         return await self._signed_post(ctx=ctx, path=path, body_bytes=b"{}")
 
     async def fetch_funding_offers_raw(
-        self, *, ctx: AccountContext, symbol: str | None = None,
+        self, *, ctx: HasCredentials, symbol: str | None = None,
     ) -> Any:
         """Return the legacy default-decoded positional-array payload.
 
@@ -764,7 +763,7 @@ class BitfinexAuthREST:
             raise BitfinexShapeError(f"invalid JSON in funding-offers response: {e}") from e
 
     async def get_active_funding_offers(
-        self, *, ctx: AccountContext, symbol: str | None = None,
+        self, *, ctx: HasCredentials, symbol: str | None = None,
     ) -> list[ActiveFundingOffer]:
         """POST /v2/auth/r/funding/offers/{symbol} (signed). Returns parsed
         active offers. Raises BitfinexAPIError / BitfinexShapeError."""
@@ -780,7 +779,7 @@ class BitfinexAuthREST:
     async def get_funding_offer_history(
         self,
         *,
-        ctx: AccountContext,
+        ctx: HasCredentials,
         start_ms: int,
         end_ms: int,
         symbol: str | None = None,
@@ -864,7 +863,7 @@ class BitfinexAuthREST:
         )
 
     async def get_active_funding_credits(
-        self, *, ctx: AccountContext, symbol: str | None = None,
+        self, *, ctx: HasCredentials, symbol: str | None = None,
     ) -> list[ActiveFundingCredit]:
         """POST /v2/auth/r/funding/credits/{symbol} (signed). Returns parsed
         active credits. Raises BitfinexAPIError / BitfinexShapeError."""
@@ -872,7 +871,7 @@ class BitfinexAuthREST:
         return await self._post_funding_lent(ctx=ctx, path=path)
 
     async def get_active_funding_loans(
-        self, *, ctx: AccountContext, symbol: str | None = None,
+        self, *, ctx: HasCredentials, symbol: str | None = None,
     ) -> list[ActiveFundingCredit]:
         """POST /v2/auth/r/funding/loans/{symbol} (signed).
 
@@ -889,7 +888,7 @@ class BitfinexAuthREST:
         ]
 
     async def get_interest_payments(
-        self, *, ctx: AccountContext, currency: str, start_ms: int, end_ms: int,
+        self, *, ctx: HasCredentials, currency: str, start_ms: int, end_ms: int,
         limit: int = 500, max_pages: int = 20,
     ) -> list[InterestPayment]:
         """Interest payouts in [start_ms, end_ms], oldest first.
@@ -905,7 +904,7 @@ class BitfinexAuthREST:
         return sorted(payments, key=lambda entry: (entry.mts, entry.ledger_id))
 
     async def get_funding_credit_history(
-        self, *, ctx: AccountContext, symbol: str, start_ms: int, end_ms: int,
+        self, *, ctx: HasCredentials, symbol: str, start_ms: int, end_ms: int,
         kind: Literal["credit", "loan"] = "credit", limit: int = 500, max_pages: int = 20,
     ) -> list[FundingCreditRecord]:
         """Ended credits (or, with ``kind="loan"``, loans) updated in
@@ -924,7 +923,7 @@ class BitfinexAuthREST:
         return sorted(credits, key=lambda c: (c.mts_update, c.credit_id))
 
     async def get_funding_trades(
-        self, *, ctx: AccountContext, symbol: str, start_ms: int, end_ms: int,
+        self, *, ctx: HasCredentials, symbol: str, start_ms: int, end_ms: int,
         limit: int = 500, max_pages: int = 20,
     ) -> list[FundingTrade]:
         """Funding trades (our offers matched) in [start_ms, end_ms], oldest first."""
@@ -937,7 +936,7 @@ class BitfinexAuthREST:
         return sorted(trades, key=lambda t: (t.mts_create, t.trade_id))
 
     async def _page_hist(
-        self, *, ctx: AccountContext, path: str, extra: dict[str, Any],
+        self, *, ctx: HasCredentials, path: str, extra: dict[str, Any],
         parse: Callable[[Any], list[_Row]], mts: Callable[[_Row], int],
         key: Callable[[_Row], int], start_ms: int, end_ms: int, limit: int, max_pages: int,
     ) -> list[_Row]:
@@ -961,7 +960,7 @@ class BitfinexAuthREST:
             cursor_end = oldest - 1
         return list(by_key.values())
 
-    async def _post_signed(self, *, ctx: AccountContext, path: str, body: dict[str, Any]) -> Any:
+    async def _post_signed(self, *, ctx: HasCredentials, path: str, body: dict[str, Any]) -> Any:
         body_bytes = json.dumps(body, separators=(",", ":")).encode("utf-8")
         resp = await self._signed_post(ctx=ctx, path=path, body_bytes=body_bytes)
         try:
@@ -970,7 +969,7 @@ class BitfinexAuthREST:
             raise BitfinexShapeError(f"invalid JSON in {path} response: {e}") from e
 
     async def _post_funding_lent(
-        self, *, ctx: AccountContext, path: str,
+        self, *, ctx: HasCredentials, path: str,
     ) -> list[ActiveFundingCredit]:
         resp = await self._signed_post(ctx=ctx, path=path, body_bytes=b"{}")
         try:
@@ -980,7 +979,7 @@ class BitfinexAuthREST:
         return parse_active_funding_credits(raw)
 
     async def get_funding_available(
-        self, *, ctx: AccountContext, currency: str,
+        self, *, ctx: HasCredentials, currency: str,
     ) -> Decimal:
         """POST /v2/auth/r/wallets (signed). Returns Σ available of FUNDING
         wallets for `currency` (0 if none). Same error contract as offers/credits:
@@ -1000,7 +999,7 @@ class BitfinexAuthREST:
         )
 
     async def get_funding_available_all(
-        self, *, ctx: AccountContext,
+        self, *, ctx: HasCredentials,
     ) -> Mapping[str, Decimal]:
         """Return available funding-wallet balances for every currency.
 
@@ -1023,7 +1022,7 @@ class BitfinexAuthREST:
             out[symbol] = out.get(symbol, Decimal("0")) + wallet.available
         return out
 
-    async def get_key_permissions(self, *, ctx: AccountContext) -> KeyPermissions:
+    async def get_key_permissions(self, *, ctx: HasCredentials) -> KeyPermissions:
         """POST /v2/auth/r/permissions (signed). Returns the key's scope→(read,write)
         map. Same error contract as the other auth reads: BitfinexAPIError on
         transport/HTTP error (status_code=0 for transport), BitfinexShapeError on
@@ -1036,7 +1035,7 @@ class BitfinexAuthREST:
             raise BitfinexShapeError(f"invalid JSON in permissions response: {e}") from e
         return parse_key_permissions(raw)
 
-    async def get_user_id(self, *, ctx: AccountContext) -> int:
+    async def get_user_id(self, *, ctx: HasCredentials) -> int:
         """POST /v2/auth/r/info/user (signed): the Bitfinex user id the key belongs to.
 
         Only column 0 (ID) is read; the e-mail, username and the rest of the row are

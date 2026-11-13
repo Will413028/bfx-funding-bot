@@ -31,12 +31,12 @@ from bfx_funding_bot.modules.ledger import (
     UnknownResolutionNotice,
     observation_evidence_ref,
 )
+from bfx_funding_bot.modules.ledger.read import build_operator_reads
 from bfx_funding_bot.modules.ledger.wiring import (
     build_capital_authority,
     build_ledger_conservation_reader,
     build_ledger_cycle_reads,
     build_observation_sink,
-    build_operator_reads,
 )
 from bfx_funding_bot.modules.observability import alerts
 

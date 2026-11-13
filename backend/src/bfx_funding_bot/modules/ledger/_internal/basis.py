@@ -6,7 +6,7 @@ symbol when the basis is read. Every query is bounded by the current
 observation, the previous basis, or the attempts recorded after the previous
 basis's ``attempt_seq_high_water``.
 
-Provenance of a venue offer (``_internal.provenance``): a transport ``ack``
+Provenance of a venue offer (``read.provenance``): a transport ``ack``
 outcome or a ``bound_to_venue`` resolution names it -> the attempt. No
 provenance means the offer is foreign; more than one story is a fact-level
 block, never a reason to call it foreign.
@@ -28,22 +28,21 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import load_only
 
 from bfx_funding_bot.core.venue_time import HISTORY_QUERY_MARGIN_MS, VENUE_CLOCK_TOLERANCE_MS
 from bfx_funding_bot.modules.ledger import JsonObject, Quarantine, Scope
-from bfx_funding_bot.modules.ledger._internal import history_symbols, unconfirmed_ends
+from bfx_funding_bot.modules.ledger._internal import unconfirmed_ends
 from bfx_funding_bot.modules.ledger._internal.conservation_facts import (
     OfferEndOutcome,
     symbol_verdicts,
 )
 from bfx_funding_bot.modules.ledger._internal.journal import canonical_payload
-from bfx_funding_bot.modules.ledger._internal.provenance import offer_provenance, sole_owner
-from bfx_funding_bot.modules.ledger._internal.quarantine import (
-    open_quarantine,
-    unresolved_quarantines,
-)
+from bfx_funding_bot.modules.ledger._internal.quarantine import open_quarantine
 from bfx_funding_bot.modules.ledger.conservation import ConservationVerdict
+from bfx_funding_bot.modules.ledger.read import history_symbols
+from bfx_funding_bot.modules.ledger.read.basis import previous_basis
+from bfx_funding_bot.modules.ledger.read.provenance import offer_provenance, sole_owner
+from bfx_funding_bot.modules.ledger.read.quarantine import unresolved_quarantines
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisAttemptRow,
     AcceptedCapitalBasisCellRow,
@@ -57,7 +56,6 @@ from bfx_funding_bot.modules.ledger.tables import (
     LedgerObservationCreditRow,
     LedgerObservationOfferHistoryRow,
     LedgerObservationOfferRow,
-    LedgerObservationQueryRow,
     LedgerObservationRow,
     LedgerObservationTradeRow,
     LedgerObservationWalletRow,
@@ -170,43 +168,6 @@ class _Classifier:
             self.block(symbol, "credit_provenance_conflict", venue_offer_id=venue_id)
             return None
         return attempt.cell_id if attempt is not None else None
-
-
-async def previous_basis(session: AsyncSession, scope: Scope) -> AcceptedCapitalBasisRow | None:
-    """The latest accepted basis of the scope (by its query revision).
-
-    The query's own scope columns are repeated (the basis and observation insert
-    triggers already make them equal to the basis's) so the planner can walk
-    ``ix_ledger_observation_query_scope_revision`` newest-first and stop at the
-    first query with a basis, instead of sorting every basis of the scope.
-    """
-    row: AcceptedCapitalBasisRow | None = await session.scalar(
-        select(AcceptedCapitalBasisRow)
-        .join(
-            LedgerObservationRow, LedgerObservationRow.id == AcceptedCapitalBasisRow.observation_id
-        )
-        .join(
-            LedgerObservationQueryRow,
-            LedgerObservationQueryRow.query_id == LedgerObservationRow.query_id,
-        )
-        .where(
-            LedgerObservationQueryRow.exchange_account_id == scope.exchange_account_id,
-            LedgerObservationQueryRow.deployment_environment == scope.deployment_environment,
-            AcceptedCapitalBasisRow.exchange_account_id == scope.exchange_account_id,
-            AcceptedCapitalBasisRow.deployment_environment == scope.deployment_environment,
-        )
-        .order_by(LedgerObservationQueryRow.query_revision.desc())
-        .limit(1)
-        .options(
-            load_only(
-                AcceptedCapitalBasisRow.id,
-                AcceptedCapitalBasisRow.observation_id,
-                AcceptedCapitalBasisRow.accept_revision,
-                AcceptedCapitalBasisRow.attempt_seq_high_water,
-            )
-        )
-    )
-    return row
 
 
 async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID) -> UUID:
@@ -337,8 +298,6 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
                 select(SubmissionAttemptJournalRow)
                 .where(
                     SubmissionAttemptJournalRow.exchange_account_id == scope.exchange_account_id,
-                    SubmissionAttemptJournalRow.deployment_environment
-                    == scope.deployment_environment,
                     or_(
                         SubmissionAttemptJournalRow.attempt_seq > high_water,
                         SubmissionAttemptJournalRow.attempt_id.in_(
@@ -556,9 +515,8 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         source = converted.get(attempt.attempt_id)
         source_matches = source is None or (
             source.exchange_account_id,
-            source.deployment_environment,
             source.symbol,
-        ) == (scope.exchange_account_id, scope.deployment_environment, attempt.symbol)
+        ) == (scope.exchange_account_id, attempt.symbol)
         if (
             venue_id is not None
             and source_matches
@@ -667,7 +625,6 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         AcceptedCapitalBasisRow(
             id=basis_id,
             exchange_account_id=scope.exchange_account_id,
-            deployment_environment=scope.deployment_environment,
             observation_id=observation_id,
             accepted=True,
             accept_revision=observation.accept_revision,
@@ -821,4 +778,6 @@ def _reflected(
     )
 
 
-__all__ = ["previous_basis", "write_basis"]
+__all__ = [
+    "write_basis",
+]

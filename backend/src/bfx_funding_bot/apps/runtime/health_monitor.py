@@ -1,0 +1,239 @@
+"""Health monitor — state-change emit + 5min heartbeat.
+
+設計依據: phase 4.1 paper/shadow infra design Section "Data Flow" Flow 4
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+from datetime import UTC, datetime
+from typing import Any, Protocol
+from uuid import uuid4
+
+from bfx_funding_bot.core.errors import FatalError
+from bfx_funding_bot.core.health import (
+    _DEFAULT_THRESHOLD_S,
+    DEPENDENCY_THRESHOLDS,
+    NON_FATAL_SUB_TASKS,
+    SUB_TASK_THRESHOLDS,
+    HealthProbe,
+    _TargetState,
+    dependency_is_stale,
+)
+from bfx_funding_bot.core.telemetry import EventType, HealthStatus, HealthTarget, Level, Phase
+
+log = logging.getLogger(__name__)
+
+class _EventSink(Protocol):
+    async def emit(self, event: dict[str, Any]) -> None: ...
+
+
+class _DependencyReadiness(Protocol):
+    def set_dependency_stale(self, dependency: str) -> None: ...
+
+
+class HealthMonitor:
+    def __init__(
+        self,
+        *,
+        phase: Phase,
+        event_sink: _EventSink,
+        probe: HealthProbe,
+        heartbeat_interval_s: float = 300.0,
+        readiness: _DependencyReadiness | None = None,
+    ) -> None:
+        self.phase = phase
+        self._events = event_sink
+        self.probe = probe
+        self.heartbeat_interval_s = heartbeat_interval_s
+        # Told on every scan which dependencies (DEPENDENCY_THRESHOLDS) are stale.
+        self._readiness = readiness
+        self._task: asyncio.Task[None] | None = None
+        self._stop = asyncio.Event()
+        # Last-emitted staleness severity per non-fatal (activity or dependency)
+        # sub-task, for transition-only emit (see scan_staleness). Cleared on
+        # recovery so a later re-staleness re-emits the healthy→degraded transition.
+        self._last_nonfatal_severity: dict[str, str] = {}
+
+    async def start(self) -> None:
+        self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        self._stop.set()
+        if self._task is not None:
+            await self._task
+
+    async def _loop(self) -> None:
+        last_beat = 0.0
+        while not self._stop.is_set():
+            for target, state in self.probe.drain_dirty().items():
+                await self._emit(target, state)
+            loop_time = asyncio.get_running_loop().time()
+            if loop_time - last_beat >= self.heartbeat_interval_s:
+                last_beat = loop_time
+                for target, state in self.probe.snapshot().items():
+                    await self._emit(target, state)
+            await asyncio.sleep(0.05)
+
+    async def _emit(self, target: HealthTarget, state: _TargetState) -> None:
+        if state.status == HealthStatus.HEALTHY:
+            level = Level.INFO
+        elif state.status == HealthStatus.DEGRADED:
+            level = Level.WARN
+        else:
+            level = Level.ERROR
+        payload: dict[str, Any] = {
+            "check_target": target.value,
+            "status": state.status.value,
+        }
+        if state.last_msg_age_ms is not None:
+            payload["last_msg_age_ms"] = state.last_msg_age_ms
+        if state.reconnect_count_last_hour is not None:
+            payload["reconnect_count_last_hour"] = state.reconnect_count_last_hour
+        if state.latency_ms is not None:
+            payload["latency_ms"] = state.latency_ms
+        if state.error_message:
+            payload["error_message"] = state.error_message
+        await self._events.emit({
+            "timestamp": datetime.now(UTC).isoformat(),
+            "level": level.value,
+            "phase": self.phase.value,
+            "strategy": None, "cell": None,
+            "event_type": EventType.HEALTH_CHECK.value,
+            "correlation_id": str(uuid4()),
+            "payload": payload,
+        })
+
+    async def scan_staleness(self) -> list[dict[str, Any]]:
+        """Check last_active_ts for each sub-task. Emit + return records for
+        any stale. Raises FatalError on 3× threshold breach for liveness
+        sub-tasks (and unknown keys); activity-class sub-tasks (executor,
+        safety_chain, writer_lock) and dependency-freshness sub-tasks (ws_data,
+        db) emit on a severity transition but never escalate. Each scan also
+        marks every stale recorded dependency not ready in the readiness state
+        (``core.health.dependency_is_stale``, the rule HeartbeatGuard uses). It
+        never clears one: the dependency's next successful answer does that at
+        once (``apps.runtime.freshness.dependency_answered``), and a dependency never recorded
+        is already not ready from boot (TradingReadiness ``dependencies``).
+
+        SIGNAL_PIPELINE carve-out (Phase 4.3 Task 5):
+        Per-cell pipeline state is tracked separately in
+        probe.cell_pipeline_status (keyed by pair_id). These cells represent
+        expected sparseness (Bitfinex p30 channel physics), NOT system failure
+        — reason=stale_exceeded NEVER escalates to FatalError. The carve-out
+        is structural: SIGNAL_PIPELINE is never registered in last_active_ts,
+        so the fatal escalation path physically cannot touch it. Instead, a
+        separate read-only pass emits observability events for degraded cells
+        but always returns without raising.
+
+        Returns: list of {sub_task, severity, age_s} for stale tasks (for
+                 inspection / test). Tasks under threshold are not included.
+                 SIGNAL_PIPELINE cells appear as
+                 {sub_task: "SIGNAL_PIPELINE:<pair_id>", severity: "degraded"|"down",
+                  age_s: None} — never with severity "fatal".
+        """
+        now = datetime.now(UTC)
+        stale: list[dict[str, Any]] = []
+
+        # ── Existing per-sub-task heartbeat scan ──────────────────────────────
+        # FatalError CAN be raised here only for a hung liveness task (or an
+        # unknown key). SIGNAL_PIPELINE keys are never inserted into
+        # last_active_ts so they are physically excluded from this path.
+        for sub_task, last_ts in list(self.probe.last_active_ts.items()):
+            threshold = SUB_TASK_THRESHOLDS.get(sub_task, _DEFAULT_THRESHOLD_S)
+            age_s = (now - last_ts).total_seconds()
+            non_fatal = sub_task in NON_FATAL_SUB_TASKS
+            # Dependencies use the one rule HeartbeatGuard applies, so /readyz and
+            # the submit gate flip on the same beat age.
+            fresh = (not dependency_is_stale(sub_task, last_ts, now)
+                     if sub_task in DEPENDENCY_THRESHOLDS else age_s <= threshold)
+            if fresh:
+                # Recovered (or never stale): reset transition state so a later
+                # re-staleness re-emits the healthy→degraded transition.
+                if non_fatal:
+                    self._last_nonfatal_severity.pop(sub_task, None)
+                continue
+            if sub_task in DEPENDENCY_THRESHOLDS and self._readiness is not None:
+                self._readiness.set_dependency_stale(sub_task)
+
+            severity = "down" if age_s > 2 * threshold else "degraded"
+            stale.append({
+                "sub_task": sub_task,
+                "severity": severity,
+                "age_s": age_s,
+            })
+
+            # Non-fatal sub-tasks (activity and dependency freshness) emit only
+            # on a severity TRANSITION. A persistently stale executor in an idle
+            # market, or a venue outage of hours, would otherwise spam one WARN
+            # per scan (~30s) — pure noise, since these never escalate to
+            # FatalError. Liveness sub-tasks still emit every scan: they escalate
+            # at 3× threshold (restart), so the repeated emits are short-lived and
+            # show the climbing age.
+            if non_fatal:
+                if self._last_nonfatal_severity.get(sub_task) == severity:
+                    continue
+                self._last_nonfatal_severity[sub_task] = severity
+
+            # Emit BEFORE potential fatal escalation so the event is persisted before raise
+            level = Level.ERROR if severity == "down" else Level.WARN
+            status = HealthStatus.DOWN if severity == "down" else HealthStatus.DEGRADED
+            await self._events.emit({
+                "timestamp": now.isoformat(),
+                "level": level.value,
+                "phase": self.phase.value,
+                "strategy": None, "cell": None,
+                "event_type": EventType.HEALTH_CHECK.value,
+                "correlation_id": str(uuid4()),
+                "payload": {
+                    "check_target": sub_task,
+                    "status": status.value,
+                    "last_msg_age_ms": int(age_s * 1000),
+                    "error_message": f"heartbeat stale {age_s:.0f}s > {threshold}s threshold",
+                },
+            })
+
+            # Escalate to fatal AFTER emit, so the event is persisted before raise.
+            # Activity-class sub-tasks never escalate — a stale executor means
+            # "no trades flowed", not a stuck process; dependency freshness never
+            # escalates — a restart cannot bring the venue or the database back.
+            # Liveness sub-tasks and unknown keys (default threshold) still
+            # escalate so a genuinely hung own-loop task triggers restart.
+            if age_s > 3 * threshold and not non_fatal:
+                raise FatalError(
+                    f"sub_task={sub_task} stale {age_s:.0f}s > "
+                    f"3× threshold ({3 * threshold}s) — escalating fatal"
+                )
+
+        # ── SIGNAL_PIPELINE per-cell scan (carve-out: NEVER raises FatalError) ─
+        # Reads cell_pipeline_status populated by daemon LOCF emit path (Task 4).
+        # reason=stale_exceeded is expected sparseness — spec explicitly prohibits
+        # fatal escalation regardless of how long the cell has been DEGRADED.
+        # We emit a WARN for observability but always continue without escalating.
+        for pair_id, cell_status in self.probe.cell_pipeline_status.items():
+            if cell_status in (HealthStatus.DEGRADED, HealthStatus.DOWN):
+                severity = cell_status.value  # "degraded" or "down"
+                stale.append({
+                    "sub_task": f"SIGNAL_PIPELINE:{pair_id}",
+                    "severity": severity,
+                    "age_s": None,  # wall-clock age not tracked here; daemon owns TTL
+                })
+                await self._events.emit({
+                    "timestamp": now.isoformat(),
+                    "level": Level.WARN.value,
+                    "phase": self.phase.value,
+                    "strategy": None, "cell": pair_id,
+                    "event_type": EventType.HEALTH_CHECK.value,
+                    "correlation_id": str(uuid4()),
+                    "payload": {
+                        "check_target": HealthTarget.SIGNAL_PIPELINE.value,
+                        "status": severity,
+                        "error_message": (
+                            f"pair_id={pair_id} pipeline {cell_status.value.upper()} "
+                            "(stale_exceeded — expected sparseness, not escalating)"
+                        ),
+                    },
+                })
+                # NOTE: no FatalError here — spec carve-out for stale_exceeded
+
+        return stale

@@ -33,18 +33,17 @@ import pytest
 from sqlalchemy import func, select, text
 
 from bfx_funding_bot.apps import bot
-from bfx_funding_bot.apps.venue import VenueSeam
 from bfx_funding_bot.core.errors import EXIT_CODE_AUTH_FAILED
 from bfx_funding_bot.modules.execution.protocols import Credentials
-from bfx_funding_bot.modules.execution.safety.trading_state import read_current
+from bfx_funding_bot.modules.execution.safety.trading_state_store import read_current
 from bfx_funding_bot.modules.ledger.matching import UNKNOWN_SETTLE_MS
 from bfx_funding_bot.modules.ledger.tables import (
     ExecutionResolutionJournalRow,
     TransportOutcomeJournalRow,
 )
 from bfx_funding_bot.modules.simulated_venue import FaultKind, FaultPlan, FaultRule, FaultTarget
+from tests.apps.runtime.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
 from tests.async_wait import until
-from tests.modules.marketfeed.account_test_helpers import TEST_EXCHANGE_ACCOUNT_ID
 
 from . import test_ledger_schema_roles as _schema_roles
 from .sim_daemon import HOUR, SCOPE, T0, close_sim_env, make_sim_env
@@ -115,11 +114,8 @@ async def test_a_submit_refused_for_the_key_exits_78_and_its_unknown_resolves_on
 
         # -- process 2: the restart on the still-refused key holds in recovery mode ---------
         stop = asyncio.Event()
-        second = await compose(
-            cells_yaml_path=sim.cells_path, skip_ws=True, stop_event=stop,
-            venue_seam=VenueSeam(feed=sim.feed, client_credentials=REVOKED))
-        sim.daemons.append(second)
-        sim.give_the_bot_a_book(second)
+        monkeypatch.setattr(bot, "build_daemon", compose)
+        second = await sim.build(client_credentials=REVOKED, stop_event=stop)
 
         async def built_second(**_kw: Any) -> Any:
             return second
@@ -148,8 +144,7 @@ async def test_a_submit_refused_for_the_key_exits_78_and_its_unknown_resolves_on
             resolutions = (await session.execute(select(
                 ExecutionResolutionJournalRow.actor_kind, ExecutionResolutionJournalRow.actor_id,
                 ExecutionResolutionJournalRow.action))).all()
-            state = await read_current(session, account_id=TEST_EXCHANGE_ACCOUNT_ID,
-                                       environment="ci")
+            state = await read_current(session, account_id=TEST_EXCHANGE_ACCOUNT_ID)
         assert [tuple(r) for r in resolutions] == [("system", "system:reconcile", "not_accepted")]
         # No HALTED was written on the way: the account is still ACTIVE and trades again.
         assert await _states(sim.factory) == activated

@@ -42,9 +42,7 @@ from bfx_funding_bot.modules.simulated_venue.events import (
     SCHEMA_VERSION,
     BookObserved,
     CreditClosed,
-    FaultInjected,
     InterestPaid,
-    InternalFailureRecorded,
     LoanDrawn,
     NonceAdvanced,
     OfferCanceled,
@@ -52,7 +50,6 @@ from bfx_funding_bot.modules.simulated_venue.events import (
     OfferPlaced,
     TradesObserved,
     TradeTick,
-    UnexpectedRequestRecorded,
     VenueEvent,
     WalletFunded,
 )
@@ -70,7 +67,6 @@ from tests.modules.simulated_venue.helpers import (
 from tests.pg_templates import (
     LAST_REVERSIBLE_REVISION,
     alembic,
-    disable_realm_triggers,
     stamp_realm,
     template_at,
 )
@@ -81,8 +77,7 @@ from .test_trading_state_migration import _reset
 pytestmark = pytest.mark.integration
 
 D = Decimal
-OTHER = SimAccount("aaaaaaaa-bbbb-4ccc-8ddd-000000000002", "ci")
-SHADOW = SimAccount(ACCOUNT.exchange_account_id, "shadow")
+OTHER = SimAccount("aaaaaaaa-bbbb-4ccc-8ddd-000000000002")
 
 
 def _prepare(url: str) -> None:
@@ -193,20 +188,13 @@ async def test_open_refuses_a_database_stamped_prod(pg_templates: Any, pg_clone:
         await engine.dispose()
 
 
-@pytest.mark.parametrize("realm", ["shadow", "ci"])
-async def test_open_accepts_a_simulation_realm_and_the_trigger_binds_the_account(
-    pg_templates: Any, pg_clone: Any, realm: str
-) -> None:
-    engine = _engine(_database_stamped(pg_templates, pg_clone, realm))
+async def test_open_accepts_the_ci_realm(pg_templates: Any, pg_clone: Any) -> None:
+    engine = _engine(_database_stamped(pg_templates, pg_clone, "ci"))
     try:
         store = await SqlVenueEventStore.open(engine)
-        own = SimAccount(ACCOUNT.exchange_account_id, realm)
-        foreign = SimAccount(ACCOUNT.exchange_account_id, "ci" if realm == "shadow" else "shadow")
+        own = SimAccount(ACCOUNT.exchange_account_id)
         await store.append(own, 0, _funded(1))
-        with pytest.raises(VenueStoreError, match="refuses a write of realm"):
-            await store.append(foreign, 0, _funded(2))
         assert len(await store.load(own)) == 1
-        assert await store.load(foreign) == ()
     finally:
         await engine.dispose()
 
@@ -285,12 +273,6 @@ def _every_event_type() -> list[VenueEvent]:
         OfferCanceled(40_000_002, T0 + HOUR),
         CreditClosed("credit", 70_000_001, T0 + 3 * HOUR, "expired"),
         InterestPaid(80_000_001, "UST", D("0.12345678"), D("1000.62345678"), T0 + 5 * HOUR),
-        FaultInjected("unknown_placed_lost", "submit", 7, 1_700_000_000_000_002, "fUST", D("150"),
-                      D("0.0002"), 2, T0 + 6 * HOUR),
-        FaultInjected("history_error", "history", 8, 1_700_000_000_000_003, None, None, None, None,
-                      T0 + 6 * HOUR),
-        InternalFailureRecorded("feed", "feed trades failed", T0 + 6 * HOUR),
-        UnexpectedRequestRecorded("GET", "https://example.test/x", T0 + 6 * HOUR),
     ]
 
 
@@ -345,7 +327,6 @@ async def test_scopes_are_disjoint(store: SqlVenueEventStore) -> None:
     await store.append(OTHER, 0, _funded(2) + _funded(3))
     assert [e.amount for e in await store.load(ACCOUNT)] == [D(1)]  # type: ignore[union-attr]
     assert [e.amount for e in await store.load(OTHER)] == [D(2), D(3)]  # type: ignore[union-attr]
-    assert await store.load(SHADOW) == ()  # the same account id in another realm is another scope
     with pytest.raises(ConcurrentAppendError):
         await store.append(ACCOUNT, 2, _funded(5))  # the other scopes' lengths are not its own
 
@@ -369,24 +350,15 @@ async def test_concurrent_multi_event_writers_never_interleave(store: SqlVenueEv
 
 
 async def test_a_database_refusal_is_a_store_error_not_a_lost_race(
-        store: SqlVenueEventStore, ledger_url: str) -> None:
-    # Bypass SimAccount's own refusal: the database stamp is the next line of defence and the
-    # realm CHECK the last (the trigger is switched off to reach it).
+        store: SqlVenueEventStore) -> None:
+    # Bypass SimAccount's own refusal of an empty account: the table's CHECK refuses the row,
+    # and a refusal that is not the append race's unique violation is a store error.
     class Forged:
-        exchange_account_id = "forged"
-        deployment_environment = "prod"
+        exchange_account_id = ""
 
-    with pytest.raises(VenueStoreError) as caught:
+    with pytest.raises(VenueStoreError, match="ck_sim_venue_event_account") as caught:
         await store.append(Forged(), 0, _funded(1))  # type: ignore[arg-type]
     assert not isinstance(caught.value, ConcurrentAppendError)
-    assert "database realm ci refuses a write of realm prod" in str(caught.value)
-    owner = create_engine(ledger_url)
-    try:
-        disable_realm_triggers(owner)
-    finally:
-        owner.dispose()
-    with pytest.raises(VenueStoreError, match="ck_sim_venue_event_realm"):
-        await store.append(Forged(), 0, _funded(1))  # type: ignore[arg-type]
 
 
 # -- the venue over the store ----------------------------------------------------------

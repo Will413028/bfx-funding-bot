@@ -88,3 +88,11 @@ D2 讓 integration `needs` unit，失敗的 unit 不會再花 integration 的時
 ### Revocation Trigger
 
 repo 轉為 private（Actions 分鐘計費）或 unit 失敗率高到並行的 integration 浪費明顯時，恢復 `needs`。
+
+## Amendment (2026-11-08): realm `shadow` 移除
+
+D1 的 `DeploymentEnvironment` 列舉改為 `{prod, ci}`：soak 退役後沒有寫入者，`shadow` 這個值與它的 CHECK、config guard 一起移除，見 [2026-11-08-remove-the-shadow-realm](2026-11-08-remove-the-shadow-realm.md)。本檔提到 `shadow` realm 的段落只是歷史紀錄。
+
+## Amendment (2026-11-12): 每列的 `deployment_environment` 標記被取代
+
+D1 的「每一列帶 `deployment_environment`、讀寫兩端以它過濾」不再成立：一個資料庫只有一個 realm（`database_realm` stamp），live 表的本欄與逐列的 realm trigger 由 migration `545b2877e9bd` 拿掉，env 值改由組裝處注入，見 [2026-11-08-drop-realm-columns](2026-11-08-drop-realm-columns.md)。`BFX_DEPLOYMENT_ENV`、`DeploymentEnvironment` 與 backend CI gate 的部分照舊。本檔提到每列標記的段落只是歷史紀錄。

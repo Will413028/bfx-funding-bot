@@ -19,7 +19,7 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -33,8 +33,11 @@ from bfx_funding_bot.modules.execution.command_boundary import (
 from bfx_funding_bot.modules.execution.contracts import ReadyToSubmit
 from bfx_funding_bot.modules.ledger import (
     Authorized,
+    CancelAdmitted,
     CommandAttempt,
     CommandOutcome,
+    CommandRefused,
+    LockedCancelGuard,
     LockedCommandGuard,
     Scope,
 )
@@ -128,9 +131,9 @@ def label(record: Record) -> str:
 class Recording:
     """What the gate made durable, as the ordered journal transactions it asked for."""
 
-    def __init__(self, *, environment: str, account_id: UUID,
+    def __init__(self, *, account_id: UUID,
                  on_record: Callable[[Record], None] | None = None) -> None:
-        self.scope = Scope(account_id, environment)
+        self.scope = Scope(account_id)
         self.txns: list[tuple[Record, ...]] = []
         self.attempts: dict[str, CommandAttempt] = {}
         # What the effects were told after each outcome committed.
@@ -140,6 +143,9 @@ class Recording:
         self.allow_unknown_commit: asyncio.Event | None = None
         self._on_record = on_record
         self.offers = _Offers()
+        # What ``admit_cancel`` answers; a cancel test sets it (submit tests leave it None).
+        self.cancel_admission: CancelAdmitted | CommandRefused | None = None
+        self.cancels_admitted: list[str] = []
 
     @property
     def records(self) -> list[Record]:
@@ -194,8 +200,17 @@ class _Journal:
     async def read_back_outcome(self, scope: Scope, attempt_id: UUID) -> CommandOutcome | None:
         return None
 
-    async def admit_cancel(self, *args: object, **kwargs: object) -> object:
-        raise NotImplementedError("the gate contract tests only submit")
+    async def admit_cancel(
+        self, session: object, scope: Scope, venue_offer_id: str,
+        *, now_ms: int, locked_guard: LockedCancelGuard,
+    ) -> CancelAdmitted | CommandRefused:
+        admission = self._r.cancel_admission
+        if admission is None:
+            raise NotImplementedError("set Recording.cancel_admission to admit a cancel")
+        if isinstance(admission, CancelAdmitted):
+            await locked_guard(cast(Any, session), admission)
+            self._r.cancels_admitted.append(venue_offer_id)
+        return admission
 
 
 class _Effects:

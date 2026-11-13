@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 import bfx_funding_bot.modules.candles.tables
 import bfx_funding_bot.modules.lending.tracking.tables
-import bfx_funding_bot.modules.marketfeed.tables  # noqa: F401
+import bfx_funding_bot.modules.market.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.lending.tracking.book_replay import BOOK_MODEL_VERSION
@@ -18,7 +18,7 @@ from bfx_funding_bot.modules.lending.tracking.tables import (
     FillRateModelArtifactRow,
     FillRateStatsRow,
 )
-from bfx_funding_bot.modules.marketfeed.tables import FundingBookSnapshotRow
+from bfx_funding_bot.modules.market.tables import FundingBookSnapshotRow
 from scripts.learn_book_fill_rate import learn_book_and_store
 from scripts.learn_fill_rate import _MODEL_VERSION, build_fill_model_artifact
 

@@ -31,7 +31,7 @@ from bfx_funding_bot.modules.market.book_period_coverage import (
     snapshot_from_payload,
     summarize_period_coverage,
 )
-from bfx_funding_bot.modules.marketfeed.tables import FundingBookSnapshotRow
+from bfx_funding_bot.modules.market.tables import FundingBookSnapshotRow
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:

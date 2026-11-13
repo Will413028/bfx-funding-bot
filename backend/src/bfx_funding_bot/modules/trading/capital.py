@@ -43,7 +43,6 @@ _ZERO = Decimal("0")
 @dataclass(frozen=True, slots=True)
 class CapitalScope:
     account_id: UUID
-    environment: str
     symbol: str
     cell_id: str
 
@@ -53,7 +52,6 @@ class AppliedPolicy:
     """Policy and its scope/revision identity; loader proves head consistency."""
 
     account_id: UUID
-    environment: str
     symbol: str
     revision: int
     digest: str
@@ -106,7 +104,6 @@ class AcceptedCapitalBasis:
     """
 
     account_id: UUID
-    environment: str
     observation_id: UUID
     query_id: UUID
     attempt_seq_high_water: int
@@ -157,7 +154,6 @@ class UncertaintyFact:
 
     uncertainty_id: UUID
     account_id: UUID
-    environment: str
     symbol: str
     is_open: bool
 
@@ -221,15 +217,14 @@ def derive_capital(
     Freshness uses query *start* and inclusive bounds. Budget evaluation uses
     the same pure evaluator as the live authority.
     """
-    identity = (scope.account_id, scope.environment)
     # Policy first: a blocked or foreign policy decides before any basis is read.
     if isinstance(policy, Blocked):
         return policy
-    if (policy.account_id, policy.environment, policy.symbol) != (*identity, scope.symbol):
+    if (policy.account_id, policy.symbol) != (scope.account_id, scope.symbol):
         return Blocked("inconsistent_policy_pointer", (("scope", "policy"),))
     # Then open uncertainty of this symbol, before the basis.
     for uncertainty in uncertainties:
-        if (uncertainty.account_id, uncertainty.environment) != identity:
+        if uncertainty.account_id != scope.account_id:
             return Blocked("uncertainty_scope_conflict", (("id", str(uncertainty.uncertainty_id)),))
         if uncertainty.is_open and uncertainty.symbol == scope.symbol:
             return Blocked("execution_unknown", (("uncertainty", str(uncertainty.uncertainty_id)),))
@@ -237,7 +232,7 @@ def derive_capital(
         return read_context.integrity_block
     if accepted is None:
         return Blocked("snapshot_unavailable", ())
-    if (accepted.account_id, accepted.environment) != identity:
+    if accepted.account_id != scope.account_id:
         return Blocked("snapshot_evidence_conflict", (("scope", "accepted"),))
     # A newer query than the accepted one is still being observed.
     if read_context.latest_query_id != accepted.query_id:
@@ -274,7 +269,7 @@ def derive_capital(
     seen: set[UUID] = set()
     for attempt in attempts:
         evidence = (("attempt", str(attempt.attempt_id)),)
-        if (attempt.scope.account_id, attempt.scope.environment) != identity:
+        if attempt.scope.account_id != scope.account_id:
             return Blocked("attempt_intent_scope_conflict", evidence)
         if attempt.attempt_id in seen:
             return Blocked("duplicate_attempt_intent", evidence)

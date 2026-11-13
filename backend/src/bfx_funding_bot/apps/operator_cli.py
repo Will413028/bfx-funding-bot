@@ -44,6 +44,8 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+# Every table, so a foreign key to another module's table resolves at flush (apps/schema.py).
+import bfx_funding_bot.apps.schema  # noqa: F401
 from bfx_funding_bot.core.authority import AuthorityMismatch, require_ledger_authority
 from bfx_funding_bot.core.db import make_async_engine_from_url, make_session_factory
 from bfx_funding_bot.core.schema_head import SchemaHeadMismatch, assert_schema_head
@@ -59,12 +61,12 @@ from bfx_funding_bot.modules.execution.uncertainty_tables import (
     UncertaintyResolutionRequestRow,
 )
 from bfx_funding_bot.modules.ledger import observation_evidence_ref
-from bfx_funding_bot.modules.ledger.wiring import (
+from bfx_funding_bot.modules.ledger.read import (
     build_operator_evidence,
     build_operator_reads,
-    build_operator_resolution,
-    build_policy_store,
+    build_policy_reader,
 )
+from bfx_funding_bot.modules.ledger.wiring import build_operator_resolution
 
 EXIT: Final = {
     "ok": 0,  # read, applied, or queued with --no-wait
@@ -202,8 +204,8 @@ async def _read_request(session: AsyncSession, context: OperatorContext, kind: s
         await commands.get_resolution_request(session, context, request_id))
 
 
-async def _queue(session: AsyncSession, context: OperatorContext,
-                 args: argparse.Namespace, credential: EnteredCredential | None) -> Queued:
+async def _queue(session: AsyncSession, context: OperatorContext, args: argparse.Namespace,
+                 credential: EnteredCredential | None) -> Queued:
     now_ms = int(time.time() * 1000)
     if args.command == "rotate-credential":
         if credential is None:
@@ -238,7 +240,7 @@ async def _read(session: AsyncSession, context: OperatorContext,
                 args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "status":
         return await commands.trading_overview(
-            session, context, build_policy_store(context.scope))
+            session, context, build_policy_reader(context.scope))
     if args.command == "uncertainties":
         details = await commands.list_uncertainties(
             session, context, build_operator_reads(), build_operator_evidence(),

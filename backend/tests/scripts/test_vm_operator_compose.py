@@ -38,7 +38,6 @@ FAKE_ENV = {
     "BFX_BACKEND_DIGEST": DIGEST,
     "BFX_SOURCE_REVISION": "b" * 40,
     "BFX_OPERATOR_TAILNET_IDENTITY": "operator@example.test",
-    "BFX_DEPLOYMENT_ENV": "prod",
 }
 
 

@@ -35,7 +35,8 @@ Thumbs.db
 *.swo
 
 # Claude Code local state (scheduled tasks, session locks, etc.)
-.claude/
+.claude/*
+!.claude/rules/
 
 # Other agent tool local state (not part of repo)
 .agents/
@@ -96,3 +97,8 @@ htmlcov/
 /ROADMAP.md
 /docs/deploy/
 /docs/reports/
+
+# Local tool output: mutmut's mutants, agent worktrees and state (never commit; the mutation
+# sandbox copies untracked, non-ignored files, so these must stay ignored)
+mutants/
+.local/

@@ -36,7 +36,7 @@ def _views(
         enabled=True, reserve_amount=D(reserve), max_cell_fraction=D(fraction),
         max_offer_amount=None if ceiling is None else D(ceiling),
     )
-    applied = AppliedPolicy(UUID(int=1), "test", "fUST", 1, "digest", UUID(int=2), policy)
+    applied = AppliedPolicy(UUID(int=1), "fUST", 1, "digest", UUID(int=2), policy)
     views = {}
     for cell, exposure in exposures.items():
         snapshot = CapitalSnapshot(D(available), D(commitments),

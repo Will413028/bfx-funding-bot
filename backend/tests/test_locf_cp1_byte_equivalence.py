@@ -1,7 +1,7 @@
 """Phase 4.3 CP1 byte-equivalence property tests for LOCF primitive.
 
 Hypothesis-driven 100-iter random input verification. Mirrors Phase 4.1 CP1
-property test pattern in tests/modules/marketfeed/test_divergence_reporter.py.
+property test pattern in tests/apps/runtime/test_divergence_reporter.py.
 """
 
 from decimal import Decimal

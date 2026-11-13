@@ -22,6 +22,7 @@ from bfx_funding_bot.modules.execution.safety.tables import (
     TradingControlRequestRow,
     TradingStateRow,
 )
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 from tests.ingress_support import attach_ingress, operator_headers
 
 pytestmark = pytest.mark.integration
@@ -33,7 +34,6 @@ AUTH = operator_headers("operator")
 async def _app(migrated_db, monkeypatch, *, role="owner"):
     from bfx_funding_bot.apps.read_models import build_read_models
     from bfx_funding_bot.modules.api.trading_control import build_trading_control_router
-    monkeypatch.setenv("BFX_DEPLOYMENT_ENV", "ci")
     monkeypatch.setenv("BFX_IMAGE_DIGEST", DIGEST)
     monkeypatch.setenv("BFX_SOURCE_REVISION", "c" * 40)
     factory, account = migrated_db
@@ -50,7 +50,7 @@ async def _queue_as_the_cli(factory, account, model, action: str, **columns) -> 
     """A request the operator CLI queued (as the owner here: the trigger lets it through)."""
     async with factory.begin() as session:
         assert await insert_request(session, model, {
-            "request_id": uuid4(), "exchange_account_id": account, "deployment_environment": "ci",
+            "request_id": uuid4(), "exchange_account_id": account,
             "action": action, "reason": "from the cli", "requested_by": "operator",
             "created_at_ms": 1, **columns})
 
@@ -160,9 +160,9 @@ async def test_a_kill_is_never_blocked_by_a_pending_resume(migrated_db, monkeypa
 @pytest.mark.asyncio
 async def test_the_overview_shows_the_state_and_the_cancel_all_of_the_halt(migrated_db, monkeypatch):
     from bfx_funding_bot.modules.execution.safety.tables import FundingCancelAllAuditRow
-    from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+    from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
     app, factory, account = await _app(migrated_db, monkeypatch)
-    repo = TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    repo = TradingStateRepository(factory, account_id=account, scope_lock=build_scope_lock())
     await repo.transition("ACTIVE", cause="operator", actor="operator", reason="start", now_ms=1)
     base = f"/api/v1/exchange-accounts/{account}/trading-control"
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
@@ -176,8 +176,7 @@ async def test_the_overview_shows_the_state_and_the_cancel_all_of_the_halt(migra
         async with factory.begin() as session:
             for currency, phase in (("UST", "requested"), ("UST", "acknowledged"),
                                     ("USD", "requested"), ("USD", "failed"), ("BTC", "requested")):
-                session.add(FundingCancelAllAuditRow(exchange_account_id=account, deployment_environment="ci",
-                    trading_state_id=halted.id, attempt_id=uuid4(), currency=currency, phase=phase,
+                session.add(FundingCancelAllAuditRow(exchange_account_id=account, trading_state_id=halted.id, attempt_id=uuid4(), currency=currency, phase=phase,
                     detail=None if phase != "failed" else "venue down", actor="operator", occurred_at_ms=3))
         data = (await client.get(base, headers=AUTH)).json()["data"]
         assert data["trading_state"]["state"] == "HALTED"
@@ -195,7 +194,7 @@ async def _seed_policies(factory, account):
     from bfx_funding_bot.modules.ledger import Scope
     from bfx_funding_bot.modules.ledger.wiring import build_policy_store
     from bfx_funding_bot.modules.trading import CapitalPolicy, OfferEnvelope
-    scope = Scope(account, "ci")
+    scope = Scope(account)
     envelope = OfferEnvelope(min_period_days=2, max_period_days=30, max_open_offers=6,
                              rate_floor_ratio=Decimal("0.5"), min_rate_apr=Decimal("0.01"))
     store = build_policy_store(scope)
@@ -243,8 +242,8 @@ async def test_an_unreadable_policy_is_that_currencys_policy_error(migrated_db, 
             "UPDATE capital_policy_heads SET revision = 2 WHERE exchange_account_id = :a "
             "AND symbol = 'fUST'"), {"a": account})
         await session.execute(text(
-            "INSERT INTO capital_policy_heads(exchange_account_id, deployment_environment, symbol, "
-            "revision_id, revision) SELECT exchange_account_id, deployment_environment, 'fEUR', "
+            "INSERT INTO capital_policy_heads(exchange_account_id, symbol, "
+            "revision_id, revision) SELECT exchange_account_id, 'fEUR', "
             "revision_id, revision FROM capital_policy_heads WHERE exchange_account_id = :a "
             "AND symbol = 'fUSD'"), {"a": account})
     base = f"/api/v1/exchange-accounts/{account}/trading-control"
@@ -291,7 +290,7 @@ async def test_a_currency_toggle_only_queues_a_request(migrated_db, monkeypatch)
     async with factory() as session:
         rows = (await session.scalars(select(CapitalPolicyRequestRow))).all()
         assert sorted(r.action for r in rows) == ["disable", "enable"]
-        head = await session.get(CapitalPolicyHeadRow, (account, "ci", "fUST"))
+        head = await session.get(CapitalPolicyHeadRow, (account, "fUST"))
         assert head.revision == 1  # the web API wrote no policy
 
 
@@ -336,7 +335,7 @@ async def test_reads_list_newest_first_and_name_no_effect(migrated_db, monkeypat
     app, factory, account = await _app(migrated_db, monkeypatch)
     await _seed_policies(factory, account)
     low, high = sorted([uuid4(), uuid4()])
-    common = {"exchange_account_id": account, "deployment_environment": "ci", "reason": "r",
+    common = {"exchange_account_id": account, "reason": "r",
               "requested_by": "operator", "created_at_ms": 7}
     async with factory.begin() as session:
         for request_id, action in ((low, "resume"), (high, "kill")):
@@ -383,14 +382,15 @@ async def test_a_currency_without_an_applied_policy_is_policy_unavailable(migrat
 
 
 @pytest.mark.asyncio
-async def test_membership_is_judged_before_the_deployment_environment(migrated_db, monkeypatch):
-    """A non-member learns nothing about the host: 404 even when the environment is unset."""
+async def test_account_routes_need_no_deployment_environment(migrated_db, monkeypatch):
+    """The web API reads no BFX_DEPLOYMENT_ENV: a member is served without it (this
+    answered 503 ``deployment_environment_not_configured`` before), a non-member gets 404."""
+    monkeypatch.delenv("BFX_DEPLOYMENT_ENV", raising=False)
     app, _factory, account = await _app(migrated_db, monkeypatch)
-    monkeypatch.delenv("BFX_DEPLOYMENT_ENV")
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
         other = await client.post(f"/api/v1/exchange-accounts/{uuid4()}/trading-control/kill",
                                   json={"reason": "x"}, headers=AUTH)
         own = await client.post(f"/api/v1/exchange-accounts/{account}/trading-control/kill",
                                 json={"reason": "x"}, headers=AUTH)
     assert (other.status_code, other.json()["detail"]) == (404, "not_found")
-    assert (own.status_code, own.json()["detail"]) == (503, "deployment_environment_not_configured")
+    assert own.status_code == 202, own.text

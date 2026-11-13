@@ -16,8 +16,8 @@ import pytest
 from sqlalchemy import text
 
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
-from bfx_funding_bot.modules.execution.safety.trading_state import (
-    IllegalTradingTransition,
+from bfx_funding_bot.modules.execution.safety.trading_state import IllegalTradingTransition
+from bfx_funding_bot.modules.execution.safety.trading_state_store import (
     check_transition,
     count_auto_resumes,
     read_current,
@@ -53,11 +53,11 @@ NEXT = list(itertools.product(STATES, CAUSES))
 # History is fixture data with chosen ages: the trigger would stamp automatic rows
 # with the database clock, so it is written with triggers off (id drawn as the
 # trigger would). Only the transition under test goes through the trigger.
-_HISTORY = text("""INSERT INTO trading_state (id, exchange_account_id, deployment_environment, state,
-    cause, actor, reason, created_at_ms) VALUES (nextval('trading_state_id_seq'), :a, :env, :state,
+_HISTORY = text("""INSERT INTO trading_state (id, exchange_account_id, state,
+    cause, actor, reason, created_at_ms) VALUES (nextval('trading_state_id_seq'), :a, :state,
     :cause, 'test', 'test', :at)""")
-_INSERT = text("""INSERT INTO trading_state (exchange_account_id, deployment_environment, state, cause,
-    actor, reason, created_at_ms) VALUES (:a, :env, :state, :cause, 'test', 'test', :at)""")
+_INSERT = text("""INSERT INTO trading_state (exchange_account_id, state, cause,
+    actor, reason, created_at_ms) VALUES (:a, :state, :cause, 'test', 'test', :at)""")
 
 
 @pytest.mark.asyncio
@@ -66,21 +66,19 @@ async def test_python_and_postgresql_refuse_the_same_transitions(migrated_db):
     disagreements = []
     database_verdicts = {}
     for (name, history), (state, cause) in itertools.product(HISTORIES.items(), NEXT):
-        # One scope per case: a fresh account in the database's own realm (the realm stamp
-        # forbids inventing a realm per case).
-        account, env = uuid4(), "ci"
+        # One scope per case: a fresh account.
+        account = uuid4()
         now_ms = int(time.time() * 1000)
         async with factory.begin() as session:
             session.add(ExchangeAccount(id=account, venue="bitfinex", label="parity"))
         async with factory.begin() as session:
             await session.execute(text("SET LOCAL session_replication_role = replica"))
             for row_state, row_cause, minutes_ago in history:
-                await session.execute(_HISTORY, {"a": account, "env": env, "state": row_state,
+                await session.execute(_HISTORY, {"a": account, "state": row_state,
                                                 "cause": row_cause, "at": now_ms - minutes_ago * MIN})
         async with factory() as session:
-            current = await read_current(session, account_id=account, environment=env)
-            resumes = await count_auto_resumes(session, account_id=account, environment=env,
-                                               now_ms=now_ms)
+            current = await read_current(session, account_id=account)
+            resumes = await count_auto_resumes(session, account_id=account, now_ms=now_ms)
         try:
             await check_transition(current=current, state=state, cause=cause, actor="test",
                                    reason="test", now_ms=now_ms, auto_resumes_in_window=resumes)
@@ -89,7 +87,7 @@ async def test_python_and_postgresql_refuse_the_same_transitions(migrated_db):
             python_refuses = True
         try:
             async with factory.begin() as session:
-                await session.execute(_INSERT, {"a": account, "env": env, "state": state,
+                await session.execute(_INSERT, {"a": account, "state": state,
                                                 "cause": cause, "at": now_ms})
             database_refuses = False
         except Exception:

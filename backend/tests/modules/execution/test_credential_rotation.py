@@ -50,6 +50,7 @@ from bfx_funding_bot.modules.execution.credential_rotation import (
 )
 from bfx_funding_bot.modules.execution.operator_commands import OperatorContext
 from bfx_funding_bot.modules.execution.protocols import AccountContext
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 from bfx_funding_bot.modules.observability.tables import BotRunRow
 
 ACCOUNT = UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
@@ -68,7 +69,7 @@ FUNDING_ONLY = KeyPermissions(scopes={"funding": (True, True), "account": (True,
 # Every table on Base.metadata, foreign-key targets included.
 importlib.import_module("bfx_funding_bot.apps.schema")
 CONTEXT = OperatorContext(exchange_account_id=ACCOUNT, user_id=OPERATOR, role="owner",
-                          lifecycle_status="active", deployment_environment=ENV)
+                          lifecycle_status="active")
 
 
 @dataclass
@@ -128,7 +129,7 @@ async def harness(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Harness]:
             verified_at=NOW - timedelta(days=30), bitfinex_user_id=USER_ID)
         session.add(old)
         session.add(BotRunRow(run_id=run_id, exchange_account_id=ACCOUNT,
-                              deployment_environment=ENV, started_at_ms=RUN_STARTED_MS,
+                              started_at_ms=RUN_STARTED_MS,
                               host_name="test", pid=1))
         await session.flush()
         old_id = old.id
@@ -145,9 +146,9 @@ async def harness(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Harness]:
 
     new_client, restarts = FakeClient(), []
     worker = CredentialRotationWorker(
-        session_factory=factory, account_id=ACCOUNT, environment=ENV, authority=authority,
+        session_factory=factory, account_id=ACCOUNT, authority=authority,
         client_factory=lambda: new_client,
-        kek_loader=lambda: KEK, restart=lambda: restarts.append(1), clock=lambda: NOW_MS)
+        kek_loader=lambda: KEK, restart=lambda: restarts.append(1), clock=lambda: NOW_MS, scope_lock=build_scope_lock())
     worker.bind_run(run_id, RUN_STARTED_MS)
     await worker.idle()
     try:
@@ -406,9 +407,9 @@ async def test_the_recipient_is_published_once_and_a_failure_is_retried(harness,
             raise RuntimeError("database down")
 
     worker = CredentialRotationWorker(
-        session_factory=Broken(), account_id=ACCOUNT, environment=ENV,
+        session_factory=Broken(), account_id=ACCOUNT,
         authority=h.worker.authority, client_factory=lambda: h.new_client,
-        kek_loader=lambda: KEK, restart=lambda: None, clock=lambda: NOW_MS)
+        kek_loader=lambda: KEK, restart=lambda: None, clock=lambda: NOW_MS, scope_lock=build_scope_lock())
     await worker.idle()  # no run bound yet: nothing to publish
     worker.bind_run(uuid4(), RUN_STARTED_MS)
     with caplog.at_level(logging.WARNING):
@@ -543,9 +544,9 @@ def _process_after(h: Harness, run_started_ms: int) -> CredentialRotationWorker:
     """Another worker of the same account, as a process whose run started then."""
     restarts = h.restarts
     worker = CredentialRotationWorker(
-        session_factory=h.factory, account_id=ACCOUNT, environment=ENV,
+        session_factory=h.factory, account_id=ACCOUNT,
         authority=h.worker.authority, client_factory=lambda: h.new_client,
-        kek_loader=lambda: KEK, restart=lambda: restarts.append(2), clock=lambda: NOW_MS)
+        kek_loader=lambda: KEK, restart=lambda: restarts.append(2), clock=lambda: NOW_MS, scope_lock=build_scope_lock())
     worker.bind_run(uuid4(), run_started_ms)
     return worker
 

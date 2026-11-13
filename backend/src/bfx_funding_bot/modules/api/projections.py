@@ -34,7 +34,7 @@ def build_projections_router() -> APIRouter:
         models: ReadModels = Depends(get_read_models),  # noqa: B008
     ) -> Envelope[list[PositionResponse]]:
         views = await models.operator_reads.list_positions(
-            session, Scope(context.exchange_account_id, context.deployment_environment)
+            session, Scope(context.exchange_account_id)
         )
         return Envelope(data=[
                 PositionResponse(
@@ -63,7 +63,7 @@ def build_projections_router() -> APIRouter:
     ) -> Envelope[list[OfferClaimResponse]]:
         views = await models.operator_reads.list_offers(
             session,
-            Scope(context.exchange_account_id, context.deployment_environment),
+            Scope(context.exchange_account_id),
             states=_ACTIVE_CLAIM_STATES if state is None else (state,),
         )
         return Envelope(data=[
@@ -91,7 +91,7 @@ def build_projections_router() -> APIRouter:
         try:
             page = await models.execution_history.list_executions(
                 session,
-                Scope(context.exchange_account_id, context.deployment_environment),
+                Scope(context.exchange_account_id),
                 before=before, limit=limit, event_type=event_type,
             )
         except ExecutionCursorError:

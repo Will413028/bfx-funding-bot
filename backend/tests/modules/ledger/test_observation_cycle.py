@@ -19,7 +19,7 @@ from bfx_funding_bot.modules.ledger import (
 from bfx_funding_bot.modules.ledger._internal import clock, journal, resolver
 from bfx_funding_bot.modules.ledger.wiring import build_observation_sink
 
-SCOPE = Scope(uuid4(), "ci")
+SCOPE = Scope(uuid4())
 
 
 class Factory:
@@ -151,7 +151,7 @@ async def test_cycle_passes_configured_dangling_grace(monkeypatch):
 async def test_close_dangling_respects_grace_boundary(sqlite_session, monkeypatch):
     await sqlite_session.execute(text(
         "CREATE TABLE submission_attempt_journal (attempt_id VARCHAR(32), attempt_seq INT, "
-        "exchange_account_id VARCHAR(32), deployment_environment TEXT, started_at_ms INT)"
+        "exchange_account_id VARCHAR(32), started_at_ms INT)"
     ))
     await sqlite_session.execute(text(
         "CREATE TABLE transport_outcome_journal (attempt_id VARCHAR(32))"
@@ -161,7 +161,7 @@ async def test_close_dangling_respects_grace_boundary(sqlite_session, monkeypatc
         (older, 179_999), (boundary, 180_000), (young, 180_001),
     ]):
         await sqlite_session.execute(text(
-            "INSERT INTO submission_attempt_journal VALUES (:id, :seq, :account, 'ci', :start)"
+            "INSERT INTO submission_attempt_journal VALUES (:id, :seq, :account, :start)"
         ), {"id": attempt_id.hex, "seq": seq, "account": SCOPE.exchange_account_id.hex, "start": started})
     monkeypatch.setattr(journal, "lock_scope", AsyncMock())
     record = AsyncMock()

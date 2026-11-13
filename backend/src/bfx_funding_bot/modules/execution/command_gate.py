@@ -14,7 +14,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from decimal import Decimal
-from typing import NoReturn, Protocol
+from typing import Literal, NoReturn, Protocol
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -25,28 +25,31 @@ from bfx_funding_bot.external.bitfinex.live_executor import (
     format_offer_amount,
     format_venue_decimal,
 )
+from bfx_funding_bot.external.bitfinex.order_port import (
+    CancelOutcome,
+    OfferRequest,
+    VenueOrderPort,
+)
 from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmissionAttemptPayload,
+    SubmitAcknowledged,
     SubmitCancelledNotSent,
     SubmitNotSent,
+    SubmitOutcome,
     SubmitOutcomeKind,
-    SubmitOutcomeUnknown,
     normalize_submit_payload,
 )
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
 from bfx_funding_bot.modules.execution.audit.tables import ExecutionDecisionRow
+from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary, CommandFacts
 from bfx_funding_bot.modules.execution.contracts import (
     GuardResult,
     ReadyToSubmit,
     ReservationRef,
 )
-from bfx_funding_bot.modules.execution.protocols import (
-    AccountContext,
-    CancelPort,
-    SubmittedOrder,
-    VenueExecutorPort,
-)
+from bfx_funding_bot.modules.execution.events import CancelAcknowledged, CancelRequested
+from bfx_funding_bot.modules.execution.protocols import AccountContext, SubmittedOrder
 from bfx_funding_bot.modules.execution.safety.protection import ProtectionPort
 from bfx_funding_bot.modules.ledger import (
     CancelAdmitted,
@@ -76,10 +79,6 @@ class CommandGateBlocked(RuntimeError):  # noqa: N818 - domain state, not a fail
     """The money command cannot safely proceed before creating an intent."""
 
 
-class _OutcomeIdentityMismatchError(RuntimeError):
-    """A venue result cannot safely be attributed to the intended command."""
-
-
 class CommandRateLimiter(Protocol):
     """Admits or refuses one venue write; never blocks (safety/pre_trade.CommandThrottle)."""
 
@@ -101,21 +100,19 @@ class AccountCommandGate:
 
     def __init__(
         self,
-        inner: VenueExecutorPort,
+        inner: VenueOrderPort,
         *,
+        bus: DomainEventBus,
         uncertainty_reader: UncertaintyReader,
         safety_evaluator: AuthoritativeSafetyEvaluator,
-        deployment_environment: str,
         boundary: CommandBoundary,
         managed_offers: ManagedOfferReader,
         clock: Callable[[], int] | None = None,
     ) -> None:
-        if not deployment_environment.strip():
-            raise ValueError("deployment_environment must be non-empty")
         self._inner = inner
+        self._bus = bus
         self._uncertainty_reader = uncertainty_reader
         self._safety_evaluator = safety_evaluator
-        self._deployment_environment = deployment_environment
         self._clock = clock or (lambda: int(time.time() * 1000))
         self._boundary = boundary
         self._offers = managed_offers
@@ -125,7 +122,7 @@ class AccountCommandGate:
         self.protection: ProtectionPort | None = None
         # Always-on venue write rate limit (T9); installed by the live daemon.
         self.throttle: CommandRateLimiter | None = None
-        self._account_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._account_locks: dict[str, asyncio.Lock] = {}
 
     @contextlib.asynccontextmanager
     async def quiesced(self, account_id: str, *, timeout_s: float) -> AsyncIterator[bool]:
@@ -138,7 +135,7 @@ class AccountCommandGate:
         Never call this while holding the same lock: it is not re-entrant.
         """
         lock = self._account_locks.setdefault(
-            (str(_canonical_account_id(account_id)), self._deployment_environment), asyncio.Lock(),
+            str(_canonical_account_id(account_id)), asyncio.Lock(),
         )
         try:
             await asyncio.wait_for(lock.acquire(), timeout=timeout_s)
@@ -160,7 +157,7 @@ class AccountCommandGate:
         account_id = _canonical_account_id(context.account_id)
         try:
             is_open = await self._uncertainty_reader.has_open(
-                None, Scope(account_id, self._deployment_environment), payload.symbol,
+                None, Scope(account_id), payload.symbol,
             )
         except Exception as exc:
             raise CommandGateBlocked("uncertainty guard unavailable") from exc
@@ -174,8 +171,7 @@ class AccountCommandGate:
         context: AccountContext,
     ) -> SubmittedOrder:
         account_id = _canonical_account_id(context.account_id)
-        lock_key = (str(account_id), self._deployment_environment)
-        lock = self._account_locks.setdefault(lock_key, asyncio.Lock())
+        lock = self._account_locks.setdefault(str(account_id), asyncio.Lock())
         async with lock:
             self._admit("submit")
             return await self._submit_locked(ready, context)
@@ -188,7 +184,8 @@ class AccountCommandGate:
         decision = ready.decision
         account_id = _canonical_account_id(context.account_id)
         # This boundary is the sole authority for a submit's reservation
-        # reference; the venue executor must echo it (see _bind_result).
+        # reference: the venue never sees it, and _submitted binds it to the
+        # venue offer on an acknowledgement.
         reference = ReservationRef(
             execution_decision_id=ready.decision_id,
             signal_correlation_id=decision.signal_correlation_id,
@@ -199,7 +196,6 @@ class AccountCommandGate:
             attempt_id=uuid4(),
             execution_decision_id=ready.decision_id,
             account_id=account_id,
-            environment=self._deployment_environment,
             symbol=decision.symbol,
             normalized_payload=_normalized_venue_payload(decision),
             started_at_ms=intent_ms,
@@ -211,7 +207,7 @@ class AccountCommandGate:
         view = ready.capital_view
         if view is None:
             raise CommandGateBlocked("capital_authority_missing")
-        if boundary.scope != Scope(account_id, self._deployment_environment):
+        if boundary.scope != Scope(account_id):
             raise CommandGateBlocked("capital_scope_conflict")
         async with boundary.session_factory.begin() as session:
             row = await session.get(ExecutionDecisionRow, ready.decision_id)
@@ -231,7 +227,7 @@ class AccountCommandGate:
                     raise CommandGateBlocked("amount_fingerprint_missing")
                 assert self._offers is not None  # required with a boundary
                 if fingerprint in await self._offers.fingerprints_in_use(
-                    locked, Scope(account_id, self._deployment_environment),
+                    locked, Scope(account_id),
                     decision.symbol,
                 ):
                     raise CommandGateBlocked("amount_fingerprint_collision")
@@ -262,16 +258,15 @@ class AccountCommandGate:
                                     symbol=decision.symbol, now_ms=self._clock())
                 except (ValueError, ArithmeticError) as exc:
                     raise CommandGateBlocked(str(exc)) from exc
+                offer = _offer_request(ready)
             except CommandGateBlocked as exc:
                 result = SubmittedOrder(outcome=SubmitNotSent(reason=str(exc)),
                                         reservation_ref=reference)
             else:
-                result = await self._inner.submit(
-                    ready, replace(context, before_submit_transport=(
-                        lambda: ready.book_valid_at(self._clock())
-                    )),
-                    reservation_ref=reference,
-                )
+                result = _submitted(await self._inner.submit(
+                    offer, context,
+                    pre_send=lambda: ready.book_valid_at(self._clock()),
+                ), reference)
         except SubmitCancelledNotSent as cancelled:
             # Cancelled before anything reached the venue: close the intent as
             # NOT_SENT so recovery need not escalate it, then keep cancelling.
@@ -290,27 +285,16 @@ class AccountCommandGate:
             raise  # shutting down: recovery turns the durable PENDING into UNKNOWN
         except BaseException as exc:
             self._outcome_lost(decision.symbol, "submit ended without durable outcome", exc)
-        try:
-            result = _bind_result(result, reference=reference)
-        except _OutcomeIdentityMismatchError:
-            # Transport completed, but the response cannot authoritatively be
-            # assigned to this intent. Persist the only safe typed outcome.
-            result = SubmittedOrder(
-                outcome=SubmitOutcomeUnknown(
-                    reason="executor_result_identity_mismatch",
-                    transport_started=True,
-                ),
-                reservation_ref=reference,
-            )
 
         outcome_ms = self._clock()
+        assert result.reservation_ref is not None  # every path above sets this gate's own
         try:
             await self._persist_outcome(
                 result,
                 attempt_id=attempt.attempt_id,
                 ready=ready,
                 context=context,
-                reference=result.reservation_ref or reference,
+                reference=result.reservation_ref,
                 size=size,
                 occurred_at_ms=outcome_ms,
             )
@@ -360,13 +344,9 @@ class AccountCommandGate:
         admission and again before every transport attempt.
         """
         boundary = self._boundary
-        if not isinstance(self._inner, CancelPort):
-            raise CommandGateBlocked("durable_cancel_unavailable")
-        if boundary.scope.deployment_environment != self._deployment_environment:
-            raise CommandGateBlocked("cancel_environment_conflict")
         if account_id != ctx.account_id or account_id != str(boundary.scope.exchange_account_id):
             raise CommandGateBlocked("cancel_account_conflict")
-        lock = self._account_locks.setdefault((account_id, self._deployment_environment), asyncio.Lock())
+        lock = self._account_locks.setdefault(account_id, asyncio.Lock())
         async with lock:
             self._admit("cancel")
             scope = boundary.scope
@@ -397,9 +377,28 @@ class AccountCommandGate:
                 await self._guard(probe, ctx, cancel=True)
 
             await before_transport()
-            await self._inner.cancel(venue_offer_id=venue_offer_id,
-                signal_correlation_id=signal_correlation_id, account_id=account_id,
-                ctx=replace(ctx, before_cancel_transport=before_transport))
+            await self._bus.publish(CancelRequested(
+                venue_offer_id=venue_offer_id,
+                requested_at_ms=self._clock(),
+                signal_correlation_id=signal_correlation_id,
+                account_id=account_id,
+            ))
+            result = await self._inner.cancel(
+                venue_offer_id, ctx, before_transport=before_transport,
+            )
+            if not result.outcome.acknowledged:
+                return  # the adapter logged it; nothing was acknowledged
+            rest_status: Literal["success", "already_terminal"] = (
+                "success" if result.outcome is CancelOutcome.SUCCESS else "already_terminal"
+            )
+            await self._bus.publish(CancelAcknowledged(
+                venue_offer_id=venue_offer_id,
+                acknowledged_at_ms=self._clock(),
+                signal_correlation_id=signal_correlation_id,
+                account_id=account_id,
+                rest_status=rest_status,
+                venue_response_text=result.text,
+            ))
 
     async def _persist_outcome(
         self,
@@ -413,7 +412,7 @@ class AccountCommandGate:
         occurred_at_ms: int,
     ) -> None:
         decision = ready.decision
-        scope = Scope(_canonical_account_id(context.account_id), self._deployment_environment)
+        scope = Scope(_canonical_account_id(context.account_id))
         secrets = (context.credentials.api_key, context.credentials.api_secret)
         kind = result.outcome_kind
         boundary = self._boundary
@@ -467,36 +466,33 @@ def _canonical_account_id(value: str) -> UUID:
         raise CommandGateBlocked("account identity is not canonical") from exc
 
 
-def _bind_result(
-    result: SubmittedOrder,
-    *,
-    reference: ReservationRef,
-) -> SubmittedOrder:
-    """Accept a venue result only if it names this gate's own intent.
+def _offer_request(ready: ReadyToSubmit) -> OfferRequest:
+    """The venue's request for this decision; invalid terms are refused before transport."""
+    decision = ready.decision
+    if (decision.offer_amount_usdt is None or decision.offer_rate is None
+            or decision.offer_duration_days is None):
+        raise CommandGateBlocked("invalid_submit_payload")
+    try:
+        return OfferRequest(
+            symbol=decision.symbol,
+            amount=decision.offer_amount_usdt,
+            rate=decision.offer_rate,
+            period_days=decision.offer_duration_days,
+            funding_amount_evidence=ready.funding_amount_evidence,
+        )
+    except ValueError as exc:
+        raise CommandGateBlocked(str(exc)) from exc
 
-    The executor must echo the reference it was given: the execution decision
-    id is 1:1 with the durable submission attempt, so a result without it, or
-    with another decision's identity, cannot be attributed to this intent.
-    """
-    returned = result.reservation_ref
-    if returned is None:
-        raise _OutcomeIdentityMismatchError("executor returned no reservation reference")
-    if (
-        returned.execution_decision_id != reference.execution_decision_id
-        or returned.signal_correlation_id != reference.signal_correlation_id
-    ):
-        raise _OutcomeIdentityMismatchError(
-            "executor returned a reservation reference identity conflict"
+
+def _submitted(outcome: SubmitOutcome, reference: ReservationRef) -> SubmittedOrder:
+    """This gate's result for its own intent: the reference it derived, bound to
+    the venue offer on an acknowledgement."""
+    if isinstance(outcome, SubmitAcknowledged):
+        return SubmittedOrder(
+            outcome=outcome,
+            reservation_ref=reference.bind_venue_offer(outcome.venue_offer_id),
         )
-    if returned.venue_offer_id is not None and returned.venue_offer_id != result.venue_offer_id:
-        raise _OutcomeIdentityMismatchError(
-            "executor returned a reservation reference venue conflict"
-        )
-    if result.venue_offer_id is None:
-        bound = reference
-    else:
-        bound = reference.bind_venue_offer(result.venue_offer_id)
-    return replace(result, reservation_ref=bound)
+    return SubmittedOrder(outcome=outcome, reservation_ref=reference)
 
 
 def _normalized_venue_payload(decision: DecisionPayload) -> dict[str, object]:

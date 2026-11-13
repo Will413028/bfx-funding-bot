@@ -33,7 +33,6 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.apps.config import CAPITAL_MAX_SNAPSHOT_AGE_MS
-from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.auth_rest import BitfinexAuthREST
 from bfx_funding_bot.external.bitfinex.live_executor import BitfinexLiveExecutor
 from bfx_funding_bot.external.bitfinex.nonce import AuthRequestGate
@@ -71,9 +70,9 @@ from bfx_funding_bot.modules.simulated_venue import (
     SqlVenueEventStore,
 )
 from bfx_funding_bot.modules.simulated_venue.wiring import build_simulated_venue
-from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload, StrategyName
+from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.trading import CapitalPolicy, CapitalScope
-from tests.modules.marketfeed.account_test_helpers import (
+from tests.apps.runtime.account_test_helpers import (
     TEST_EXCHANGE_ACCOUNT_ID,
     seed_exchange_account,
 )
@@ -92,8 +91,8 @@ from .bot_e2e import CELL, POLICY, SCOPE, AllowGuard, ledger_db  # noqa: F401 - 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 ACCOUNT_ID = str(TEST_EXCHANGE_ACCOUNT_ID)
-SIM = SimAccount(ACCOUNT_ID, "ci")
-CAPITAL_SCOPE = CapitalScope(TEST_EXCHANGE_ACCOUNT_ID, "ci", "fUST", CELL)
+SIM = SimAccount(ACCOUNT_ID)
+CAPITAL_SCOPE = CapitalScope(TEST_EXCHANGE_ACCOUNT_ID, "fUST", CELL)
 CONSERVED = {"baseline", "conserved"}
 INJECTED = (FaultKind.UNKNOWN_PLACED_LOST, FaultKind.UNKNOWN_NOT_PLACED_LOST,
             FaultKind.UNKNOWN_5XX_ERROR)
@@ -105,11 +104,6 @@ class _Allow(AllowGuard):
 
     async def evaluate_cancel(self, decision: Any, context: Any) -> GuardResult:
         return GuardResult(allowed=True, guard_name="test")
-
-
-class _NullSink:
-    async def emit(self, event: dict[str, Any]) -> None:
-        return None
 
 
 @dataclass
@@ -180,8 +174,7 @@ class Rig:
         async with self.factory.begin() as session:
             session.add(ExecutionDecisionRow(
                 decision_id=decision_id, account_id=ACCOUNT_ID,
-                exchange_account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci",
-                reconcile_id="oracle", cell_id=CELL, symbol="fUST",
+                exchange_account_id=TEST_EXCHANGE_ACCOUNT_ID, reconcile_id="oracle", cell_id=CELL, symbol="fUST",
                 signal_correlation_id=str(correlation), outcome="ready",
                 signal_rate=rate, applied_rate=rate, amount_usdt=amount, duration_days=days,
                 model_evidence={}, safety_result={}, execution_policy="oracle",
@@ -312,13 +305,10 @@ async def rig_factory(ledger_db):  # noqa: F811
 
         bus = DomainEventBus()
         executor = BitfinexLiveExecutor(
-            http=http, event_sink=_NullSink(), bus=bus, phase=Phase.LIVE,
-            strategy=StrategyName.RATE_PERCENTILE, configured_symbols=frozenset({"fUST"}),
-            cell=CELL, auth_gate=auth_gate, clock=clock)
+            http=http, configured_symbols=frozenset({"fUST"}), auth_gate=auth_gate, clock=clock)
         gate = AccountCommandGate(
-            executor, uncertainty_reader=build_uncertainty_reader(factory),
-            safety_evaluator=_Allow(), deployment_environment="ci",
-            clock=clock,
+            executor, bus=bus, uncertainty_reader=build_uncertainty_reader(factory),
+            safety_evaluator=_Allow(), clock=clock,
             boundary=CommandBoundary(
                 SCOPE, factory,
                 build_command_journal(factory, max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS),

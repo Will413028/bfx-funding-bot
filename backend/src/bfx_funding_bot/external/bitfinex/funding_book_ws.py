@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 import zlib
 from collections.abc import Callable, Sequence
 from decimal import Decimal
@@ -102,7 +103,12 @@ class FundingBookWSClient:
         on_sequence: Callable[[str, int], None] | None = None,
         on_disconnect: Callable[[], None] | None = None,
         on_maintenance: Callable[[bool], None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        self._clock = clock
+        # Monotonic time of the newest frame on a subscribed channel of this connection
+        # (data, checksum or `hb`); None until one arrives and again after a disconnect.
+        self._last_frame_at: float | None = None
         self._symbols = tuple(symbols)
         self._length = length
         self._url = url
@@ -158,9 +164,16 @@ class FundingBookWSClient:
     async def start(self) -> None:
         if self._ws is not None:
             return
-        self._ws = await websockets.connect(self._url, max_size=2**20)
-        for frame in self.subscription_frames():
-            await self._ws.send(frame)
+        ws = await websockets.connect(self._url, max_size=2**20)
+        try:
+            for frame in self.subscription_frames():
+                await ws.send(frame)
+        except BaseException:
+            # Not half-open: a later start() must connect again, not return early.
+            with contextlib.suppress(Exception):
+                await ws.close()
+            raise
+        self._ws = ws
         self._recv_task = asyncio.create_task(self._recv_loop())
 
     async def stop(self) -> None:
@@ -192,7 +205,19 @@ class FundingBookWSClient:
                 await ws.close()
             self.mark_disconnected()
 
+    def last_frame_age_ms(self) -> int | None:
+        """Age of the newest book channel frame on this connection, or None if none yet.
+
+        Any channel frame counts, `hb` included: Bitfinex sends one about every 15s on a
+        quiet channel, so a live feed stays young without book changes. Connection events
+        (``info``, ``subscribed``) do not, and a disconnect forgets the old connection's.
+        """
+        if self._last_frame_at is None:
+            return None
+        return int((self._clock() - self._last_frame_at) * 1000)
+
     def mark_disconnected(self) -> None:
+        self._last_frame_at = None
         self._channels.clear()
         self._snapshot_channels.clear()
         if self._on_disconnect is not None:
@@ -222,6 +247,8 @@ class FundingBookWSClient:
         elif event == "error":
             log.error("bitfinex_funding_book_error %s", frame)
             self.mark_disconnected()
+            # The channels are forgotten; only a fresh connection resubscribes them.
+            self._reconnect_requested = True
 
     def _handle_info(self, frame: dict[str, Any]) -> None:
         """Act on the venue's own connection notices.
@@ -259,6 +286,7 @@ class FundingBookWSClient:
         symbol = self._channels.get(chan_id)
         if symbol is None:
             return
+        self._last_frame_at = self._clock()
         payload = frame[1]
         sequence = frame[2] if len(frame) >= 3 and isinstance(frame[2], int) else None
         if payload == "hb":

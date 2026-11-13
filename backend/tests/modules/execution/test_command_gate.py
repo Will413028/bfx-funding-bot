@@ -8,17 +8,22 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
 
+from bfx_funding_bot.external.bitfinex.credentials import HasCredentials
+from bfx_funding_bot.external.bitfinex.order_port import OfferRequest
 from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmitAcknowledged,
     SubmitNotSent,
+    SubmitOutcome,
     SubmitOutcomeUnknown,
     SubmitRejected,
 )
+from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_gate import (
     AccountCommandGate,
     CommandGateBlocked,
@@ -36,7 +41,6 @@ from bfx_funding_bot.modules.execution.middleware.reservation_emitting import (
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
-    SubmittedOrder,
 )
 from bfx_funding_bot.modules.ledger import Scope
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
@@ -85,39 +89,45 @@ def _context() -> AccountContext:
 
 @dataclass
 class _FakeUncertaintyReader:
-    open_scopes: set[tuple[UUID, str, str]]
+    open_scopes: set[tuple[UUID, str]]
     error: Exception | None = None
 
     async def has_open(self, session: object, scope: Scope, symbol: str) -> bool:
         if self.error is not None:
             raise self.error
-        return (scope.exchange_account_id, scope.deployment_environment, symbol) in self.open_scopes
+        return (scope.exchange_account_id, symbol) in self.open_scopes
 
     async def list_open(self, session: object, scope: Scope, symbol: str | None = None) -> tuple[()]:
         return ()
 
 
 class _FakeVenue:
-    def __init__(self, outcome: object | None = None, *, crash: bool = False) -> None:
-        self.outcome = outcome or SubmitAcknowledged("venue-1")
+    """The venue adapter behind the gate: records what it was handed, returns an outcome."""
+
+    def __init__(self, outcome: SubmitOutcome | None = None, *, crash: bool = False) -> None:
+        self.outcome: SubmitOutcome = outcome or SubmitAcknowledged("venue-1")
         self.crash = crash
         self.calls = 0
+        self.offers: list[OfferRequest] = []
+        self.pre_send: Callable[[], bool] | None = None
         self.txns_seen_at_call: list[tuple[Record, ...]] | None = None
         self.recording: Recording | None = None
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref: ReservationRef,
-    ) -> SubmittedOrder:
+        self, offer: OfferRequest, account: HasCredentials, *,
+        pre_send: Callable[[], bool] | None = None,
+    ) -> SubmitOutcome:
         self.calls += 1
+        self.offers.append(offer)
+        self.pre_send = pre_send
         if self.recording is not None:
             self.txns_seen_at_call = list(self.recording.txns)
         if self.crash:
             raise RuntimeError("process crash after durable intent")
-        return SubmittedOrder(
-            outcome=self.outcome,  # type: ignore[arg-type]
-            reservation_ref=reservation_ref,
-        )
+        return self.outcome
+
+    async def cancel(self, *args: object, **kwargs: object) -> object:
+        raise NotImplementedError("the submit contract tests never cancel")
 
 
 @dataclass
@@ -141,7 +151,7 @@ class _UncertaintyAwareEvaluator:
     reader: _FakeUncertaintyReader
 
     async def evaluate(self, decision: DecisionPayload, context: AccountContext) -> GuardResult:
-        if await self.reader.has_open(None, Scope(ACCOUNT_ID, ENVIRONMENT), decision.symbol):
+        if await self.reader.has_open(None, Scope(ACCOUNT_ID), decision.symbol):
             return GuardResult(False, "uncertainty", reason="open execution uncertainty")
         return GuardResult(True, "uncertainty")
 
@@ -153,39 +163,21 @@ class _BlockingAckVenue(_FakeVenue):
         self.release = asyncio.Event()
 
     async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref: ReservationRef,
-    ) -> SubmittedOrder:
+        self, offer: OfferRequest, account: HasCredentials, *,
+        pre_send: Callable[[], bool] | None = None,
+    ) -> SubmitOutcome:
         self.started.set()
         await self.release.wait()
-        return await super().submit(ready, ctx, reservation_ref=reservation_ref)
-
-
-class _MisattributingVenue(_FakeVenue):
-    """Acknowledges, but names an identity other than the reference it was given."""
-
-    def __init__(self, returned_ref: Callable[[ReservationRef], ReservationRef | None]) -> None:
-        super().__init__()
-        self.returned_ref = returned_ref
-
-    async def submit(
-        self, ready: ReadyToSubmit, ctx: AccountContext, *,
-        reservation_ref: ReservationRef,
-    ) -> SubmittedOrder:
-        self.calls += 1
-        return SubmittedOrder(
-            outcome=SubmitAcknowledged("venue-untrusted"),
-            reservation_ref=self.returned_ref(reservation_ref),
-        )
+        return await super().submit(offer, account, pre_send=pre_send)
 
 
 def _recording(reader: _FakeUncertaintyReader) -> Recording:
     """A boundary whose committed UNKNOWN opens the reader's scope, as the real one does."""
     def opened(record: Record) -> None:
         if isinstance(record, OutcomeRecorded) and record.outcome.kind == "unknown":
-            reader.open_scopes.add((ACCOUNT_ID, ENVIRONMENT, record.attempt.symbol))
+            reader.open_scopes.add((ACCOUNT_ID, record.attempt.symbol))
 
-    return Recording(environment=ENVIRONMENT, account_id=ACCOUNT_ID, on_record=opened)
+    return Recording(account_id=ACCOUNT_ID, on_record=opened)
 
 
 def _gate(
@@ -199,9 +191,9 @@ def _gate(
     venue.recording = recording
     return AccountCommandGate(
         venue,
+        bus=DomainEventBus(),
         uncertainty_reader=reader,
         safety_evaluator=safety or _UncertaintyAwareEvaluator(reader),  # type: ignore[arg-type]
-        deployment_environment=ENVIRONMENT,
         boundary=recording.boundary(),
         managed_offers=recording.offers,
         clock=iter(clock_values).__next__,
@@ -218,9 +210,9 @@ def test_a_gate_cannot_be_built_without_a_command_boundary() -> None:
     with pytest.raises(TypeError, match="boundary"):
         AccountCommandGate(  # type: ignore[call-arg]
             _FakeVenue(),
+            bus=DomainEventBus(),
             uncertainty_reader=reader,
             safety_evaluator=_UncertaintyAwareEvaluator(reader),
-            deployment_environment=ENVIRONMENT,
             managed_offers=recording.offers,
         )
 
@@ -230,9 +222,9 @@ def test_a_gate_cannot_be_built_without_managed_offer_reads() -> None:
     with pytest.raises(TypeError, match="managed_offers"):
         AccountCommandGate(  # type: ignore[call-arg]
             _FakeVenue(),
+            bus=DomainEventBus(),
             uncertainty_reader=reader,
             safety_evaluator=_UncertaintyAwareEvaluator(reader),
-            deployment_environment=ENVIRONMENT,
             boundary=_recording(reader).boundary(),
         )
 
@@ -243,6 +235,7 @@ def test_the_middleware_cannot_be_built_without_a_command_boundary() -> None:
     with pytest.raises(TypeError, match="boundary"):
         ReservationEmittingMiddleware(  # type: ignore[call-arg]
             _FakeVenue(),
+            bus=DomainEventBus(),
             safety_evaluator=_UncertaintyAwareEvaluator(reader),
             uncertainty_reader=reader,
             managed_offers=recording.offers,
@@ -256,6 +249,7 @@ async def test_the_middleware_submits_through_its_command_gate() -> None:
     venue = _FakeVenue()
     middleware = ReservationEmittingMiddleware(
         venue,
+        bus=DomainEventBus(),
         safety_evaluator=_UncertaintyAwareEvaluator(reader),
         boundary=recording.boundary(),
         uncertainty_reader=reader,
@@ -273,7 +267,7 @@ async def test_the_middleware_submits_through_its_command_gate() -> None:
 
 @pytest.mark.asyncio
 async def test_open_uncertainty_blocks_before_intent_and_venue_call() -> None:
-    reader = _FakeUncertaintyReader({(ACCOUNT_ID, ENVIRONMENT, SYMBOL)})
+    reader = _FakeUncertaintyReader({(ACCOUNT_ID, SYMBOL)})
     recording = _recording(reader)
     venue = _FakeVenue()
 
@@ -295,7 +289,7 @@ async def test_check_fails_closed_when_the_uncertainty_read_errors() -> None:
 
 @pytest.mark.asyncio
 async def test_check_scopes_uncertainty_to_the_symbol() -> None:
-    reader = _FakeUncertaintyReader({(ACCOUNT_ID, ENVIRONMENT, "fUSD")})
+    reader = _FakeUncertaintyReader({(ACCOUNT_ID, "fUSD")})
     gate = _gate(_FakeVenue(), reader, _recording(reader))
 
     await gate.check(_ready(symbol="fUST"), _context())
@@ -305,7 +299,7 @@ async def test_check_scopes_uncertainty_to_the_symbol() -> None:
 
 @pytest.mark.asyncio
 async def test_uncertainty_scope_does_not_block_another_symbol() -> None:
-    reader = _FakeUncertaintyReader({(ACCOUNT_ID, ENVIRONMENT, "fUSD")})
+    reader = _FakeUncertaintyReader({(ACCOUNT_ID, "fUSD")})
     recording = _recording(reader)
     venue = _FakeVenue(SubmitRejected("explicit_rejection"))
 
@@ -377,7 +371,7 @@ async def test_unknown_is_durable_and_blocks_next_command_without_retry() -> Non
     assert venue.txns_seen_at_call is not None
     assert [label(record) for record in venue.txns_seen_at_call[0]] == ["authorized"]
     assert [label(record) for record in recording.txns[1]] == ["unknown"]
-    assert reader.open_scopes == {(ACCOUNT_ID, ENVIRONMENT, SYMBOL)}
+    assert reader.open_scopes == {(ACCOUNT_ID, SYMBOL)}
 
     with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
         await gate.submit(_ready(decision_id="decision-2"), _context())
@@ -557,42 +551,6 @@ async def test_submit_cancelled_before_transport_closes_intent_as_not_sent() -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "returned_ref",
-    [
-        pytest.param(
-            lambda ref: replace(ref, execution_decision_id="another-decision"),
-            id="other_decision",
-        ),
-        pytest.param(
-            lambda ref: replace(ref, signal_correlation_id=uuid4()), id="other_signal",
-        ),
-        pytest.param(lambda ref: None, id="no_reference"),
-        pytest.param(
-            lambda ref: ref.bind_venue_offer("venue-other"), id="bound_to_other_offer",
-        ),
-    ],
-)
-async def test_executor_identity_mismatch_becomes_durable_unknown_and_blocks_scope(
-    returned_ref: Callable[[ReservationRef], ReservationRef | None],
-) -> None:
-    """Trusting a result that names another intent would falsely claim its ACK."""
-    reader = _FakeUncertaintyReader(set())
-    recording = _recording(reader)
-    venue = _MisattributingVenue(returned_ref)
-    gate = _gate(venue, reader, recording)
-
-    result = await gate.submit(_ready(), _context())
-
-    assert result.outcome_kind.value == "unknown"
-    assert result.venue_offer_id is None
-    assert [label(record) for record in recording.txns[1]] == ["unknown"]
-    with pytest.raises(CommandGateBlocked, match="open execution uncertainty"):
-        await gate.submit(_ready(decision_id="decision-2"), _context())
-    assert venue.calls == 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
     ("outcome", "kind", "reason"),
     [
         (SubmitNotSent("bad_local_input"), "not_sent", "local_pre_transport"),
@@ -623,3 +581,159 @@ async def test_every_outcome_fact_is_marked_not_simulated() -> None:
     await _gate(_FakeVenue(), reader, recording).submit(_ready(), _context())
 
     assert [facts.is_simulated for facts, _ in recording.outcomes] == [False]
+
+
+# ------------------------------------------------- R4: the gate owns the venue request
+
+
+@pytest.mark.asyncio
+async def test_the_gate_hands_the_venue_an_offer_request_built_from_the_decision() -> None:
+    reader = _FakeUncertaintyReader(set())
+    recording = _recording(reader)
+    venue = _FakeVenue()
+    ready = _ready()
+
+    await _gate(venue, reader, recording).submit(ready, _context())
+
+    decision = ready.decision
+    assert venue.offers == [OfferRequest(
+        symbol=SYMBOL, amount=Decimal("12.5"), rate=Decimal("0.0001"), period_days=2,
+        funding_amount_evidence=ready.funding_amount_evidence,
+    )]
+    assert (decision.offer_amount_usdt, decision.offer_rate) == (Decimal("12.5"), Decimal("0.0001"))
+
+
+@pytest.mark.asyncio
+async def test_the_venue_pre_send_is_the_decisions_book_validity_at_send_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``pre_send`` replaces ``AccountContext.before_submit_transport``: it is the
+    decision's own book check, evaluated when the adapter calls it."""
+    reader = _FakeUncertaintyReader(set())
+    venue = _FakeVenue()
+    gate = _gate(venue, reader, _recording(reader), clock_values=tuple(range(100, 120)))
+    await gate.submit(_ready(), _context())
+    assert venue.pre_send is not None
+
+    seen: list[int] = []
+
+    def book_valid_at(self: ReadyToSubmit, now_ms: int) -> bool:
+        seen.append(now_ms)
+        return False
+
+    monkeypatch.setattr(ReadyToSubmit, "book_valid_at", book_valid_at)
+    assert venue.pre_send() is False
+    assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_acknowledgement_binds_the_gates_own_reference_to_the_venue_offer() -> None:
+    reader = _FakeUncertaintyReader(set())
+    ready = _ready()
+
+    result = await _gate(_FakeVenue(SubmitAcknowledged("42")), reader, _recording(reader)).submit(
+        ready, _context())
+
+    reference = ReservationRef(execution_decision_id=ready.decision_id,
+                               signal_correlation_id=ready.decision.signal_correlation_id)
+    assert result.venue_offer_id == "42"
+    assert result.reservation_ref == reference.bind_venue_offer("42")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", [
+    SubmitOutcomeUnknown("http_5xx", True, http_status=500),
+    SubmitRejected("venue_rejected"),
+    SubmitNotSent("symbol_not_configured"),
+], ids=["unknown", "rejected", "not_sent"])
+async def test_any_other_outcome_keeps_the_gates_reference_unbound(outcome: SubmitOutcome) -> None:
+    reader = _FakeUncertaintyReader(set())
+    ready = _ready()
+
+    result = await _gate(_FakeVenue(outcome), reader, _recording(reader)).submit(ready, _context())
+
+    assert result.outcome is outcome
+    assert result.venue_offer_id is None
+    assert result.reservation_ref == ReservationRef(
+        execution_decision_id=ready.decision_id,
+        signal_correlation_id=ready.decision.signal_correlation_id,
+    )
+
+
+def _account_goes_inactive_after_commit(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.modules.execution import fake_boundary
+
+    answers = iter(["active", "disabled"])
+
+    async def scalar(self: object, query: object) -> str:
+        return next(answers)
+
+    monkeypatch.setattr(fake_boundary._Session, "scalar", scalar)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("path", "reason"), [
+    ("halted_after_commit", "halted after commit"),
+    ("account_inactive_after_commit", "account_inactive"),
+    ("book_expired", "decision_book_invalid_or_expired"),
+    ("amount_invalid", "amount below the funding minimum"),
+    ("rate_not_positive", "invalid_submit_payload"),
+    ("period_not_positive", "invalid_submit_payload"),
+])
+async def test_every_gate_not_sent_path_never_calls_the_venue(
+    path: str, reason: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(a1): a refusal after the intent committed closes it NOT_SENT and the venue
+    adapter is never called (so no HTTP can have been sent)."""
+    from bfx_funding_bot.modules.execution import command_gate
+
+    reader = _FakeUncertaintyReader(set())
+    recording = _recording(reader)
+    venue = _FakeVenue()
+    allow = GuardResult(allowed=True, guard_name="<chain>")
+    safety: object | None = None
+    ready = _ready()
+    if path == "halted_after_commit":
+        safety = _FakeSafetyEvaluator([allow, GuardResult(False, "kill_switch",
+                                                          reason="halted after commit")])
+    elif path == "account_inactive_after_commit":
+        _account_goes_inactive_after_commit(monkeypatch)
+    elif path == "book_expired":
+        monkeypatch.setattr(ReadyToSubmit, "book_valid_at", lambda self, now_ms: False)
+    elif path == "amount_invalid":
+        def refuse(*args: object, **kwargs: object) -> None:
+            raise ValueError("amount below the funding minimum")
+        monkeypatch.setattr(command_gate, "validate_amount", refuse)
+    else:
+        field = "offer_rate" if path == "rate_not_positive" else "offer_duration_days"
+        decision = ready.decision.model_copy(update={field: Decimal("0") if field == "offer_rate"
+                                                     else 0})
+        ready = with_capital(ReadyToSubmit(
+            decision=decision, decision_id="decision-bad", policy=ready.policy,
+            market_snapshot_id=ready.market_snapshot_id, model_version=None,
+            evidence={}, safety=ready.safety,
+        ))
+
+    result = await _gate(venue, reader, recording, safety=safety).submit(ready, _context())
+
+    assert venue.calls == 0
+    assert isinstance(result.outcome, SubmitNotSent)
+    assert result.outcome.reason == reason
+    assert recording.labels == ["authorized", "not_sent"]
+    assert not reader.open_scopes
+
+
+@pytest.mark.asyncio
+async def test_a_decision_without_a_symbol_is_refused_before_any_intent() -> None:
+    """(a1) symbol missing: refused even earlier than the post-commit NOT_SENT paths --
+    the attempt payload cannot be built, so nothing is journaled and the venue is
+    never called (the gate's own ``symbol_missing`` check is the second line)."""
+    reader = _FakeUncertaintyReader(set())
+    recording = _recording(reader)
+    venue = _FakeVenue()
+
+    with pytest.raises(ValueError, match="symbol must be non-empty"):
+        await _gate(venue, reader, recording).submit(_ready(symbol=""), _context())
+
+    assert venue.calls == 0
+    assert recording.txns == []

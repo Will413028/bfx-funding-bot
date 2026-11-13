@@ -241,10 +241,10 @@ def prepare_build_dir(build_dir: Path, *, uid: int = BUILD_UID) -> None:
         raise DeployError(f"build_dir_unusable:{exc.__class__.__name__}") from None
 
 
-def build_plan(*, ops_dir: Path, ledger: object, runtime_dir: Path, state_dir: Path,
+def build_plan(*, ops_dir: Path, ledger: object, runtime_dir: Path,
                backend_repository: str) -> bfx_weekly_report.Plan:
     return bfx_weekly_report.build_plan(
-        ops_dir=ops_dir, ledger=ledger, runtime_dir=runtime_dir, state_dir=state_dir,
+        ops_dir=ops_dir, ledger=ledger, runtime_dir=runtime_dir,
         backend_repository=backend_repository, secret_check=bfx_deploy.protected_secret_file,
         reports_dir=BUILD_DIR, compose_name=COMPOSE_FILE, project=PROJECT, service=SERVICE)
 
@@ -356,7 +356,7 @@ def run_build(args: argparse.Namespace, *,
         check_secret_files(args.runtime_dir, secret_check=bfx_deploy.protected_secret_file)
         prepare_build_dir(BUILD_DIR)
         plan = build_plan(ops_dir=_HERE, ledger=ledger, runtime_dir=args.runtime_dir,
-                          state_dir=args.state_dir, backend_repository=args.backend_repository)
+                          backend_repository=args.backend_repository)
     except DeployError as exc:
         log(f"cannot build: {exc.code}")
         return 1
@@ -400,7 +400,6 @@ def main(argv: list[str] | None = None) -> int:
     steps = parser.add_subparsers(dest="step", required=True)
     build = steps.add_parser("build", help="root: run this run's one-shot build container")
     build.add_argument("--runtime-dir", type=Path, default=defaults.runtime_dir)
-    build.add_argument("--state-dir", type=Path, default=defaults.state_dir)
     build.add_argument("--backend-repository", default=defaults.backend_repository)
     build.add_argument("--postgres-container", default=defaults.postgres_container)
     build.add_argument("--db-user", default=defaults.db_user)

@@ -14,7 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from bfx_funding_bot.modules.ledger import Quarantine, ResolutionRejected, ResolutionSubject, Scope
-from bfx_funding_bot.modules.ledger.wiring import build_operator_evidence
+from bfx_funding_bot.modules.ledger.read import build_operator_evidence
 
 from .test_ledger_journal import JOURNAL, SCOPE, _engine, _resolution
 from .test_ledger_schema_roles import (
@@ -101,7 +101,7 @@ async def test_ledger_port_rejects_invalid_observation_pg(seeded_fixture, fault,
             )
             if fault == "not_latest":
                 await _observation(session)
-            scope = Scope(SCOPE.exchange_account_id, "other") if fault == "cross_scope" else SCOPE
+            scope = Scope(uuid4()) if fault == "cross_scope" else SCOPE
             with pytest.raises(ResolutionRejected, match=code):
                 await PORT.verify(
                     session,

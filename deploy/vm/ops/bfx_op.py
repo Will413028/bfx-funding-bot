@@ -19,8 +19,8 @@ One call:
      ID is who asks: the CLI writes it as requested_by and refuses one that is not
      a member of the account (9d-6); this file never compares or rewrites it, and
      no flag names an actor;
-  3. the image: the ledger's newest `deployed` row and its revision's live.env,
-     as bfx-weekly-report resolves them; operator.env must be root 0600 (Compose
+  3. the image: the ledger's newest `deployed` row, as bfx-weekly-report resolves
+     it; operator.env must be root 0600 (Compose
      reads it, this file does not);
   4. `docker compose -p bfx-operator -f <this release>/ops/docker-compose.operator.yml
      run --rm -T operator <subcommand> ...`: no TTY, so the CLI's stderr line naming
@@ -91,7 +91,6 @@ PROJECT = "bfx-operator"
 SERVICE = "operator"
 COMPOSE_FILE = "docker-compose.operator.yml"
 OPERATOR_ENV = "operator.env"
-LIVE_KEYS = ("BFX_DEPLOYMENT_ENV",)
 TAILNET_NETWORKS = (ipaddress.ip_network("100.64.0.0/10"),
                     ipaddress.ip_network("fd7a:115c:a1e0::/48"))
 WHOIS_TIMEOUT = 10.0
@@ -282,18 +281,6 @@ class Plan:
                 "node": identity.node, "peer": identity.peer, "argv": self.argv(call)}
 
 
-def _live_values(path: Path) -> dict[str, str]:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        raise DeployError(f"env_file_unreadable:{path.name}") from None
-    values = bfx_deploy.parse_env_file(text, name=path.name, compose=False)
-    missing = [key for key in LIVE_KEYS if not values.get(key, "").strip()]
-    if missing:
-        raise DeployError(f"env_key_missing:{path.name}:{','.join(missing)}")
-    return {key: values[key] for key in LIVE_KEYS}
-
-
 def _caller_values(caller_env: Mapping[str, str]) -> dict[str, str]:
     values = {key: caller_env[key] for key in CALLER_KEYS if caller_env.get(key)}
     values.setdefault("PATH", DEFAULT_PATH)
@@ -301,7 +288,7 @@ def _caller_values(caller_env: Mapping[str, str]) -> dict[str, str]:
 
 
 def build_plan(
-    *, ops_dir: Path, ledger: Any, runtime_dir: Path, state_dir: Path,
+    *, ops_dir: Path, ledger: Any, runtime_dir: Path,
     backend_repository: str, secret_check: Callable[[Path], None], identity: Identity,
     caller_env: Mapping[str, str],
 ) -> Plan:
@@ -319,10 +306,8 @@ def build_plan(
             or bfx_deploy.REVISION.fullmatch(deployed.source_revision) is None:
         raise DeployError("ledger_row_invalid")
     image = f"{backend_repository}@{digest}"
-    live_env = state_dir / "releases" / deployed.source_revision / "live.env"
     env = {
         **_caller_values(caller_env),
-        **_live_values(live_env),
         "BFX_BACKEND_IMAGE": image,
         "BFX_BACKEND_DIGEST": digest,
         "BFX_SOURCE_REVISION": deployed.source_revision,
@@ -455,7 +440,6 @@ def _parser() -> argparse.ArgumentParser:
     defaults = bfx_deploy.Settings()
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--runtime-dir", type=Path, default=defaults.runtime_dir)
-    parser.add_argument("--state-dir", type=Path, default=defaults.state_dir)
     parser.add_argument("--backend-repository", default=defaults.backend_repository)
     parser.add_argument("--postgres-container", default=defaults.postgres_container)
     parser.add_argument("--db-user", default=defaults.db_user)
@@ -486,7 +470,7 @@ def main(argv: Sequence[str] | None = None, *, env: Mapping[str, str] | None = N
             ledger=ledger or bfx_deploy.PsqlLedger(
                 bfx_deploy.subprocess_runner, container=settings.postgres_container,
                 db_user=settings.db_user, db_name=settings.db_name),
-            runtime_dir=settings.runtime_dir, state_dir=settings.state_dir,
+            runtime_dir=settings.runtime_dir,
             backend_repository=settings.backend_repository,
             secret_check=secret_check or bfx_deploy.protected_secret_file,
             identity=identity, caller_env=environ)

@@ -284,7 +284,6 @@ class BitfinexVenueObservation:
                 unconfirmed.append(offer_id)
                 alerts.emit(alerts.OFFER_END_UNCONFIRMED, level=alerts.WARNING,
                             exchange_account_id=str(self._scope.exchange_account_id),
-                            deployment_environment=self._scope.deployment_environment,
                             symbol=symbol, venue_offer_id=offer_id, cause=cause,
                             grace_ms=OFFER_END_GRACE_MS)
             else:
@@ -301,7 +300,6 @@ class BitfinexVenueObservation:
     def _alert(self, stream: str, symbol: str, *, reason: str) -> None:
         alerts.emit(alerts.VENUE_OBSERVATION_HISTORY_INCOMPLETE, level=alerts.WARNING,
                     exchange_account_id=str(self._scope.exchange_account_id),
-                    deployment_environment=self._scope.deployment_environment,
                     stream=stream, symbol=symbol, reason=reason)
 
     async def observe(

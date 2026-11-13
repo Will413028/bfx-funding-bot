@@ -16,9 +16,9 @@ from bfx_funding_bot.modules.ledger import (
     ForeignOffers,
     Scope,
 )
-from bfx_funding_bot.modules.ledger._internal import reads
-from bfx_funding_bot.modules.ledger._internal.basis import previous_basis
 from bfx_funding_bot.modules.ledger._internal.operator_resolution import attempt_match
+from bfx_funding_bot.modules.ledger.read import reads
+from bfx_funding_bot.modules.ledger.read.basis import previous_basis
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisCreditRow,
     AcceptedCapitalBasisRow,
@@ -53,7 +53,6 @@ async def accepted_positions(session: AsyncSession, scope: Scope) -> AcceptedPos
                 select(VenueOfferMirrorRow.symbol, func.count())
                 .where(
                     VenueOfferMirrorRow.exchange_account_id == scope.exchange_account_id,
-                    VenueOfferMirrorRow.deployment_environment == scope.deployment_environment,
                     VenueOfferMirrorRow.present_in_latest_accepted_snapshot,
                 )
                 .group_by(VenueOfferMirrorRow.symbol)

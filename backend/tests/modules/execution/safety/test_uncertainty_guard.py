@@ -45,7 +45,6 @@ class _Reader:
 async def test_uncertainty_guard_blocks_only_matching_scope() -> None:
     guard = UncertaintyGuard(
         reader=_Reader([{"kind": "submit_outcome_unknown", "symbol": "fUST"}]),
-        deployment_environment="ci",
     )
 
     blocked = await guard.evaluate(_decision("fUST"), _context())
@@ -59,11 +58,9 @@ async def test_uncertainty_guard_blocks_only_matching_scope() -> None:
 async def test_uncertainty_guard_blocks_unknown_kind_and_reader_error() -> None:
     unknown = UncertaintyGuard(
         reader=_Reader([{"kind": "future_kind", "symbol": "fUST"}]),
-        deployment_environment="ci",
     )
     read_error = UncertaintyGuard(
         reader=_Reader(error=RuntimeError("db unavailable")),
-        deployment_environment="ci",
     )
 
     assert (await unknown.evaluate(_decision("fUST"), _context())).allowed is False

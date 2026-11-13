@@ -32,7 +32,7 @@ T0 = 1_704_067_200_000  # 2024-01-01T00:00Z, a UTC midnight
 API_KEY = "SIM_KEY"
 API_SECRET = "SIM_SECRET"
 ACCOUNT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
-ACCOUNT = SimAccount(ACCOUNT_ID, "ci")
+ACCOUNT = SimAccount(ACCOUNT_ID)
 CTX = AccountContext(ACCOUNT.exchange_account_id, Credentials(API_KEY, API_SECRET), Decimal(10000))
 
 

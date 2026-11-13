@@ -23,7 +23,9 @@ from bfx_funding_bot.modules.ledger import (
     UncertaintyRecord,
     encode_basis_token,
 )
-from bfx_funding_bot.modules.ledger._internal import capital_reader, clock, reads
+from bfx_funding_bot.modules.ledger._internal import capital_reader, clock
+from bfx_funding_bot.modules.ledger.read import reads
+from bfx_funding_bot.modules.ledger.read.policy import read_policy
 from bfx_funding_bot.modules.trading import (
     AppliedPolicy,
     Available,
@@ -75,7 +77,7 @@ class LedgerCapitalAuthority:
             # Same key as every ledger writer and the legacy writer: a writer that
             # committed before this point is visible to the READ COMMITTED reads
             # below, and one after it waits until the caller's transaction ends.
-            await clock.lock_scope(session, Scope(scope.account_id, scope.environment))
+            await clock.lock_scope(session, Scope(scope.account_id))
             read = await capital_reader.read_capital_locked(
                 session, scope, now_ms=now_ms, max_snapshot_age_ms=self._max_snapshot_age_ms
             )
@@ -98,14 +100,13 @@ class LedgerCapitalAuthority:
     async def read_policy(
         self, session: AsyncSession, scope: Scope, symbol: str
     ) -> AppliedPolicy | CapitalBlocked:
-        policy = await capital_reader.read_policy(session, scope, symbol)
+        policy = await read_policy(session, scope, symbol)
         return _blocked(policy) if isinstance(policy, Blocked) else policy
 
 
 def _record(scope: Scope, item: OpenUncertainty) -> UncertaintyRecord:
     return UncertaintyRecord(
         scope.exchange_account_id,
-        scope.deployment_environment,
         item.symbol,
         reads.UNCERTAINTY_KINDS[item.subject_kind],
     )

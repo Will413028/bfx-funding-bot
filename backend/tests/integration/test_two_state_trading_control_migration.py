@@ -119,8 +119,8 @@ def test_upgrade_archives_the_retired_rules_and_stops_the_current_pause(before):
         assert conn.scalar(text("SELECT count(*) FROM public.trading_control_requests")) == 0
     # A legacy REDUCING still counts as stopped, and the archive is frozen.
     with engine.begin() as conn, pytest.raises(Exception, match=r"HALTED(/operator)? -> ACTIVE by auto"):
-        conn.execute(text("""INSERT INTO trading_state (exchange_account_id, deployment_environment, state,
-            cause, actor, reason, created_at_ms) VALUES (:a, 'prod', 'ACTIVE', 'auto', 'x', 'x', 9)"""),
+        conn.execute(text("""INSERT INTO trading_state (exchange_account_id, state,
+            cause, actor, reason, created_at_ms) VALUES (:a, 'ACTIVE', 'auto', 'x', 'x', 9)"""),
             {"a": _A})
     with engine.begin() as conn, pytest.raises(Exception, match="release_archive is frozen"):
         conn.exec_driver_sql("DELETE FROM release_archive.trading_state_probation")
@@ -128,8 +128,8 @@ def test_upgrade_archives_the_retired_rules_and_stops_the_current_pause(before):
         # The web API's own request at head (a resume is the operator CLI's, 36e59526f8cf).
         conn.exec_driver_sql("SET LOCAL ROLE bfx_webapi")
         conn.execute(text("""INSERT INTO trading_control_requests (request_id, exchange_account_id,
-            deployment_environment, action, reason, requested_by, created_at_ms)
-            VALUES ('00000000-0000-0000-0000-0000000000e1', :a, 'prod', 'kill', 'x', 'will', 9)"""),
+            action, reason, requested_by, created_at_ms)
+            VALUES ('00000000-0000-0000-0000-0000000000e1', :a, 'kill', 'x', 'will', 9)"""),
             {"a": _A})
 
 

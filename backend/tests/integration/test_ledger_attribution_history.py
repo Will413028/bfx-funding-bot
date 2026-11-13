@@ -42,7 +42,7 @@ CELL = "a30"
 def _history(credit_id: int, amount: Decimal, opening: int, closed: int) -> FundingCreditHistoryRow:
     return FundingCreditHistoryRow(
         exchange_account_id=ACCOUNT_ID, kind="credit", credit_id=credit_id,
-        deployment_environment="ci", symbol="fUST", side=1, mts_create=opening,
+        symbol="fUST", side=1, mts_create=opening,
         mts_update=closed, amount=amount, status="CLOSED", rate=RATE, period_days=2,
         mts_opening=opening, mts_last_payout=closed,
     )
@@ -51,13 +51,12 @@ def _history(credit_id: int, amount: Decimal, opening: int, closed: int) -> Fund
 def _trade(trade_id: int, offer_id: int, amount: Decimal, at: int) -> FundingTradeRow:
     return FundingTradeRow(
         exchange_account_id=ACCOUNT_ID, trade_id=trade_id,
-        deployment_environment="ci", symbol="fUST", mts_create=at, offer_id=offer_id,
+        symbol="fUST", mts_create=at, offer_id=offer_id,
         amount=amount, rate=RATE, period_days=2, maker=True)
 
 
 async def weekly(factory: Any) -> AttributionResult:
-    return await load_and_compute(factory, account_id=ACCOUNT, deployment_environment="ci",
-                                  now_ms=NOW)
+    return await load_and_compute(factory, account_id=ACCOUNT, now_ms=NOW)
 
 
 def numbers(result: AttributionResult) -> dict[str, Any]:
@@ -100,11 +99,11 @@ def test_the_weekly_job_role_reads_the_ledger_columns_the_port_selects(ledger_db
     """``bfx_bot`` keeps the port's ledger columns (the weekly now reads them as ``bfx_research``:
     ``test_research_role_behaviour.py``)."""
     reads = {
-        "submission_attempt_journal": ("exchange_account_id", "deployment_environment", "cell_id",
+        "submission_attempt_journal": ("exchange_account_id", "cell_id",
                                        "execution_decision_id", "attempt_seq", "seed_provenance",
                                        "attempt_id"),
         "transport_outcome_journal": ("attempt_id", "kind", "venue_offer_id"),
-        "venue_credit_mirror": ("exchange_account_id", "deployment_environment",
+        "venue_credit_mirror": ("exchange_account_id",
                                 "venue_credit_id", "source_kind", "symbol", "amount", "rate",
                                 "period_days", "mts_created", "mts_opening", "terminal_kind",
                                 "present_in_latest_accepted_snapshot"),

@@ -1,6 +1,6 @@
 """Telegram alert sink (T8): never in the way of trading, de-duplicated, rate-limited.
 
-Hooks under test live in safety/trading_state.py, safety/protection.py and
+Hooks under test live in safety/trading_state_store.py, safety/protection.py and
 safety/kill_switch.py; the daemon only installs the sink and reports a refused
 boot. A hung or failing Telegram must not delay a single trading-path call.
 """
@@ -25,11 +25,12 @@ import bfx_funding_bot.modules.execution.uncertainty_tables
 import bfx_funding_bot.modules.ledger.tables  # noqa: F401
 from bfx_funding_bot.core.db import Base
 from bfx_funding_bot.core.secret_files import SecretFileError
+from bfx_funding_bot.external.bitfinex.order_port import FundingCancelAllResult
 from bfx_funding_bot.modules.accounts.tables import ExchangeAccount
-from bfx_funding_bot.modules.execution.protocols import FundingCancelAllResult
 from bfx_funding_bot.modules.execution.safety.kill_switch import KillSwitch
 from bfx_funding_bot.modules.execution.safety.protection import AutomaticProtection
-from bfx_funding_bot.modules.execution.safety.trading_state import TradingStateRepository
+from bfx_funding_bot.modules.execution.safety.trading_state_store import TradingStateRepository
+from bfx_funding_bot.modules.ledger.wiring import build_scope_lock
 from bfx_funding_bot.modules.observability import alerts
 from tests.async_wait import until
 
@@ -150,7 +151,7 @@ async def trading(sqlite_engine: Any) -> Any:
     account = uuid4()
     async with factory.begin() as session:
         session.add(ExchangeAccount(id=account, venue="bitfinex", label="alerts"))
-    return factory, TradingStateRepository(factory, account_id=account, deployment_environment="ci")
+    return factory, TradingStateRepository(factory, account_id=account, scope_lock=build_scope_lock())
 
 
 @pytest.mark.asyncio
@@ -255,7 +256,7 @@ async def test_no_alert_for_a_transition_that_was_not_committed(installed: Any, 
     sink = installed(transport)
     factory, repo = trading
     failing = TradingStateRepository(_CommitFails(factory), account_id=repo.account_id,  # type: ignore[arg-type]
-                                     deployment_environment="ci")
+                                     scope_lock=build_scope_lock())
     with pytest.raises(RuntimeError, match="commit failed"):
         await failing.transition("HALTED", cause="operator", actor="will", reason="x")
     assert await repo.current() is None
@@ -383,7 +384,7 @@ def test_missing_telegram_config_degrades_to_log_only_and_says_so_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level(logging.INFO):
-        sink = alerts.AlertSink.from_environment({"BFX_DEPLOYMENT_ENV": "prod"})
+        sink = alerts.AlertSink.from_environment({}, context="prod")
         sink.emit(alerts.PROTECTION_TRIPPED, trigger="identity_conflict", detail="x")
         sink.emit(alerts.PROTECTION_TRIPPED, trigger="command_rate_exceeded", detail="y")
     assert not sink.delivers and sink.counts == {"log_only": 2}
@@ -398,13 +399,14 @@ def test_missing_telegram_config_degrades_to_log_only_and_says_so_once(
 ])
 def test_partial_or_malformed_config_is_log_only(environ: dict[str, str],
                                                   caplog: pytest.LogCaptureFixture) -> None:
-    sink = alerts.AlertSink.from_environment(environ)
+    sink = alerts.AlertSink.from_environment(environ, context="")
     assert not sink.delivers
     assert "alerts_telegram_misconfigured" in caplog.text
 
 
 def test_valid_config_delivers_to_telegram() -> None:
-    sink = alerts.AlertSink.from_environment({"TELEGRAM_BOT_TOKEN": TOKEN, "TELEGRAM_CHAT_ID": "-100123"})
+    sink = alerts.AlertSink.from_environment(
+        {"TELEGRAM_BOT_TOKEN": TOKEN, "TELEGRAM_CHAT_ID": "-100123"}, context="")
     assert sink.delivers and isinstance(sink.transport, alerts.TelegramTransport)
 
 
@@ -439,7 +441,7 @@ def test_secret_file_values_never_reach_an_alert(tmp_path: Path) -> None:
         "BFX_VAULT_KEK": "ZmlsZS1rZWstdmFsdWUtMzItYnl0ZXMtbG9uZy4uLi4=",
         "TELEGRAM_BOT_TOKEN": TOKEN})
     environ |= {"TELEGRAM_CHAT_ID": "-100123", "BFX_ADMIN_TOKEN": "stale-env-admin-token"}
-    sink = alerts.AlertSink.from_environment(environ)
+    sink = alerts.AlertSink.from_environment(environ, context="")
     assert sink.delivers and isinstance(sink.transport, alerts.TelegramTransport)
     assert sink.transport._url == f"https://api.telegram.org/bot{TOKEN}/sendMessage"  # no newline
     leaks = ("F1lePassw0rd", "file-admin-token-value", "file-read-token-value",
@@ -455,7 +457,7 @@ def test_a_missing_telegram_token_file_refuses_the_sink(tmp_path: Path) -> None:
     environ = _secret_files(tmp_path / "secrets", {})
     with pytest.raises(SecretFileError, match="TELEGRAM_BOT_TOKEN is missing"):
         alerts.AlertSink.from_environment({**environ, "TELEGRAM_BOT_TOKEN": TOKEN,
-                                           "TELEGRAM_CHAT_ID": "-100123"})
+                                           "TELEGRAM_CHAT_ID": "-100123"}, context="")
 
 
 @pytest.mark.asyncio

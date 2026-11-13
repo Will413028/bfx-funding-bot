@@ -16,7 +16,7 @@ from bfx_funding_bot.modules.execution.command_boundary import (
 from bfx_funding_bot.modules.execution.contracts import ReservationRef
 from bfx_funding_bot.modules.ledger import CommandOutcome, Scope
 
-SCOPE = Scope(uuid4(), "ci")
+SCOPE = Scope(uuid4())
 ATTEMPT = uuid4()
 CORRELATION = uuid4()
 
