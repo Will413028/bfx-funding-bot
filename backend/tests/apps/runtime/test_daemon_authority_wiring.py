@@ -238,7 +238,7 @@ async def test_the_real_epoch_boots_bitfinex_on_the_ledger(monkeypatch, tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["live", "shadow"])
+@pytest.mark.parametrize("phase", ["live", "simulated"])
 async def test_a_legacy_epoch_refuses_either_venue(monkeypatch, tmp_path, httpx_mock, phase) -> None:
     """A database whose latest epoch is ``legacy`` (never switched, or restored from before the
     switch) is refused by the bot on the real and on the simulated venue."""
@@ -257,7 +257,7 @@ async def test_a_legacy_epoch_refuses_either_venue(monkeypatch, tmp_path, httpx_
                 "INSERT INTO capital_authority_epoch (epoch_seq, authority, set_at_ms, actor, reason) "
                 "VALUES (3, 'legacy', 3, 'test', 'restored')"))
         # The simulated venue is selected only by a test's VenueSeam.
-        seam = VenueSeam(feed=FixtureMarketFeed()) if phase == "shadow" else None
+        seam = VenueSeam(feed=FixtureMarketFeed()) if phase == "simulated" else None
         with pytest.raises(AuthorityMismatch, match="authority_unsupported value=legacy"):
             await build_daemon(cells_yaml_path=path, skip_ws=True, venue_seam=seam)
         assert refused == ["authority_unsupported value=legacy build=ledger"]

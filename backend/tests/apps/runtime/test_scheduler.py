@@ -57,7 +57,7 @@ def _make_signal_engine(axiom: MagicMock, cell: CellConfig) -> SignalEngine:
     # Return a minimal history so divergence check doesn't crash
     candles_repo.get_up_to = AsyncMock(return_value=[_candle(_REF_MTS)])
     return SignalEngine(
-        phase=Phase.SHADOW, event_sink=axiom, diagnostics=NoopDiagnosticsSink(),
+        phase=Phase.SIMULATED, event_sink=axiom, diagnostics=NoopDiagnosticsSink(),
         candles_repo=candles_repo,
         reporter=DivergenceReporter(build_strategy_at_boundary),
     )
@@ -113,7 +113,7 @@ def _make_tick_handler(
                 await axiom.emit({
                     "timestamp": datetime.now(UTC).isoformat(),
                     "level": Level.WARN.value,
-                    "phase": Phase.SHADOW.value,
+                    "phase": Phase.SIMULATED.value,
                     "strategy": None,
                     "cell": cell.cell_id,
                     "event_type": EventType.HEALTH_CHECK.value,
@@ -138,7 +138,7 @@ def _make_tick_handler(
                 await axiom.emit({
                     "timestamp": datetime.now(UTC).isoformat(),
                     "level": Level.WARN.value,
-                    "phase": Phase.SHADOW.value,
+                    "phase": Phase.SIMULATED.value,
                     "strategy": None,
                     "cell": cell.cell_id,
                     "event_type": EventType.HEALTH_CHECK.value,
@@ -159,7 +159,7 @@ def _make_tick_handler(
             await axiom.emit({
                 "timestamp": datetime.now(UTC).isoformat(),
                 "level": Level.INFO.value,
-                "phase": Phase.SHADOW.value,
+                "phase": Phase.SIMULATED.value,
                 "strategy": None,
                 "cell": cell.cell_id,
                 "event_type": EventType.HEALTH_CHECK.value,

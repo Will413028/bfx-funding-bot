@@ -45,8 +45,8 @@ def test_live_ok_when_all_required_enabled(tmp_path: Path) -> None:
     assert_live_guard_invariant(Phase.LIVE, _load(tmp_path))  # must not raise
 
 
-def test_shadow_allows_disabled_guard(tmp_path: Path) -> None:
-    assert_live_guard_invariant(Phase.SHADOW, _load(tmp_path, disable="manual_kill"))
+def test_simulated_allows_disabled_guard(tmp_path: Path) -> None:
+    assert_live_guard_invariant(Phase.SIMULATED, _load(tmp_path, disable="manual_kill"))
 
 
 @pytest.mark.parametrize("guard", ["manual_kill", "auth_health", "heartbeat"])

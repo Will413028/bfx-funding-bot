@@ -404,9 +404,8 @@ phase3b_wfo_results_ref: x
     return yaml_path
 
 
-# Valid (phase, realm) deployable combos — the config.py phase<->realm guard
-# rejects live+shadow; shadow itself is refused at boot until the simulated venue is
-# composed, so the Bitfinex-venue boot is exercised under both realms it may run in
+# Valid (phase, realm) deployable combos — the simulated phase is refused without a
+# test's VenueSeam, so the Bitfinex-venue boot is exercised under both realms it may run in
 # (prod, and the ci test realm) to show the realm flowing through to the emit sink
 # (the invariant under test).
 @pytest.mark.parametrize(

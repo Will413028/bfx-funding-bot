@@ -82,7 +82,7 @@ class ManualKillGuard:
     opens when the database hiccups is not a kill switch. Note this differs
     from NavPeakStore's fail-permissive posture; the two must not be unified.
 
-    ``trading_state=None`` (paper/shadow): only a tripped protection blocks.
+    ``trading_state=None`` (the simulated phase): only a tripped protection blocks.
     """
 
     name = "manual_kill"
