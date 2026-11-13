@@ -1,6 +1,6 @@
 """The simulated-venue bot process, end to end on PostgreSQL (ADR 2026-10-03 D1/D2).
 
-``build_daemon`` composes phase ``shadow`` as production does; see ``sim_daemon`` for what is
+``build_daemon`` composes phase ``simulated`` as production does; see ``sim_daemon`` for what is
 controlled. After every cycle each accepted basis is conserved, nothing is unexplained or
 quarantined, the simulator reports no internal failure and no unrouted request, and no
 authenticated request left the process.

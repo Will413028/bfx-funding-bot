@@ -173,7 +173,7 @@ def _service(
     chain = SafetyGuardChain(
         guards=guards if guards is not None else [ManualKillGuard(trading_state=trading_state)],
         probe=HealthProbe(), diagnostics=_Sink(),
-        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
+        phase=Phase.SIMULATED, strategy=StrategyName.MEAN_REVERSION,
         cell="c1", account_id="default",
     )
     return TradingStatusService(
@@ -182,7 +182,7 @@ def _service(
         exposure=_reads(),
         account_ctx=_ctx(),
         cells=cells if cells is not None else [_cell("fUST")],
-        phase=Phase.SHADOW,
+        phase=Phase.SIMULATED,
         attempts=recorder if recorder is not None else SubmitAttemptRecorder(),
         trading_state=trading_state,
         kill_switch=kill_switch,
@@ -425,12 +425,12 @@ async def test_dry_run_emits_no_safety_trigger() -> None:
     sink = _Sink()
     chain = SafetyGuardChain(
         guards=[ManualKillGuard()], probe=HealthProbe(), diagnostics=sink,
-        phase=Phase.SHADOW, strategy=StrategyName.MEAN_REVERSION,
+        phase=Phase.SIMULATED, strategy=StrategyName.MEAN_REVERSION,
         cell="c1", account_id="default",
     )
     svc = TradingStatusService(
         chain=chain, exposure=_reads(), account_ctx=_ctx(), cells=[_cell("fUST")],
-        phase=Phase.SHADOW, deployment_environment="ci", attempts=SubmitAttemptRecorder(),
+        phase=Phase.SIMULATED, deployment_environment="ci", attempts=SubmitAttemptRecorder(),
     )
     await svc.dry_run()
     await svc.snapshot()

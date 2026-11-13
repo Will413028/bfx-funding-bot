@@ -44,7 +44,7 @@ async def test_path_b_safety_block_emits_safety_trigger_and_single_skip() -> Non
         guards=[ManualKillGuard(pending_stop=lambda: "test stop")],
         probe=probe,
         diagnostics=diagnostics,
-        phase=Phase.SHADOW,
+        phase=Phase.SIMULATED,
         strategy=StrategyName.MEAN_REVERSION,
         cell="fUSD_a30",
         account_id="default",

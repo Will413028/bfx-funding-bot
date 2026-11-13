@@ -141,7 +141,7 @@ async def build_venue(
     seam: VenueSeam | None = None,
 ) -> VenueWiring:
     # The seam alone picks the venue; ``load_config`` already refused a phase that disagrees
-    # with it (shadow without a seam, a seam without shadow), before any database work.
+    # with it (simulated without a seam, a seam without simulated), before any database work.
     gate = AuthRequestGate()
     if seam is None:
         async with session_factory() as session:

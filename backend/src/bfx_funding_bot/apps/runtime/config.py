@@ -15,7 +15,7 @@ from bfx_funding_bot.modules.strategy import CellConfig
 
 class MarketfeedConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    phase: Annotated[Phase, Field(description="shadow / live")]
+    phase: Annotated[Phase, Field(description="simulated / live")]
     cells: list[CellConfig]
     database_url: str = Field(repr=False)
     deployment_environment: DeploymentEnvironment

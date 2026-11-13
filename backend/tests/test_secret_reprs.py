@@ -19,7 +19,7 @@ DATABASE_URL = "postgresql://u:fake-db-password@h/db"
 @pytest.fixture
 def config() -> MarketfeedConfig:
     return MarketfeedConfig(
-        phase=Phase.SHADOW,
+        phase=Phase.SIMULATED,
         cells=[],
         database_url=DATABASE_URL,
         deployment_environment=DeploymentEnvironment.CI,

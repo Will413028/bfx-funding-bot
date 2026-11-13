@@ -39,7 +39,7 @@ QUALIFIED_PAIRS = {
 def require_simulated_realm(phase: str, realm: str) -> None:
     """Phase <-> realm fail-fast guard, before any database work.
 
-    phase = which venue (live = Bitfinex, shadow = the simulated venue through a test seam);
+    phase = which venue (live = Bitfinex, simulated = the simulated venue through a test seam);
     realm = the data-isolation realm. The simulated phase runs only in ci, an allow-list, so
     a realm added later is refused until it is allowed here; fake fills in prod would
     corrupt real-money data. ci is the simulated venue's ``SIMULATED_REALM``, not imported
@@ -47,7 +47,7 @@ def require_simulated_realm(phase: str, realm: str) -> None:
     (tests/architecture/test_simulated_venue_composition.py). The venue's store checks the database's
     own realm stamp when it opens.
     """
-    if phase == "shadow" and realm != DeploymentEnvironment.CI:
+    if phase == "simulated" and realm != DeploymentEnvironment.CI:
         raise ValueError(
             f"BFX_PHASE={phase} (simulated) must not run in the {realm} realm "
             f"(BFX_DEPLOYMENT_ENV={realm}) -- it would corrupt real-money data. "
@@ -62,8 +62,8 @@ def load_config(
 
     The venue is chosen by the caller alone: ``simulated_venue`` is true exactly when a test
     passes a ``VenueSeam`` to ``build_daemon``; production passes nothing and trades Bitfinex.
-    ``BFX_PHASE`` must agree with that choice in both directions (shadow needs the seam, a
-    seam needs shadow), checked here before the database or alerts are touched, so no
+    ``BFX_PHASE`` must agree with that choice in both directions (simulated needs the seam, a
+    seam needs simulated), checked here before the database or alerts are touched, so no
     environment alone can select the simulated venue (ADR
     2026-11-08-retire-the-simulation-soak).
     """
@@ -74,18 +74,18 @@ def load_config(
         # The paper phase and its echo executor were removed; a deployed bot runs live
         # (ADR 2026-10-03 D4, ADR 2026-11-08-retire-the-simulation-soak).
         raise ValueError("BFX_PHASE=paper was removed; a deployed bot runs BFX_PHASE=live")
-    if phase_str not in {"shadow", "live"}:
+    if phase_str not in {"simulated", "live"}:
         # canary was retired with the per-build ceremony (ADR 2026-09-25).
-        raise ValueError(f"BFX_PHASE must be shadow or live, got {phase_str!r}")
-    if phase_str == "shadow" and not simulated_venue:
+        raise ValueError(f"BFX_PHASE must be simulated or live, got {phase_str!r}")
+    if phase_str == "simulated" and not simulated_venue:
         raise ValueError(
-            "BFX_PHASE=shadow selects the simulated venue, which only tests compose through "
+            "BFX_PHASE=simulated selects the simulated venue, which only tests compose through "
             "a VenueSeam; a deployed bot runs BFX_PHASE=live (ADR "
             "2026-11-08-retire-the-simulation-soak)"
         )
-    if phase_str != "shadow" and simulated_venue:
+    if phase_str != "simulated" and simulated_venue:
         raise ValueError(
-            f"a VenueSeam selects the simulated venue, which runs only as BFX_PHASE=shadow; "
+            f"a VenueSeam selects the simulated venue, which runs only as BFX_PHASE=simulated; "
             f"got BFX_PHASE={phase_str}"
         )
     # A set legacy knob is a configuration error in every phase, never silently ignored:

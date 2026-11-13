@@ -191,7 +191,7 @@ class DeploymentReconciler:
         self._store = store
         # Level-triggered: while the account is HALTED or a currency's policy is
         # disabled, the managed offers there converge to none (lending envelope
-        # D3/D4); None on paper/shadow.
+        # D3/D4); None only in tests that build the reconciler directly.
         self._managed_sweep = managed_sweep
         self._safety = safety_chain
         self._executor = executor
@@ -229,7 +229,7 @@ class DeploymentReconciler:
             optimizer_fee_rate if optimizer_fee_rate is not None else Decimal("0")
         )
         self._optimizer_horizon_h = optimizer_horizon_h
-        # Optional (None on paper/shadow and in most tests): mirrors each submit
+        # Optional (None only in tests that build the reconciler directly): mirrors each submit
         # outcome into a slot GET /admin/trading-status can read. Purely
         # observational — never consulted for a decision.
         self._attempts = attempt_recorder

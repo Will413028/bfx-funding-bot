@@ -1,6 +1,6 @@
 """A simulated-venue bot process built by ``bot.build_daemon`` on migrated PostgreSQL.
 
-The composition is production's: phase ``shadow`` (venue ``simulated``), the real command
+The composition is production's: phase ``simulated`` (venue ``simulated``), the real command
 gate, safety chain, reconciler, ledger authority and ``BitfinexLiveExecutor`` talking to the
 simulated venue through its own ``httpx`` client. What a test controls:
 
@@ -66,7 +66,7 @@ POLICY = CapitalPolicy(
 )
 AUTH_HOST = "api.bitfinex.com"
 ENV = {
-    "BFX_PHASE": "shadow", "BFX_DEPLOYMENT_ENV": "ci",
+    "BFX_PHASE": "simulated", "BFX_DEPLOYMENT_ENV": "ci",
     "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
     "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
     "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
