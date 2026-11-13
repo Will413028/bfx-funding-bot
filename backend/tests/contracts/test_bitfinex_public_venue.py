@@ -12,6 +12,7 @@ convert to float and int, so a parser alone would accept them.
 import time
 from collections.abc import AsyncIterator
 from decimal import Decimal
+from statistics import median
 
 import httpx
 import pytest
@@ -25,8 +26,13 @@ pytestmark = [pytest.mark.integration, pytest.mark.venue_contract]
 
 SYMBOLS = ("fUST", "fUSD")
 DAY_MS = 86_400_000
-# A daily rate above 1% is 3650% APR; Bitfinex has never cleared that for USD or UST.
+# A daily rate above 1% is 3650% APR: no FRR, resting book level or typical hour is there.
 MAX_DAILY_RATE = Decimal("0.01")
+# One trade can clear above it (fUST printed 1.94% in the 2026-11-13 19:00Z candle), so
+# a single candle is bounded only below the smallest period: a rate swapped with the
+# period would read 2 or more. The median close keeps the 1% bound, which is what
+# catches a unit change.
+MAX_SINGLE_CANDLE_RATE = Decimal("1")
 PERIODS = range(2, 121)
 # The field's default, not Settings(): the workflow has no DATABASE_URL or .env.
 BASE_URL: str = Settings.model_fields["bitfinex_api_base_url"].default
@@ -59,8 +65,9 @@ async def test_funding_candles_parse_and_are_current(rest: BitfinexREST, symbol:
         assert c.open is not None and c.close is not None and c.high is not None
         assert c.low is not None and c.volume is not None
         assert 0 < c.low <= min(c.open, c.close) <= max(c.open, c.close) <= c.high
-        assert c.high <= MAX_DAILY_RATE
+        assert c.high < MAX_SINGLE_CANDLE_RATE
         assert c.volume >= 0
+    assert median(c.close for c in candles if c.close is not None) <= MAX_DAILY_RATE
 
 
 @pytest.mark.parametrize("symbol", SYMBOLS)
