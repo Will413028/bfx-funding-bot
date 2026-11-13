@@ -48,7 +48,7 @@ async def test_path_a_full_event_sequence(monkeypatch: pytest.MonkeyPatch) -> No
         ],
         probe=probe,
         diagnostics=diagnostics,
-        phase=Phase.SHADOW,
+        phase=Phase.SIMULATED,
         strategy=StrategyName.MEAN_REVERSION,
         cell="fUSD_a30",
         account_id="default",

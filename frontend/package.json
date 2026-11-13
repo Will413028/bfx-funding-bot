@@ -16,13 +16,13 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "@hookform/resolvers": "^5.9.2",
+    "@hookform/resolvers": "^7.0.3",
     "@sentry/nextjs": "^10.76.0",
-    "@tanstack/react-query": "^5.104.3",
+    "@tanstack/react-query": "^5.106.1",
     "@tanstack/react-query-devtools": "^5.104.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "lucide-react": "^1.59.0",
+    "lucide-react": "^1.65.0",
     "next": "16.4.3",
     "next-intl": "^4.14.9",
     "nuqs": "^2.10.2",

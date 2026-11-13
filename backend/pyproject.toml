@@ -54,12 +54,9 @@ dev = [
     "import-linter==2.15",
     "pytest-xdist>=3.8.0",
     "pytest-postgresql>=9.1.0",
-    "diff-cover==10.6.0",
-    "mutmut==3.8.0",
+    "diff-cover==11.0.1",
+    "mutmut==3.8.1",
 ]
-
-[project.scripts]
-bfx-shadow = "bfx_funding_bot.apps.bot:main"
 
 [build-system]
 requires = ["hatchling"]

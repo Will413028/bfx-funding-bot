@@ -1,7 +1,7 @@
 """build_daemon refuses what no composition covers: ``paper``, and a simulated boot on ``legacy``.
 
 ``paper`` ran an echo executor that is gone: it is refused in ``load_config`` with a pointer to
-``live``. ``shadow`` runs on the simulated venue, which supports only the ``ledger`` authority: a shadow
+``live``. ``simulated`` runs on the simulated venue, which supports only the ``ledger`` authority: a simulated
 boot on a ``legacy`` epoch stops after the authority read, before the vault, any client or
 any worker exists.
 
@@ -9,7 +9,7 @@ Mutations (one at a time; revert after each):
 
 * accept ``BFX_PHASE=paper`` in ``load_config``: ``test_paper_boot_is_refused_naming_live`` fails.
 * the simulated venue accepts the ``legacy`` epoch: ``test_a_simulated_boot_on_a_legacy_epoch_is_refused`` fails.
-* an env alone (``BFX_PHASE=shadow``, no ``VenueSeam``) builds the simulated venue, or is refused
+* an env alone (``BFX_PHASE=simulated``, no ``VenueSeam``) builds the simulated venue, or is refused
   only after the database or alerts were touched: ``test_an_env_only_simulated_boot_is_refused_at_config_load``
   fails.
 * a ``VenueSeam`` under ``BFX_PHASE=live`` reaches the database or alerts instead of failing in
@@ -51,7 +51,7 @@ async def test_a_simulated_boot_on_a_legacy_epoch_is_refused(
     monkeypatch, tmp_path, httpx_mock,
 ) -> None:
     engine = await _database(
-        monkeypatch, tmp_path, BFX_PHASE="shadow", BFX_DEPLOYMENT_ENV="ci",
+        monkeypatch, tmp_path, BFX_PHASE="simulated", BFX_DEPLOYMENT_ENV="ci",
     )
     # The database is stamped for the realm this process runs as: the realm check passes
     # and the refusal is the authority one.
@@ -89,9 +89,9 @@ async def test_paper_boot_is_refused_naming_live(monkeypatch, tmp_path, httpx_mo
 async def test_an_env_only_simulated_boot_is_refused_at_config_load(
     monkeypatch, tmp_path, httpx_mock,
 ) -> None:
-    """Only a test's ``VenueSeam`` selects the simulated venue. A stray ``BFX_PHASE=shadow``
+    """Only a test's ``VenueSeam`` selects the simulated venue. A stray ``BFX_PHASE=simulated``
     without one fails in ``load_config``: no engine, no boot refusal alert, no request."""
-    engine = await _database(monkeypatch, tmp_path, BFX_PHASE="shadow", BFX_DEPLOYMENT_ENV="ci")
+    engine = await _database(monkeypatch, tmp_path, BFX_PHASE="simulated", BFX_DEPLOYMENT_ENV="ci")
     alerted: list[str] = []
 
     async def refuse(exc: BaseException, **_: object) -> None:
@@ -103,7 +103,7 @@ async def test_an_env_only_simulated_boot_is_refused_at_config_load(
     monkeypatch.setattr(bot, "_refuse_live_boot", refuse)
     monkeypatch.setattr(bot, "make_async_engine_from_url", no_engine)
     try:
-        with pytest.raises(ValueError, match=r"BFX_PHASE=shadow selects the simulated venue"):
+        with pytest.raises(ValueError, match=r"BFX_PHASE=simulated selects the simulated venue"):
             await build_daemon(cells_yaml_path=write_cells_yaml(tmp_path), skip_ws=True)
         assert alerted == []
         assert httpx_mock.get_requests() == []
@@ -129,7 +129,7 @@ async def test_a_seam_under_the_live_phase_is_refused_at_config_load(
     monkeypatch.setattr(bot, "_refuse_live_boot", refuse)
     monkeypatch.setattr(bot, "make_async_engine_from_url", no_engine)
     try:
-        with pytest.raises(ValueError, match=r"VenueSeam selects the simulated venue.*shadow"):
+        with pytest.raises(ValueError, match=r"VenueSeam selects the simulated venue.*BFX_PHASE=simulated"):
             await build_daemon(cells_yaml_path=write_cells_yaml(tmp_path), skip_ws=True,
                                venue_seam=VenueSeam(feed=FixtureMarketFeed()))
         assert alerted == []

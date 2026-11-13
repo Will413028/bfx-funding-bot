@@ -16,7 +16,7 @@ class Level(StrEnum):
 
 class Phase(StrEnum):
     LIVE = "live"
-    SHADOW = "shadow"
+    SIMULATED = "simulated"
 
 
 class EventType(StrEnum):

@@ -29,7 +29,7 @@ def test_metrics_endpoint_returns_prometheus_text() -> None:
     metrics = DaemonMetrics()
     metrics.register_probe(probe)
     metrics.set_daemon_info(
-        service_version="abc1234", deployment_environment="ci", phase="shadow",
+        service_version="abc1234", deployment_environment="ci", phase="simulated",
     )
     metrics.observe_operational_event({"event_type": "signal", "level": "info"})
 

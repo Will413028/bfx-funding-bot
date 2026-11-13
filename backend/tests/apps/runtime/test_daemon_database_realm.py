@@ -1,6 +1,6 @@
 """build_daemon refuses a database whose realm stamp is missing or is another realm's (E2).
 
-The check runs in every phase, not only for live: a ``shadow`` process (which stops at the
+The check runs in every phase, not only for live: a ``simulated`` process (which stops at the
 P2b refusal only after this check) pointed at the production database, and a process running
 under realm ``ci`` on a prod-stamped database (which ``apps/config.py`` alone allows), must
 both stop before they read anything else.
@@ -8,7 +8,7 @@ both stop before they read anything else.
 Mutations (one at a time; revert after each):
 
 * skip ``assert_database_realm`` in ``build_daemon``: every refusal test here fails.
-* run it only for the live phase: the shadow-phase tests fail.
+* run it only for the live phase: the simulated-phase tests fail.
 * compare against a constant instead of ``config.deployment_environment``: the mismatch tests fail.
 * treat an empty ``database_realm`` as the process realm: the unstamped tests fail.
 """
@@ -36,7 +36,7 @@ async def _database(monkeypatch, tmp_path, *, phase: str, realm: str | None, pro
     configure_account_env(monkeypatch)
     values = {"BFX_PHASE": phase, "BFX_DEPLOYMENT_ENV": process_realm, "BFX_HEALTHZ_PORT": "0",
               "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'realm.db'}"}
-    if phase in {"live", "shadow"}:
+    if phase in {"live", "simulated"}:
         values.update({
             "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
             "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
@@ -58,7 +58,7 @@ async def _database(monkeypatch, tmp_path, *, phase: str, realm: str | None, pro
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("phase", ["live", "shadow"])
+@pytest.mark.parametrize("phase", ["live", "simulated"])
 @pytest.mark.parametrize(("stamp", "match"), [
     (None, "database_realm_unstamped"),
     ("prod", "database_realm_mismatch stamp=prod process=ci"),
@@ -72,7 +72,7 @@ async def test_boot_refuses_an_unstamped_or_foreign_database(
 
     engine = await _database(monkeypatch, tmp_path, phase=phase, realm=stamp, process_realm="ci")
     # The simulated venue is selected only by a test's VenueSeam.
-    seam = VenueSeam(feed=FixtureMarketFeed()) if phase == "shadow" else None
+    seam = VenueSeam(feed=FixtureMarketFeed()) if phase == "simulated" else None
     try:
         with pytest.raises(DatabaseRealmMismatch, match=match):
             await build_daemon(

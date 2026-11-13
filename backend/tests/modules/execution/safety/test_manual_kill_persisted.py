@@ -131,7 +131,7 @@ async def test_the_retired_env_flag_has_no_effect(
 async def test_without_a_store_only_a_tripped_protection_blocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """paper/shadow construct the guard with no store: only a tripped protection blocks."""
+    """A guard built with no store (tests only; the bot always passes one): only a tripped protection blocks."""
     assert (await ManualKillGuard().evaluate(_post(), _ctx())).allowed is True
     tripped = ManualKillGuard(pending_stop=lambda: "writer_lock_lost")
     assert (await tripped.evaluate(_post(), _ctx())).allowed is False
