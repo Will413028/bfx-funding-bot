@@ -14,7 +14,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import text
 
-from tests.pg_templates import alembic, template_at, upgrade_head_after_w3
+from tests.pg_templates import alembic, load_revision, template_at, upgrade_head_after_w3
 
 from .test_ledger_schema_roles import _P, _prepare
 from .test_operator_request_causation import (
@@ -128,9 +128,8 @@ _VIOLATIONS = {
 
 
 def test_every_precondition_has_a_violation_case() -> None:
-    from .test_database_realm import _load
-
-    names = [what for what, _sql in _load(f"{_REVISION}_drop_request_product_columns.py").PRECONDITIONS]
+    names = [what for what, _sql
+             in load_revision(f"{_REVISION}_drop_request_product_columns.py").PRECONDITIONS]
     assert sorted(names) == sorted(_VIOLATIONS)
 
 

@@ -14,10 +14,12 @@ database and so travel with each copy.
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from types import ModuleType
 from uuid import uuid4
 
 from sqlalchemy import create_engine
@@ -42,6 +44,16 @@ def database_url_env(url: str) -> Iterator[None]:
             os.environ.pop("DATABASE_URL", None)
         else:
             os.environ["DATABASE_URL"] = previous
+
+
+def load_revision(filename: str) -> ModuleType:
+    """One file of ``alembic/versions`` as a module, for a test that reads its constants."""
+    path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / filename
+    spec = importlib.util.spec_from_file_location(f"revision_{filename[:12]}", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def alembic(url: str, name: str, *args: str) -> None:

@@ -322,7 +322,7 @@ async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(gat
         exposure=status_reads(gate_stack))
     snapshot = await service.snapshot()
     assert snapshot["account_id"] == str(ACCOUNT)
-    assert snapshot["deployment_environment"] == "ci"
+    assert "deployment_environment" not in snapshot
     status = snapshot["symbols"]["fUST"]
     missing = (await service.snapshot())["symbols"]["fUSD"]
     assert missing == {"capital_available": False, "reason": "policy_unavailable"}
@@ -338,7 +338,7 @@ async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(gat
     before = (await attempts(gate_stack), await clock_revision(gate_stack))
     result = await service.dry_run(symbol="fUST", amount=701)
     assert result["account_id"] == str(ACCOUNT)
-    assert result["deployment_environment"] == "ci"
+    assert "deployment_environment" not in result
     assert not result["would_submit_any"]
     assert (await attempts(gate_stack), await clock_revision(gate_stack)) == before
     async with gate_stack.factory.begin() as session:

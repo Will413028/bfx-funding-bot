@@ -31,7 +31,13 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, template_at, upgrade_head_after_w3
+from tests.pg_templates import (
+    LAST_REVERSIBLE_REVISION,
+    alembic,
+    load_revision,
+    template_at,
+    upgrade_head_after_w3,
+)
 
 from .test_ledger_schema_roles import (
     _A,
@@ -529,9 +535,8 @@ def _kill_with_two_cancel_alls_of_one_currency(conn) -> None:
 
 
 def test_every_precondition_has_a_violation_case() -> None:
-    from .test_database_realm import _load
-
-    names = [what for what, _sql in _load(f"{_REVISION}_operator_request_causation.py").PRECONDITIONS]
+    names = [what for what, _sql
+             in load_revision(f"{_REVISION}_operator_request_causation.py").PRECONDITIONS]
     assert sorted(names) == sorted(_VIOLATIONS)
 
 
