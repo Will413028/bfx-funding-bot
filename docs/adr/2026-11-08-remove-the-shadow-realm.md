@@ -58,3 +58,7 @@ Followup 第三項已由 owner 決定：每列的 `deployment_environment` 欄�
 ## Amendment (2026-11-13): phase 改名完成
 
 Followup 第一項已做：phase `shadow` 改名為 `simulated`（`Phase.SIMULATED`、`BFX_PHASE=simulated`）。舊名不留別名，`BFX_PHASE=shadow` 在 `load_config` 以「must be simulated or live」拒絕；現行部署沒有設定它（`deploy/vm/live.env` 是 `live`）。D2／D4 內文的「simulated phase」即此值。
+
+## Amendment (2026-11-13): `OPTIMIZER_SHADOW` 移除完成
+
+Followup 第二項已做：`ExecutionPolicy` 只剩 `book_guarded` 與 `optimizer_live`，`BFX_EXECUTION_POLICY=optimizer_shadow` 在 `load_config` 拒絕。只有這個 policy 會發的 `funding.optimizer.no_recommendation` 事件與 stdout sink 的 `optimizer_outcome` evidence key 一併移除；`optimizer_live` 下 optimizer 沒有結果時照舊以 `funding.execution.blocked`（reason `optimizer_unavailable`）記錄。沒有用到的 console script `bfx-shadow` 也刪除（image 以 `python -m bfx_funding_bot.apps.bot` 啟動）。

@@ -58,9 +58,6 @@ dev = [
     "mutmut==3.8.0",
 ]
 
-[project.scripts]
-bfx-shadow = "bfx_funding_bot.apps.bot:main"
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

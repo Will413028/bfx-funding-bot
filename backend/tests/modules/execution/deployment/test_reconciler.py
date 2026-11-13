@@ -531,7 +531,8 @@ def test_reconciler_rejects_mismatched_execution_gate_policy() -> None:
         _build(
             exposure=D("370"),
             quotes=[_post_quote("fUST_a30")],
-            execution_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+            execution_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+            optimizer_fee_rate=D("0.15"),
         )
 
 
@@ -662,63 +663,6 @@ async def test_reconciler_releases_only_audited_ready_to_executor_and_event():
     assert order_submit["payload"]["execution_decision_id"] == ready.decision_id
 
 
-async def test_optimizer_shadow_records_unavailable_model_without_blocking_book_guarded_submit():
-    """Shadow model failure is observable but cannot change deploy eligibility or rate."""
-    audit = _Audit()
-    sink = _CapturingSink()
-    rec, executor, _safety = _build(
-        exposure=D("370"),
-        quotes=[_post_quote("fUST_p2")],
-        book_provider=_SnapshotProvider(_ask_snapshot()),
-        audit=audit,
-        event_sink=sink,
-        gate_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
-        execution_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
-        fill_model_provider=_FillModelProvider(FillModelUnavailable("missing")),
-    )
-
-    await rec.deploy()
-
-    assert [decision.offer_rate for decision in executor.submitted] == [Decimal("0.00024999")]
-    assert audit.last.model_evidence["unavailable_reason"] == "fill_model_missing"
-    assert [name for name, _ in sink.execution_events] == [
-        "funding.fill_model.unavailable",
-        "funding.optimizer.no_recommendation",
-        "funding.execution.submitted",
-    ]
-
-
-@pytest.mark.parametrize("unavailable_reason", [
-    "low_confidence", "scope_mismatch", "unversioned",
-])
-async def test_optimizer_shadow_emits_unavailable_event_for_canonical_reason(
-    unavailable_reason: str,
-) -> None:
-    audit = _Audit()
-    sink = _CapturingSink()
-    rec, executor, _safety = _build(
-        exposure=D("370"),
-        quotes=[_post_quote("fUST_p2")],
-        book_provider=_SnapshotProvider(_ask_snapshot()),
-        audit=audit,
-        event_sink=sink,
-        gate_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
-        execution_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
-        fill_model_provider=_FillModelProvider(
-            FillModelUnavailable(reason=unavailable_reason),  # type: ignore[arg-type]
-        ),
-    )
-
-    await rec.deploy()
-
-    assert [decision.offer_rate for decision in executor.submitted] == [Decimal("0.00024999")]
-    assert [name for name, _ in sink.execution_events] == [
-        "funding.fill_model.unavailable",
-        "funding.optimizer.no_recommendation",
-        "funding.execution.submitted",
-    ]
-
-
 async def test_optimizer_live_uses_selected_exact_period_rate_only_after_audit():
     """Live optimizer selection remains behind the existing audit-before-submit gate."""
     audit = _Audit()
@@ -798,28 +742,6 @@ async def test_optimizer_live_structural_evidence_is_blocked_without_submit() ->
     assert audit.last.failed_dependency == "optimizer"
 
 
-async def test_optimizer_shadow_keeps_book_guarded_rate_when_optimizer_selects() -> None:
-    """A valid shadow result is observational; the existing book price is submitted."""
-    audit = _Audit()
-    rec, executor, _safety = _build(
-        exposure=D("370"),
-        quotes=[_post_quote("fUST_p2")],
-        book_provider=_SnapshotProvider(_ask_snapshot()),
-        audit=audit,
-        gate_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
-        execution_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
-        fill_model_provider=_FillModelProvider(_fill_evidence()),
-        optimizer_horizon_h=1,
-        rate_optimizer=RateOptimizer(),
-    )
-
-    await rec.deploy()
-
-    assert [decision.offer_rate for decision in executor.submitted] == [Decimal("0.00024999")]
-    assert audit.last.applied_rate == D("0.00024999")
-    assert audit.last.model_evidence["optimizer"]["outcome"] == "selected"
-
-
 async def test_optimizer_reconciler_passes_exact_period_taker_candidate() -> None:
     """TAKER is a real exact-period candidate and is never relabeled as maker."""
     audit = _Audit()
@@ -828,9 +750,10 @@ async def test_optimizer_reconciler_passes_exact_period_taker_candidate() -> Non
         quotes=[_post_quote("fUST_p2")],
         book_provider=_SnapshotProvider(_bid_snapshot()),
         audit=audit,
-        gate_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
-        execution_policy=ExecutionPolicy.OPTIMIZER_SHADOW,
+        gate_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+        execution_policy=ExecutionPolicy.OPTIMIZER_LIVE,
         fill_model_provider=_FillModelProvider(_fill_evidence()),
+        optimizer_fee_rate=D("0.15"),
         optimizer_horizon_h=1,
     )
 

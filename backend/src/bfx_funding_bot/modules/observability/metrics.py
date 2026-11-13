@@ -91,7 +91,7 @@ _KNOWN_EXECUTION_REASONS = frozenset({
     "safety_guard_blocked",
 })
 _KNOWN_EXECUTION_POLICIES = frozenset({
-    "book_guarded", "optimizer_shadow", "optimizer_live",
+    "book_guarded", "optimizer_live",
 })
 _KNOWN_BOOK_SNAPSHOT_RESULTS = frozenset({"valid", "invalid", "unavailable", "error"})
 
