@@ -111,8 +111,7 @@ class _FakeRest:
 def _sync(rest: _FakeRest, sf: async_sessionmaker, now: int) -> InterestLedgerSync:
     return InterestLedgerSync(
         rest=rest, ctx=_Ctx(), session_factory=sf,  # type: ignore[arg-type]
-        exchange_account_id=ACCOUNT, deployment_environment="live",
-        currencies=["UST"], clock=lambda: now,
+        exchange_account_id=ACCOUNT, currencies=["UST"], clock=lambda: now,
     )
 
 
@@ -126,7 +125,6 @@ async def test_sync_is_idempotent_and_resumes_from_latest_with_overlap(sf) -> No
     async with sf() as session:
         rows = (await session.scalars(select(FundingInterestPaymentRow))).all()
     assert sorted(r.ledger_id for r in rows) == [10575117152, 10577034846, 10578187002]
-    assert {r.deployment_environment for r in rows} == {"live"}
     assert rest.windows[0] == (now - 365 * MS_PER_DAY, now)
     assert rest.windows[1] == (1790472624000 - MS_PER_DAY, now)
 

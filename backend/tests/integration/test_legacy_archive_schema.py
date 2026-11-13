@@ -279,7 +279,7 @@ def test_the_web_api_reads_the_archived_history(ledger_db) -> None:  # noqa: F81
             async with async_sessionmaker(engine)() as session, session.begin():
                 await session.execute(text("SET LOCAL ROLE bfx_webapi"))
                 return await ArchivedExecutionHistory().list_executions(
-                    session, Scope(UUID(_ACCOUNT), "ci"), before=None, limit=1, event_type=None)
+                    session, Scope(UUID(_ACCOUNT)), before=None, limit=1, event_type=None)
         finally:
             await engine.dispose()
 

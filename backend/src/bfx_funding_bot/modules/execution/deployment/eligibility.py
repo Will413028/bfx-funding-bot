@@ -508,7 +508,6 @@ class ExecutionGate:
         return ExecutionDecision(
             decision_id=decision_id,
             account_id=audit_context.account_id,
-            deployment_environment=audit_context.deployment_environment,
             reconcile_id=reconcile_id,
             cell_id=audit_context.cell_id,
             strategy=audit_context.strategy,

@@ -391,13 +391,11 @@ export interface components {
         };
         /**
          * BlockedScope
-         * @description The account, environment and symbol an open uncertainty blocks.
+         * @description The account and symbol an open uncertainty blocks.
          */
         BlockedScope: {
             /** Exchangeaccountid */
             exchangeAccountId: string;
-            /** Environment */
-            environment: string;
             /** Symbol */
             symbol: string;
         };
@@ -596,8 +594,6 @@ export interface components {
         DryRun: {
             /** Account Id */
             account_id: string;
-            /** Deployment Environment */
-            deployment_environment: string;
             /** Symbols */
             symbols: {
                 [key: string]: components["schemas"]["DryRunSymbol"];
@@ -763,8 +759,6 @@ export interface components {
         FundingStatus: {
             /** Account Id */
             account_id: string;
-            /** Deployment Environment */
-            deployment_environment: string;
             halt: components["schemas"]["HaltStatus"];
             /** Symbols */
             symbols: {

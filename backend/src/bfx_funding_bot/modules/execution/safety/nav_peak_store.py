@@ -24,11 +24,9 @@ class NavPeakStore:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         account_id: str,
-        deployment_environment: str,
     ) -> None:
         self._sf = session_factory
         self._account_id = account_id
-        self._env = deployment_environment
 
     async def load(self) -> dict[str, Decimal]:
         async with self._sf() as session:
@@ -41,7 +39,6 @@ class NavPeakStore:
                             exchange_account_column=NavPeakRow.exchange_account_id,
                             legacy_account_column=NavPeakRow.account_id,
                         ),
-                        NavPeakRow.deployment_environment == self._env,
                     )
                 )
             ).scalars().all()
@@ -58,7 +55,6 @@ class NavPeakStore:
                             exchange_account_column=NavPeakRow.exchange_account_id,
                             legacy_account_column=NavPeakRow.account_id,
                         ),
-                        NavPeakRow.deployment_environment == self._env,
                         NavPeakRow.symbol == symbol,
                     )
                 )
@@ -68,7 +64,6 @@ class NavPeakStore:
                     NavPeakRow(
                         account_id=self._account_id,
                         exchange_account_id=account_id_uuid_or_none(self._account_id),
-                        deployment_environment=self._env,
                         symbol=symbol,
                         peak=peak,
                         updated_at_ms=updated_at_ms,
@@ -80,7 +75,6 @@ class NavPeakStore:
                         update(NavPeakRow)
                         .where(
                             NavPeakRow.account_id == self._account_id,
-                            NavPeakRow.deployment_environment == self._env,
                             NavPeakRow.symbol == symbol,
                         )
                         .values(peak=peak, updated_at_ms=updated_at_ms)

@@ -12,7 +12,7 @@ from research.env; the runner refuses to start without it). The retired webapi
 endpoint had its own BFX_PUBLIC_EXCHANGE_ACCOUNT_ID because the webapi serves every
 account; attribution_weekly is computed for this one only.
 
-Run from backend/ (env: DATABASE_URL / BFX_EXCHANGE_ACCOUNT_ID / BFX_DEPLOYMENT_ENV):
+Run from backend/ (env: DATABASE_URL / BFX_EXCHANGE_ACCOUNT_ID):
   uv run python -m scripts.build_public_site --out /tmp/public-site
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory
-from bfx_funding_bot.core.settings import Settings, require_deployment_environment
+from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.accounts.exchange_accounts import account_id_canonical
 from bfx_funding_bot.modules.candles.tables import FundingCandleRow
 from bfx_funding_bot.modules.live_validation.public_site import (
@@ -60,14 +60,12 @@ async def _amain(args: argparse.Namespace) -> int:
     if not raw_account_id:
         raise RuntimeError("BFX_EXCHANGE_ACCOUNT_ID is required")
     account_id = account_id_canonical(raw_account_id)
-    env = require_deployment_environment()
     engine = make_engine(Settings())
     try:
         async with make_session_factory(engine)() as session:
             weekly = list((await session.execute(
                 select(AttributionWeeklyRow)
-                .where(AttributionWeeklyRow.exchange_account_id == account_id,
-                       AttributionWeeklyRow.deployment_environment == env)
+                .where(AttributionWeeklyRow.exchange_account_id == account_id)
             )).scalars())
             csv_rows = {}
             for symbol in CSV_SYMBOLS:

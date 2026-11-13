@@ -86,17 +86,14 @@ def test_contract_declares_uuid_rekey_collision_groups() -> None:
 def test_runtime_orm_primary_keys_match_post_cutover_uuid_contract() -> None:
     assert {column.name for column in NavPeakRow.__table__.primary_key} == {
         "exchange_account_id",
-        "deployment_environment",
         "symbol",
     }
     assert {column.name for column in AttributionWeeklyRow.__table__.primary_key} == {
-        "deployment_environment",
         "exchange_account_id",
         "cell",
         "week_start_ms",
     }
     assert {column.name for column in ConfigRegimeRow.__table__.primary_key} == {
-        "deployment_environment",
         "exchange_account_id",
         "recorded_at_ms",
     }

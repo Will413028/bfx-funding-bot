@@ -65,12 +65,13 @@ webapi 也沒有啟用的端點，資料庫的 trigger 拒絕 table owner 與 `b
 container，用 `/opt/bfx/runtime/migrate.env`（owner role）。在正式環境，script 是 capital policy 的第二個寫入者，和 bot 用同一把 scope lock 序列化（ADR 2026-09-26 D1、ADR 2026-10-19 D4）：
 
 ```bash
-python -m scripts.amend_capital_policy --exchange-account-id UUID --environment prod \
+python -m scripts.amend_capital_policy --exchange-account-id UUID \
   --symbol fUST --max-offer-amount 200 --min-period-days 2 --max-period-days 2 \
   --max-open-offers 6 --rate-floor-ratio 0.5 --min-rate-apr 0.01
 # 看完整報告後，同一組參數加 --apply-digest DIGEST --reason "為什麼改" 再跑一次
 ```
 
+- 報告的 `realm` 是這次連到的資料庫的 stamp（`prod`／`ci`）：腳本不讀 `BFX_DEPLOYMENT_ENV`，套用前確認它是預期的資料庫；`realm` 進 digest，換一個庫 digest 就對不上。
 - apply 必須帶非空白的 `--reason`（dry run 不用）：owner 的 revision 沒有對應請求，原因只能記在 revision 的 `source`。
 
 - 第一次設定包絡要五個欄位齊全（`envelope_incomplete` 會列出缺哪個）；之後可以只改其中一個。
@@ -493,7 +494,7 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 
 - 代表：輪替請求被拒，憑證沒有任何改動，`reason` 為：
   - 系統自己會恢復、重送即可：`recipient_key_stale`（請求封給的是已重啟的 bot run，CLI 會封給目前這次）、`deployment_in_progress`（最新的部署列是 15 分鐘內的 `started`，部署 settle 期間重啟會讓部署判失敗）、`bot_recently_started`（這次 bot 開機未滿 10 分鐘，部署可能仍在做 health 檢查與 settle；10 分鐘後重送）、`active_credential_changed`（送出後 active 憑證已換過）、`operator_not_authorized`（operator 的 membership 失效，先修好）。
-  - operator 要判斷：`credential_account_mismatch`（新 key 屬於另一個 Bitfinex 帳號，確認建 key 的帳號）、`credential_reused`（這把 key 是現行的、或曾經用過並已 retired，請建新 key）、`invalid_credentials`（Bitfinex 拒絕這把 key）、`funding_write_required`／`withdraw_must_be_disabled`／`unexpected_write_scope:*`（調整 key 權限：只開 funding 寫入）、`account_identity_unavailable`（無法讀到 key 所屬帳號，確認 key 有 account info 讀取權限）、`sealed_payload_invalid`（密文損毀或被搬動，重送）。
+  - operator 要判斷：`credential_account_mismatch`（新 key 屬於另一個 Bitfinex 帳號，確認建 key 的帳號）、`credential_reused`（這把 key 是現行的、或曾經用過並已 retired，請建新 key）、`invalid_credentials`（Bitfinex 拒絕這把 key）、`funding_write_required`／`withdraw_must_be_disabled`／`unexpected_write_scope:*`（調整 key 權限：只開 funding 寫入）、`account_identity_unavailable`（無法讀到 key 所屬帳號，確認 key 有 account info 讀取權限）、`sealed_payload_invalid`（密文損毀或被搬動，或是在換了密封格式的發版之前送出的請求；重送）。
 - 系統會做：不碰憑證，請求就此結案，bot 不重啟。
 - operator 判斷：依上面分類處理後重新送出（§11）。
 
@@ -578,10 +579,9 @@ VM 上 `/home/ubuntu/bfx-funding-bot` 的 working tree **不再被讀取**（它
 - **Image**：ledger 最新 `deployed` 列的 backend digest（`<repository>@sha256:…`，與 production
   跑的是同一個），不用 `bfx-bot:local`。步驟來自已安裝的工具版本；若兩者 revision 不同
   （部署後工具安裝失敗），照跑並在 journal 印 warning。
-- **Env**：只傳三個值——`DATABASE_URL`、`BFX_EXCHANGE_ACCOUNT_ID` 取自 `/opt/bfx/runtime/research.env`
+- **Env**：只傳兩個值——`DATABASE_URL`、`BFX_EXCHANGE_ACCOUNT_ID` 取自 `/opt/bfx/runtime/research.env`
   （研究 role `bfx_research`：只能寫研究表，不能寫 ledger 或 `trading_state`；`deployments` 唯讀，給交付指標；
-  [fresh-host-setup §1](fresh-host-setup.md#1-database-roles-與-grants)），`BFX_DEPLOYMENT_ENV` 取自該部署 revision 的 `live.env`
-  （`/var/lib/bfx-deploy/releases/<rev>/live.env`）。runner 不讀 `bot.env`；`research.env` 不存在或不是
+  [fresh-host-setup §1](fresh-host-setup.md#1-database-roles-與-grants)）。runner 不讀 `bot.env`；`research.env` 不存在或不是
   root 0600 時拒跑（`cannot run: secret_file_missing:research.env`／`secret_file_mode_not_0600:research.env`），不會退回 `bot.env`。
 - **Hardening**：read-only rootfs、UID 1000、cap-drop ALL、no-new-privileges，只有 `/tmp`（tmpfs）
   與 `/home/ubuntu/bfx/reports` → `/reports` 可寫；CI 以

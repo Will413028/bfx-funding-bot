@@ -71,7 +71,7 @@ def _credit(credit_id: int, opened: int, closed: int) -> FundingCreditHistoryRow
     # 150.76884612 fUST at 0.00019999, the live account's 2026-09-25 credit size
     return FundingCreditHistoryRow(
         exchange_account_id=ACCOUNT, kind="credit", credit_id=credit_id,
-        deployment_environment="prod", symbol="fUST", side=1, mts_create=opened,
+        symbol="fUST", side=1, mts_create=opened,
         mts_update=opened, amount=Decimal("150.76884612"), status="CLOSED",
         rate=Decimal("0.00019999"), period_days=2, mts_opening=opened, mts_last_payout=closed,
     )
@@ -81,17 +81,15 @@ def _ours(credit_id: int, opened: int) -> list[object]:
     """Trade → our offer → execution decision, so the credit is the bot's."""
     return [
         FundingTradeRow(
-            exchange_account_id=ACCOUNT, trade_id=credit_id, deployment_environment="prod",
-            symbol="fUST", mts_create=opened, offer_id=credit_id, amount=Decimal("150.76884612"),
+            exchange_account_id=ACCOUNT, trade_id=credit_id, symbol="fUST", mts_create=opened, offer_id=credit_id, amount=Decimal("150.76884612"),
             rate=Decimal("0.00019999"), period_days=2, maker=None,
         ),
         AttributionLegacyOfferCellRow(
-            exchange_account_id=ACCOUNT, deployment_environment="prod",
-            venue_offer_id=str(credit_id), cell="fUST_p2",
+            exchange_account_id=ACCOUNT, venue_offer_id=str(credit_id), cell="fUST_p2",
         ),
         ExecutionDecisionRow(
             decision_id=f"d{credit_id}", account_id=str(ACCOUNT), exchange_account_id=ACCOUNT,
-            deployment_environment="prod", reconcile_id="r", cell_id="fUST_p2", symbol="fUST",
+            reconcile_id="r", cell_id="fUST_p2", symbol="fUST",
             signal_correlation_id=f"s{credit_id}", outcome="submitted",
             signal_rate=Decimal("0.00019999"), amount_usdt=Decimal("150.76884612"),
             duration_days=2, model_evidence={}, safety_result={}, execution_policy="p",
@@ -110,12 +108,11 @@ async def test_zero_allocation_cap_env_uses_the_ledger_balance(sf, monkeypatch):
                    _credit(2, now - 3 * DAY, now - DAY),
                    *_ours(1, now - 10 * DAY), *_ours(2, now - 3 * DAY)])
         s.add_all([FundingInterestPaymentRow(
-            exchange_account_id=ACCOUNT, ledger_id=i, deployment_environment="prod",
-            currency="UST", mts=now - i * DAY, amount=Decimal("0.05"),
+            exchange_account_id=ACCOUNT, ledger_id=i, currency="UST", mts=now - i * DAY, amount=Decimal("0.05"),
             balance=Decimal("395.55"), description=DESC,
         ) for i in range(1, 12)])
         await s.commit()
-    report = await build_g3_report(capital=_parse_capital(None), session_factory=sf, deployment_environment="prod")
+    report = await build_g3_report(capital=_parse_capital(None), session_factory=sf)
     assert report.capital_source == "ledger"
     assert report.coverage.bot_credits == 2
     assert report.deployment.cap == Decimal("395.50")          # balance before each payout
@@ -130,7 +127,7 @@ async def test_without_capital_or_ledger_fails_with_a_clear_message(sf, monkeypa
         s.add(_credit(1, now - 2 * DAY, now - DAY))
         await s.commit()
     with pytest.raises(RuntimeError, match="--capital"):
-        await build_g3_report(capital=None, session_factory=sf, deployment_environment="prod")
-    report = await build_g3_report(capital=Decimal("570"), session_factory=sf, deployment_environment="prod")
+        await build_g3_report(capital=None, session_factory=sf)
+    report = await build_g3_report(capital=Decimal("570"), session_factory=sf)
     assert isinstance(report.verdict.state, VerdictState)
     assert report.capital_source == "--capital 570"

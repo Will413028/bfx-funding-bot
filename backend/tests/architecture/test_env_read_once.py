@@ -1,7 +1,7 @@
 """The deployment environment is read by assembly points only (plan 2026-11-08, D4).
 
-``core/settings.py`` owns the two readers; ``apps`` and each script's ``main`` call them
-once and pass the value down. ``modules`` and the rest of ``core`` neither name the
+``core/settings.py`` owns the two readers; the bot's and the web API's assembly call them
+once and pass the value down (D7: the stamp check and telemetry labels are its only uses). ``modules`` and the rest of ``core`` neither name the
 variable nor call a reader, so no code path can pick up a second, different value.
 
 Mutation check: call ``require_deployment_environment()`` again in
@@ -17,5 +17,6 @@ READ = re.compile(r"BFX_DEPLOYMENT_ENV|require_deployment_environment|deployment
 def test_modules_and_core_do_not_read_the_deployment_environment() -> None:
     readers = sorted(str(path.relative_to(SRC)) for path in SRC.rglob("*.py")
                      if READ.search(path.read_text()))
-    assert readers == ["apps/bot.py", "apps/config.py", "apps/operator_cli.py",
-                       "apps/webapi.py", "core/settings.py"]
+    # The bot compares it with the database's stamp; the bot and the web API label their
+    # telemetry with it. The operator CLI reads none.
+    assert readers == ["apps/bot.py", "apps/config.py", "apps/webapi.py", "core/settings.py"]

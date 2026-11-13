@@ -58,7 +58,7 @@ from bfx_funding_bot.modules.observability import alerts
 from bfx_funding_bot.modules.observability.alerts import FOREIGN_LENDING
 from tests.modules.execution.safety.test_protection import MIN_HALT, Clock, RuleState
 
-SCOPE = Scope(uuid4(), "ci")
+SCOPE = Scope(uuid4())
 OBS = uuid4()
 D = Decimal
 

@@ -91,8 +91,8 @@ from .bot_e2e import CELL, POLICY, SCOPE, AllowGuard, ledger_db  # noqa: F401 - 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 ACCOUNT_ID = str(TEST_EXCHANGE_ACCOUNT_ID)
-SIM = SimAccount(ACCOUNT_ID, "ci")
-CAPITAL_SCOPE = CapitalScope(TEST_EXCHANGE_ACCOUNT_ID, "ci", "fUST", CELL)
+SIM = SimAccount(ACCOUNT_ID)
+CAPITAL_SCOPE = CapitalScope(TEST_EXCHANGE_ACCOUNT_ID, "fUST", CELL)
 CONSERVED = {"baseline", "conserved"}
 INJECTED = (FaultKind.UNKNOWN_PLACED_LOST, FaultKind.UNKNOWN_NOT_PLACED_LOST,
             FaultKind.UNKNOWN_5XX_ERROR)
@@ -174,8 +174,7 @@ class Rig:
         async with self.factory.begin() as session:
             session.add(ExecutionDecisionRow(
                 decision_id=decision_id, account_id=ACCOUNT_ID,
-                exchange_account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci",
-                reconcile_id="oracle", cell_id=CELL, symbol="fUST",
+                exchange_account_id=TEST_EXCHANGE_ACCOUNT_ID, reconcile_id="oracle", cell_id=CELL, symbol="fUST",
                 signal_correlation_id=str(correlation), outcome="ready",
                 signal_rate=rate, applied_rate=rate, amount_usdt=amount, duration_days=days,
                 model_evidence={}, safety_result={}, execution_policy="oracle",
@@ -309,8 +308,7 @@ async def rig_factory(ledger_db):  # noqa: F811
             http=http, configured_symbols=frozenset({"fUST"}), auth_gate=auth_gate, clock=clock)
         gate = AccountCommandGate(
             executor, bus=bus, uncertainty_reader=build_uncertainty_reader(factory),
-            safety_evaluator=_Allow(), deployment_environment="ci",
-            clock=clock,
+            safety_evaluator=_Allow(), clock=clock,
             boundary=CommandBoundary(
                 SCOPE, factory,
                 build_command_journal(factory, max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS),

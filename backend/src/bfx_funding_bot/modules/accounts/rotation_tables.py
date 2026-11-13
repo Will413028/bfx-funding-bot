@@ -45,7 +45,6 @@ class CredentialRotationRecipientRow(Base):
                    name="fk_credential_rotation_recipients_account"),
         nullable=False,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     run_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("bot_runs.run_id", ondelete="RESTRICT",
@@ -59,7 +58,7 @@ class CredentialRotationRecipientRow(Base):
         CheckConstraint("octet_length(public_key) = 32 AND created_at_ms >= 0",
                         name="ck_credential_rotation_recipients_key").ddl_if(dialect="postgresql"),
         Index("ix_credential_rotation_recipients_run", "exchange_account_id",
-              "deployment_environment", "run_id", "created_at_ms"),
+              "run_id", "created_at_ms"),
     )
 
 
@@ -74,7 +73,7 @@ class CredentialRotationRequestRow(Base):
 
     __tablename__ = "credential_rotation_requests"
     REQUEST_COLUMNS: ClassVar[tuple[str, ...]] = (
-        "request_id", "exchange_account_id", "deployment_environment", "recipient_id",
+        "request_id", "exchange_account_id", "recipient_id",
         "replaces_credential_id", "sealed_credential", "label", "reason", "requested_by",
         "created_at_ms",
     )
@@ -92,7 +91,6 @@ class CredentialRotationRequestRow(Base):
                    name="fk_credential_rotation_requests_account"),
         nullable=False,
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     recipient_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("credential_rotation_recipients.recipient_id", ondelete="RESTRICT",
@@ -131,13 +129,13 @@ class CredentialRotationRequestRow(Base):
             "AND outcome_reason IS NOT NULL)",
             name="ck_credential_rotation_requests_outcome",
         ),
-        # One waiting rotation per account and environment.
+        # One waiting rotation per account.
         Index("uq_credential_rotation_requests_pending", "exchange_account_id",
-              "deployment_environment", unique=True,
+              unique=True,
               postgresql_where=text("state = 'requested'"),
               sqlite_where=text("state = 'requested'")),
         Index("ix_credential_rotation_requests_queue", "exchange_account_id",
-              "deployment_environment", "state", "created_at_ms"),
+              "state", "created_at_ms"),
     )
 
 

@@ -8,8 +8,7 @@
 #
 # Image and env: exactly what docker-compose.weekly-report.yml gets, resolved by the
 # same plan (bfx_weekly_report.build_plan): the ledger's deployed backend digest, the
-# research role's DATABASE_URL and BFX_EXCHANGE_ACCOUNT_ID from research.env, and
-# BFX_DEPLOYMENT_ENV from that revision's live.env. No Cloudflare token: the unit's
+# research role's DATABASE_URL and BFX_EXCHANGE_ACCOUNT_ID from research.env. No Cloudflare token: the unit's
 # unprivileged publish step uploads what this writes.
 #
 # Hardening is the weekly job's, enforced in CI by compose_policy.py --kind public-site.
@@ -35,7 +34,6 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       BFX_EXCHANGE_ACCOUNT_ID: ${BFX_EXCHANGE_ACCOUNT_ID:?BFX_EXCHANGE_ACCOUNT_ID is required}
-      BFX_DEPLOYMENT_ENV: ${BFX_DEPLOYMENT_ENV:?BFX_DEPLOYMENT_ENV is required}
       BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
       BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
       PYTHONDONTWRITEBYTECODE: "1"

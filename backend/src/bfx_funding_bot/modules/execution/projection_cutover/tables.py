@@ -23,7 +23,6 @@ class ArchiveRun(ArchiveBase):
 
     run_id: Mapped[UUID] = mapped_column(PG_UUID, primary_key=True)
     exchange_account_id: Mapped[UUID] = mapped_column(PG_UUID, nullable=False)
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     manifest: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     complete: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
 

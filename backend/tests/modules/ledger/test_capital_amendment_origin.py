@@ -24,5 +24,5 @@ async def test_an_origin_beside_an_operator_request_is_refused_before_anything_i
     with pytest.raises(ValueError, match="no origin of its own"):
         await amend_capital_policy(
             Untouched(), store=Untouched(), scope_lock=Untouched(), symbol="fUST",
-            changes=PolicyChanges(enabled=False), apply_digest="d",
+            changes=PolicyChanges(enabled=False), apply_digest="d", realm=None,
             origin={"reason": "copied"}, operator_request_id=uuid4())

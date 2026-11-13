@@ -67,7 +67,6 @@ class CreditHistorySync:
         ctx: AccountContext,
         session_factory: async_sessionmaker[AsyncSession],
         exchange_account_id: UUID,
-        deployment_environment: str,
         symbols: Sequence[str],
         interval_s: int = DEFAULT_INTERVAL_S,
         clock: Callable[[], int] | None = None,
@@ -76,7 +75,6 @@ class CreditHistorySync:
         self._ctx = ctx
         self._sf = session_factory
         self._account = exchange_account_id
-        self._env = deployment_environment
         self._symbols = tuple(symbols)
         self._interval_s = interval_s
         self._clock = clock or (lambda: int(time.time() * 1000))
@@ -123,7 +121,7 @@ class CreditHistorySync:
         )
         credit_rows = [{
             "exchange_account_id": self._account, "kind": kind, "credit_id": c.credit_id,
-            "deployment_environment": self._env, "symbol": c.symbol, "side": c.side,
+            "symbol": c.symbol, "side": c.side,
             "mts_create": c.mts_create, "mts_update": c.mts_update, "amount": c.amount,
             "status": c.status, "rate": c.rate, "period": c.period_days,
             "mts_opening": c.mts_opening, "mts_last_payout": c.mts_last_payout,
@@ -132,7 +130,7 @@ class CreditHistorySync:
         # payout could still change, and is picked up by a later re-read.
         trade_rows = [{
             "exchange_account_id": self._account, "trade_id": t.trade_id,
-            "deployment_environment": self._env, "symbol": t.symbol,
+            "symbol": t.symbol,
             "mts_create": t.mts_create, "offer_id": t.offer_id, "amount": t.amount,
             "rate": t.rate, "period": t.period_days, "maker": t.maker,
         } for t in trades]

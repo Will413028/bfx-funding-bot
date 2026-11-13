@@ -123,7 +123,7 @@ export type UncertaintyBlockedScope = Schemas["BlockedScope"];
 export type UncertaintyResolutionContext =
   Schemas["UncertaintyResolutionContext"];
 
-/** Account/environment/symbol-scoped execution block. */
+/** Account/symbol-scoped execution block. */
 export type Uncertainty = Omit<
   Schemas["UncertaintyResponse"],
   "evidenceSummary"

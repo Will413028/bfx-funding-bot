@@ -13,9 +13,7 @@ One run:
      a deploy that moves `current` mid-run does not change what runs);
   2. the image: the ledger's newest `deployed` row, as
      `<backend repository>@<backend digest>` -- the backend production runs, never
-     the mutable bfx-bot:local tag. Its revision's live.env (materialized by
-     bfx-deploy under /var/lib/bfx-deploy/releases/<rev>) supplies
-     BFX_DEPLOYMENT_ENV. When the tooling release differs from the deployed one
+     the mutable bfx-bot:local tag. When the tooling release differs from the deployed one
      (a tooling install failed after that deploy) the run goes ahead with the
      installed steps and says so;
   3. the secrets: DATABASE_URL and BFX_EXCHANGE_ACCOUNT_ID only, from
@@ -76,7 +74,6 @@ COMPOSE_FILE = "docker-compose.weekly-report.yml"
 # scripts/report_interest.py, Settings.database_url), from the research role's own file.
 SECRET_KEYS = ("DATABASE_URL", "BFX_EXCHANGE_ACCOUNT_ID")
 SECRET_FILE = "research.env"
-LIVE_KEYS = ("BFX_DEPLOYMENT_ENV",)
 # The bind source in docker-compose.weekly-report.yml (compose_policy.WEEKLY_REPORTS).
 REPORTS_DIR = Path("/home/ubuntu/bfx/reports")
 # Read by bfx_backup_check.py --weekly-heartbeat; StateDirectory of both units.
@@ -108,7 +105,7 @@ class Plan:
         return {"compose_file": str(self.compose_file), "tooling_revision": self.tooling_revision,
                 "deployed_revision": self.deployed_revision, "backend_image": self.backend_image,
                 "steps_match_deployed_release": self.tooling_revision == self.deployed_revision,
-                "env_keys": sorted(k for k in self.env if k in (*SECRET_KEYS, *LIVE_KEYS)),
+                "env_keys": sorted(k for k in self.env if k in SECRET_KEYS),
                 "argv": self.argv}
 
 
@@ -138,7 +135,7 @@ def _values(path: Path, keys: Sequence[str], *, secret_check: Callable[[Path], N
 
 
 def build_plan(
-    *, ops_dir: Path, ledger: Any, runtime_dir: Path, state_dir: Path,
+    *, ops_dir: Path, ledger: Any, runtime_dir: Path,
     backend_repository: str, secret_check: Callable[[Path], None],
     reports_dir: Path = REPORTS_DIR, compose_name: str = COMPOSE_FILE,
     project: str = PROJECT, service: str = SERVICE,
@@ -158,11 +155,9 @@ def build_plan(
             or bfx_deploy.REVISION.fullmatch(deployed.source_revision) is None:
         raise DeployError("ledger_row_invalid")
     image = f"{backend_repository}@{digest}"
-    live_env = state_dir / "releases" / deployed.source_revision / "live.env"
     env = {
         **bfx_deploy._base_env(),
         **_values(runtime_dir / SECRET_FILE, SECRET_KEYS, secret_check=secret_check),
-        **_values(live_env, LIVE_KEYS, secret_check=None),
         "BFX_BACKEND_IMAGE": image,
         "BFX_BACKEND_DIGEST": digest,
         "BFX_SOURCE_REVISION": deployed.source_revision,
@@ -210,7 +205,6 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--runtime-dir", type=Path, default=defaults.runtime_dir)
-    parser.add_argument("--state-dir", type=Path, default=defaults.state_dir)
     parser.add_argument("--backend-repository", default=defaults.backend_repository)
     parser.add_argument("--postgres-container", default=defaults.postgres_container)
     parser.add_argument("--db-user", default=defaults.db_user)
@@ -229,7 +223,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                    db_user=args.db_user, db_name=args.db_name)
     try:
         plan = build_plan(ops_dir=_HERE, ledger=ledger, runtime_dir=args.runtime_dir,
-                          state_dir=args.state_dir, backend_repository=args.backend_repository,
+                          backend_repository=args.backend_repository,
                           secret_check=bfx_deploy.protected_secret_file)
     except DeployError as exc:
         log(f"cannot run: {exc.code}")

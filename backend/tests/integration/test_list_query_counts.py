@@ -61,7 +61,6 @@ def _app(book: Book) -> FastAPI:
             yield session
 
     app = FastAPI()
-    app.state.deployment_environment = "ci"
     for router in (
         build_router(), build_api_keys_router(), build_projections_router(),
         build_uncertainties_router(),

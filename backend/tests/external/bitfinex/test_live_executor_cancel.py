@@ -56,7 +56,6 @@ async def _plant_unknown(stack, scope: str) -> None:
     """An UNKNOWN submit appearing while the cancel is in flight, in ``scope``."""
     from uuid import UUID
 
-    from tests.integration.contracts.stacks import SCOPE
     from tests.integration.test_ledger_basis import _observation
     from tests.integration.test_ledger_capital_reader import Book
 
@@ -66,12 +65,12 @@ async def _plant_unknown(stack, scope: str) -> None:
         await stack.unknown("10", symbol="fUSD")
     else:
         # One database holds one realm: the other scope is another exchange account.
-        other = (UUID("00000000-0000-0000-0000-00000000a002"), SCOPE.deployment_environment)
+        other = UUID("00000000-0000-0000-0000-00000000a002")
         async with stack.factory.begin() as session:
             await session.execute(text(
                 "INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','other')"),
-                {"id": str(other[0])})
-        book = Book(stack.factory, Scope(*other))
+                {"id": str(other)})
+        book = Book(stack.factory, Scope(other))
         await book.policy("fUST")
         assert await book.accept(
             _observation("1000", usd=True), started=1000, finished=1050, confirmed=1060,
@@ -127,7 +126,7 @@ async def test_cancel_retry_checks_current_scoped_uncertainty(ledger_db, monkeyp
         await stack.journal.record_outcome(
             SCOPE, attempt.attempt_id, CommandOutcome("ack", "101", None, NOW, {}))
         halt = TradingStateRepository(
-            stack.factory, account_id=ACCOUNT, deployment_environment="ci", scope_lock=build_scope_lock())
+            stack.factory, account_id=ACCOUNT, scope_lock=build_scope_lock())
         await halt.transition("ACTIVE", cause="operator", reason="test", actor="test",
                               now_ms=1200)
         if state != "ACTIVE":
@@ -159,10 +158,10 @@ async def test_cancel_retry_checks_current_scoped_uncertainty(ledger_db, monkeyp
                 uncertainty_reader=stack.uncertainties,
                 safety_evaluator=SafetyGuardChain(
                     guards=[ManualKillGuard(trading_state=halt), UncertaintyGuard(
-                        reader=stack.uncertainties, deployment_environment="ci")],
+                        reader=stack.uncertainties)],
                     probe=HealthProbe(), diagnostics=sink, phase=Phase.LIVE,
                     strategy=StrategyName.MEAN_REVERSION, cell="a30", account_id=str(ACCOUNT)),
-                deployment_environment="ci", clock=lambda: NOW,
+                clock=lambda: NOW,
                 boundary=stack.boundary(LedgerCommandEffects(DomainEventBus())),
                 managed_offers=stack.offers,
             )
@@ -375,7 +374,7 @@ class _CancelHarness:
         self.bus.subscribe(CancelRequested, _capture(self.events))
         self.bus.subscribe(CancelAcknowledged, _capture(self.events))
         self.uncertainty = _Uncertainty()
-        recording = Recording(environment=ENVIRONMENT, account_id=ACCOUNT_ID)
+        recording = Recording(account_id=ACCOUNT_ID)
         recording.cancel_admission = CancelAdmitted(
             provenance=CancelProvenance(
                 venue_offer_id="123", symbol="fUSD", attempt_id=uuid4(), decision_id="d-1",
@@ -390,7 +389,6 @@ class _CancelHarness:
             bus=self.bus,
             uncertainty_reader=self.uncertainty,
             safety_evaluator=_CancelEligible(),
-            deployment_environment=ENVIRONMENT,
             boundary=recording.boundary(),
             managed_offers=recording.offers,
             clock=ticks.__next__,

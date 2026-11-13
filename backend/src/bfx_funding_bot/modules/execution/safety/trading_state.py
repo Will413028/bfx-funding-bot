@@ -11,7 +11,7 @@ The everyday per-currency stop is the policy's ``enabled`` flag, not this state.
 Every transition is an appended row naming its ``cause`` (``operator`` or
 ``auto``), actor and reason, so "who stopped or resumed trading, when and why"
 stays answerable. The current state is the highest id for the
-account/environment. PostgreSQL's insert trigger assigns that id under a
+account. PostgreSQL's insert trigger assigns that id under a
 per-scope lock and rejects the same illegal transitions as
 :func:`validate_transition`; the store checks them too so callers get the
 error before the database does.

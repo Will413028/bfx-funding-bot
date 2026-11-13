@@ -1,6 +1,7 @@
 """S1-3d0 windows and credit trade coverage on migrated PostgreSQL."""
 
 from dataclasses import replace
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import event
@@ -58,9 +59,7 @@ async def test_window_previous_accepted_query_ignores_newer_pending_and_fenced(l
         )
         assert result.decision == "fenced"
     assert await _window(ledger_fixture) == expected
-    assert await _window(
-        ledger_fixture, Scope(SCOPE.exchange_account_id, "other")
-    ) == ObservationWindow(None, None, None)
+    assert await _window(ledger_fixture, Scope(uuid4())) == ObservationWindow(None, None, None)
 
 
 @pytest.mark.asyncio

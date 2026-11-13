@@ -148,7 +148,6 @@ async def _attempts(
         .where(
             SubmissionAttemptJournalRow.attempt_id.in_(sorted(ids)),
             SubmissionAttemptJournalRow.exchange_account_id == scope.exchange_account_id,
-            SubmissionAttemptJournalRow.deployment_environment == scope.deployment_environment,
         )
     )
     return {row[0]: _Attempt(*row) for row in rows}
@@ -169,7 +168,6 @@ async def _quarantines(
         ).where(
             QuarantineOpeningRow.quarantine_id.in_(sorted(ids)),
             QuarantineOpeningRow.exchange_account_id == scope.exchange_account_id,
-            QuarantineOpeningRow.deployment_environment == scope.deployment_environment,
         )
     )
     return {row[0]: _Quarantine(*row) for row in rows}
@@ -244,7 +242,6 @@ async def _live_owned_offers(
             )
             .where(
                 VenueOfferMirrorRow.exchange_account_id == scope.exchange_account_id,
-                VenueOfferMirrorRow.deployment_environment == scope.deployment_environment,
                 VenueOfferMirrorRow.present_in_latest_accepted_snapshot,
             ),
         ),
@@ -323,8 +320,6 @@ class LedgerOperatorReads:
             select(*_RESOLUTION_COLUMNS)
             .where(
                 ExecutionResolutionJournalRow.exchange_account_id == scope.exchange_account_id,
-                ExecutionResolutionJournalRow.deployment_environment
-                == scope.deployment_environment,
             )
             .order_by(
                 ExecutionResolutionJournalRow.resolved_at_ms.desc(),

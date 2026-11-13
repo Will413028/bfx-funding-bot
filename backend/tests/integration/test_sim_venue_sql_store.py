@@ -67,7 +67,6 @@ from tests.modules.simulated_venue.helpers import (
 from tests.pg_templates import (
     LAST_REVERSIBLE_REVISION,
     alembic,
-    disable_realm_triggers,
     stamp_realm,
     template_at,
 )
@@ -78,7 +77,7 @@ from .test_trading_state_migration import _reset
 pytestmark = pytest.mark.integration
 
 D = Decimal
-OTHER = SimAccount("aaaaaaaa-bbbb-4ccc-8ddd-000000000002", "ci")
+OTHER = SimAccount("aaaaaaaa-bbbb-4ccc-8ddd-000000000002")
 
 
 def _prepare(url: str) -> None:
@@ -193,7 +192,7 @@ async def test_open_accepts_the_ci_realm(pg_templates: Any, pg_clone: Any) -> No
     engine = _engine(_database_stamped(pg_templates, pg_clone, "ci"))
     try:
         store = await SqlVenueEventStore.open(engine)
-        own = SimAccount(ACCOUNT.exchange_account_id, "ci")
+        own = SimAccount(ACCOUNT.exchange_account_id)
         await store.append(own, 0, _funded(1))
         assert len(await store.load(own)) == 1
     finally:
@@ -351,24 +350,15 @@ async def test_concurrent_multi_event_writers_never_interleave(store: SqlVenueEv
 
 
 async def test_a_database_refusal_is_a_store_error_not_a_lost_race(
-        store: SqlVenueEventStore, ledger_url: str) -> None:
-    # Bypass SimAccount's own refusal: the database stamp is the next line of defence and the
-    # realm CHECK the last (the trigger is switched off to reach it).
+        store: SqlVenueEventStore) -> None:
+    # Bypass SimAccount's own refusal of an empty account: the table's CHECK refuses the row,
+    # and a refusal that is not the append race's unique violation is a store error.
     class Forged:
-        exchange_account_id = "forged"
-        deployment_environment = "prod"
+        exchange_account_id = ""
 
-    with pytest.raises(VenueStoreError) as caught:
+    with pytest.raises(VenueStoreError, match="ck_sim_venue_event_account") as caught:
         await store.append(Forged(), 0, _funded(1))  # type: ignore[arg-type]
     assert not isinstance(caught.value, ConcurrentAppendError)
-    assert "database realm ci refuses a write of realm prod" in str(caught.value)
-    owner = create_engine(ledger_url)
-    try:
-        disable_realm_triggers(owner)
-    finally:
-        owner.dispose()
-    with pytest.raises(VenueStoreError, match="ck_sim_venue_event_realm"):
-        await store.append(Forged(), 0, _funded(1))  # type: ignore[arg-type]
 
 
 # -- the venue over the store ----------------------------------------------------------

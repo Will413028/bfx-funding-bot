@@ -7,7 +7,6 @@ loaders are shared with the weekly attribution (``attribution_loader``).
 
 account_id  = canonical UUID from BFX_EXCHANGE_ACCOUNT_ID (required for the
 production DB path; injected sqlite tests use a synthetic in-memory realm)
-environment = the caller's ``deployment_environment`` ("prod" for the live canary)
 """
 from __future__ import annotations
 
@@ -94,7 +93,6 @@ async def build_g3_report(
     session_factory: async_sessionmaker[AsyncSession] | None = None,
     now_ms: int | None = None,
     acks: Mapping[int, str] | None = None,
-    deployment_environment: str,
 ) -> G3Report:
     """Query Postgres and run G3 attribution (read-only).
 
@@ -120,9 +118,7 @@ async def build_g3_report(
 
     try:
         async with session_scope(session_factory) as session:
-            inputs = await load_credit_inputs(
-                session, account_id=account_id, deployment_environment=deployment_environment,
-            )
+            inputs = await load_credit_inputs(session, account_id=account_id)
             credits = inputs.credits if inputs is not None else []
             cells = inputs.cells if inputs is not None else CreditCells(
                 {}, frozenset(), frozenset(), frozenset())

@@ -32,7 +32,9 @@ from .test_ledger_schema_roles import (
     _P,
     _build,
     _build_reversible,
+    _has_realm_column,
     _query_sql,
+    _realm,
     _seed,
     pre_switch,
 )
@@ -41,12 +43,17 @@ pytestmark = pytest.mark.integration
 
 _REVISION = "f6a7b8c9d0e1"
 _PREVIOUS = "e5f6a7b8c9d0"
-_ATTEMPT = f"""INSERT INTO submission_attempt_journal(attempt_id, execution_decision_id,
-  exchange_account_id, deployment_environment, symbol, cell_id, attempt_seq,
+
+
+def _attempt(conn) -> str:
+    """One more attempt of the seeded scope, with the realm column where the database has it."""
+    column, value = _realm(_has_realm_column(conn))
+    return f"""INSERT INTO submission_attempt_journal(attempt_id, execution_decision_id,
+  exchange_account_id, {column}symbol, cell_id, attempt_seq,
   normalized_payload, payload_sha256, basis_id, policy_revision_id,
   authorization_evidence, started_at_ms)
-  VALUES ('{{attempt}}', '{_D2}', '{_A}', 'ci', 'fUST', 'cell', 2, '{{{{"amount": "1"}}}}', 'hash',
-  '{_B}', '{_P}', '{{{{}}}}', 4)"""
+  VALUES ('{uuid4()}', '{_D2}', '{_A}', {value}'fUST', 'cell', 2, '{{"amount": "1"}}', 'hash',
+  '{_B}', '{_P}', '{{}}', 4)"""
 
 
 @pytest.fixture
@@ -182,8 +189,9 @@ def test_guard_is_on_every_ledger_fact_table(ledger_db) -> None:
 def test_bot_writes_are_rejected_until_the_ledger_epoch(seeded) -> None:
     # The owner seeded every ledger table under legacy (``seeded``); the bot may not.
     with seeded.begin() as conn, pytest.raises(Exception, match="requires ledger authority"):
+        attempt = _attempt(conn)  # probed as the owner, before the role switch
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
-        conn.exec_driver_sql(_ATTEMPT.format(attempt=uuid4()))
+        conn.exec_driver_sql(attempt)
     for statement in (
         "UPDATE capital_command_clock SET revision=1",
         "UPDATE venue_offer_mirror SET amount_remaining=2",
@@ -197,8 +205,9 @@ def test_bot_writes_are_rejected_until_the_ledger_epoch(seeded) -> None:
     with seeded.begin() as conn:
         _append(conn, 2, "ledger")
     with seeded.begin() as conn:
+        attempt = _attempt(conn)  # probed as the owner, before the role switch
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
-        conn.exec_driver_sql(_ATTEMPT.format(attempt=uuid4()))
+        conn.exec_driver_sql(attempt)
         conn.exec_driver_sql("UPDATE capital_command_clock SET revision=1")
     # Latest wins: a later legacy epoch holds the ledger dormant again.
     with seeded.begin() as conn:
@@ -289,8 +298,9 @@ def test_downgrade_round_trip_restores_the_prior_state(reversible_ledger_db) -> 
     with reversible_ledger_db.begin() as conn:
         _seed(conn, pre_verdict=True)
     with reversible_ledger_db.begin() as conn:
+        attempt = _attempt(conn)  # probed as the owner, before the role switch
         conn.exec_driver_sql("SET LOCAL ROLE bfx_bot")
-        conn.exec_driver_sql(_ATTEMPT.format(attempt=uuid4()))
+        conn.exec_driver_sql(attempt)
     reversible_ledger_db.dispose()
     # Back to where the downgrade started, so the comparison sees only this round trip.
     alembic(url, "upgrade", LAST_REVERSIBLE_REVISION)

@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine, text
 
-from tests.pg_templates import DISABLE_REALM_TRIGGERS_SQL, alembic, stamp_realm
+from tests.pg_templates import alembic, stamp_realm
 
 pytestmark = pytest.mark.integration
 
@@ -89,7 +89,8 @@ def test_a_database_stamped_shadow_refuses_the_upgrade(before_url: str) -> None:
 def test_a_shadow_row_refuses_the_upgrade(before_url: str) -> None:
     stamp_realm(before_url, "ci")
     # A ci database whose trigger was switched off, in this visible statement, to plant it.
-    _run(before_url, DISABLE_REALM_TRIGGERS_SQL, _sim_event("shadow"))
+    _run(before_url, "ALTER TABLE sim_venue_event DISABLE TRIGGER database_realm_write",
+         _sim_event("shadow"))
     _refuses(before_url, r"rows of realm 'shadow' in public\.sim_venue_event")
 
 

@@ -1118,10 +1118,6 @@
             "type": "string",
             "title": "Exchangeaccountid"
           },
-          "environment": {
-            "type": "string",
-            "title": "Environment"
-          },
           "symbol": {
             "type": "string",
             "title": "Symbol"
@@ -1130,11 +1126,10 @@
         "type": "object",
         "required": [
           "exchangeAccountId",
-          "environment",
           "symbol"
         ],
         "title": "BlockedScope",
-        "description": "The account, environment and symbol an open uncertainty blocks."
+        "description": "The account and symbol an open uncertainty blocks."
       },
       "BuildIdentity": {
         "properties": {
@@ -1666,10 +1661,6 @@
             "type": "string",
             "title": "Account Id"
           },
-          "deployment_environment": {
-            "type": "string",
-            "title": "Deployment Environment"
-          },
           "symbols": {
             "additionalProperties": {
               "$ref": "#/components/schemas/DryRunSymbol"
@@ -1682,7 +1673,6 @@
         "type": "object",
         "required": [
           "account_id",
-          "deployment_environment",
           "symbols"
         ],
         "title": "DryRun"
@@ -2137,10 +2127,6 @@
             "type": "string",
             "title": "Account Id"
           },
-          "deployment_environment": {
-            "type": "string",
-            "title": "Deployment Environment"
-          },
           "halt": {
             "$ref": "#/components/schemas/HaltStatus"
           },
@@ -2173,7 +2159,6 @@
         "type": "object",
         "required": [
           "account_id",
-          "deployment_environment",
           "halt",
           "symbols",
           "configured_cells",

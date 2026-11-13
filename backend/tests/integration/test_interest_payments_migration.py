@@ -16,8 +16,8 @@ pytestmark = pytest.mark.integration
 ACCOUNT = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 ROLES = ("bfx_bot", "bfx_webapi", "bfx_webauth")
 INSERT = ("INSERT INTO funding_interest_payments (exchange_account_id, ledger_id, "
-          "deployment_environment, currency, mts, amount, balance, description) VALUES "
-          f"('{ACCOUNT}', 10578187002, 'ci', 'UST', 1790472624000, 0.0518895, 395.56843927, "
+          "currency, mts, amount, balance, description) VALUES "
+          f"('{ACCOUNT}', 10578187002, 'UST', 1790472624000, 0.0518895, 395.56843927, "
           "'Margin Funding Payment on wallet funding') ON CONFLICT DO NOTHING")
 
 

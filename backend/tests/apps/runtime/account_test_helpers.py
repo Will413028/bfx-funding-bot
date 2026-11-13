@@ -113,9 +113,7 @@ async def seed_exchange_account(
         from bfx_funding_bot.modules.ledger import Scope
         from bfx_funding_bot.modules.ledger.wiring import build_policy_store
         from bfx_funding_bot.modules.trading import CapitalPolicy
-        # One database holds one realm, the one ``stamp_schema_head`` stamped above.
-        store = build_policy_store(
-            Scope(TEST_EXCHANGE_ACCOUNT_ID, seeded_realm(environment)))
+        store = build_policy_store(Scope(TEST_EXCHANGE_ACCOUNT_ID))
         async with factory.begin() as session:
             for symbol in ("fUST", "fUSD"):
                 await store.apply_policy(session, symbol=symbol,

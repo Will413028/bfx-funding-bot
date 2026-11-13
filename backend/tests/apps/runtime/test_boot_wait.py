@@ -82,7 +82,7 @@ def _daemon(venue: _Venue, *, delay: Callable[[int], float] = lambda _n: 0.0,
     executor = MagicMock()
     executor.submit = AsyncMock()
     fake = SimpleNamespace(
-        boot_recovery=venue, observation_scope=Scope(uuid4(), "ci"),
+        boot_recovery=venue, observation_scope=Scope(uuid4()),
         protection=SimpleNamespace(run_pending=AsyncMock()), periodic_reconcile=None,
         writer_lock_watch=lock_watch, boot_retry_delay_s=delay,
         _stop_event=asyncio.Event(), booted=False,

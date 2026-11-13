@@ -205,7 +205,6 @@ class SubmissionAttemptPayload:
 
     execution_decision_id: str
     account_id: UUID | str
-    environment: str
     symbol: str
     normalized_payload: Mapping[str, Any]
     attempt_id: UUID | str | None = None
@@ -229,8 +228,6 @@ class SubmissionAttemptPayload:
         except (TypeError, ValueError, AttributeError) as exc:
             raise ValueError("account_id must be a canonical UUID") from exc
         object.__setattr__(self, "account_id", canonical_account_id)
-        if not self.environment.strip():
-            raise ValueError("environment must be non-empty")
         if not self.symbol.strip():
             raise ValueError("symbol must be non-empty")
         if self.started_at_ms < 0:
@@ -255,7 +252,6 @@ class SubmissionAttemptPayload:
                 (
                     self.execution_decision_id,
                     str(canonical_account_id),
-                    self.environment,
                     self.symbol,
                     expected_digest,
                 )
@@ -310,7 +306,6 @@ class SubmissionAttemptPayload:
             "attempt_id": str(self.attempt_id),
             "execution_decision_id": self.execution_decision_id,
             "account_id": str(self.account_id),
-            "environment": self.environment,
             "symbol": self.symbol,
             "normalized_payload": _thaw_value(self.normalized_payload),
             "payload_sha256": self.payload_sha256,

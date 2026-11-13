@@ -31,7 +31,7 @@ def test_build_read_models_are_the_ledgers() -> None:
     assert type(models.operator_reads).__name__ == "LedgerOperatorReads"
     assert type(models.operator_evidence).__name__ == "LedgerOperatorEvidence"
     # Read only: the policy port has no ``apply_policy`` and no resolution port is held.
-    reader = models.policy_reader(Scope(uuid4(), "test"))
+    reader = models.policy_reader(Scope(uuid4()))
     assert type(reader).__name__ == "LedgerPolicyReader"
     assert not hasattr(reader, "apply_policy")
     assert not hasattr(models, "operator_resolution")
@@ -74,14 +74,11 @@ async def test_lifespan_stores_the_authority_and_its_read_models(monkeypatch) ->
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("configured", "stored"), [("ci", "ci"), (None, None), ("staging", None)])
-async def test_lifespan_reads_the_deployment_environment_once(
-        monkeypatch, configured: str | None, stored: str | None) -> None:
-    """Account routes take the value from ``app.state``; an unset or unknown one is stored
-    as None (they answer 503 after the membership check) and does not stop the boot.
-
-    Mutation: drop the assignment in the lifespan and the "ci" case fails.
-    """
+@pytest.mark.parametrize("configured", [None, "staging"])
+async def test_lifespan_boots_without_a_deployment_environment(
+        monkeypatch, configured: str | None) -> None:
+    """The web API needs no BFX_DEPLOYMENT_ENV: unset or unknown, it boots with its read
+    models and keeps no environment on ``app.state`` for a route to depend on."""
     async def authority(_session: object) -> str:
         return "migration b1c2d3e4f5a6 genesis"
 
@@ -96,7 +93,8 @@ async def test_lifespan_reads_the_deployment_environment_once(
     monkeypatch.setattr(webapi, "assert_schema_head", _at_head)
     app = FastAPI()
     async with webapi.lifespan(app):
-        assert app.state.deployment_environment == stored
+        assert type(app.state.read_models.operator_reads).__name__ == "LedgerOperatorReads"
+        assert not hasattr(app.state, "deployment_environment")
 
 
 @pytest.mark.asyncio

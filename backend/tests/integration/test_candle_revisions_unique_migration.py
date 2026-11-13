@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.candles.repository import mark_candles_final, upsert_candles
-from tests.pg_templates import alembic
+from tests.pg_templates import alembic, template_at
 
 pytestmark = pytest.mark.integration
 
@@ -27,15 +27,21 @@ def _rev(conn, observed_at_ms: int, rejected_close: float | None) -> None:
         {"m": _MTS, "o": observed_at_ms, "r": rejected_close})
 
 
-def test_upgrade_keeps_each_values_first_observation(pg_head_url: str) -> None:
-    alembic(pg_head_url, "downgrade", _BEFORE)
-    engine = create_engine(pg_head_url)
+@pytest.fixture
+def before_url(pg_templates, pg_clone) -> str:
+    """A database stopped at the previous revision (a later migration is irreversible, so it
+    is built upward, not downgraded from head)."""
+    return pg_clone(pg_templates.template("candle_revisions_before", template_at(_BEFORE)))
+
+
+def test_upgrade_keeps_each_values_first_observation(before_url: str) -> None:
+    engine = create_engine(before_url)
     try:
         with engine.begin() as conn:
             for observed_at_ms, value in ((40, 0.0001), (30, 0.0001), (50, 0.0003),
                                           (60, None), (70, None)):
                 _rev(conn, observed_at_ms, value)
-        alembic(pg_head_url, "upgrade", "head")
+        alembic(before_url, "upgrade", "head")
         with engine.connect() as conn:
             rows = conn.execute(text(
                 "SELECT observed_at_ms, rejected_close FROM funding_candle_revisions"

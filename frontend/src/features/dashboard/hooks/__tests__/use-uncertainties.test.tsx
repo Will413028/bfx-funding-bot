@@ -44,7 +44,6 @@ function row(
     evidenceSummary: {},
     blockedScope: {
       exchangeAccountId: ACCOUNT_ID,
-      environment: "ci",
       symbol: "fUST",
     },
     resolvedByOperatorId: null,

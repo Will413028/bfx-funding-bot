@@ -16,7 +16,7 @@ from bfx_funding_bot.modules.ledger import PolicyRefused, PolicyStore
 from bfx_funding_bot.modules.ledger.wiring import build_policy_store
 from bfx_funding_bot.modules.trading import CapitalPolicy
 
-from .stacks import ACCOUNT, ENVIRONMENT, Stack
+from .stacks import ACCOUNT, Stack
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -40,7 +40,7 @@ async def test_apply_then_read_names_the_revision_written(port_stack) -> None:
         written = await store.apply_policy(
             session, symbol="fUST", policy=policy, expected_revision=0, source={"by": "contract"})
     assert (written.revision, written.symbol, written.policy) == (1, "fUST", policy)
-    assert (written.account_id, written.environment) == (ACCOUNT, ENVIRONMENT)
+    assert written.account_id == ACCOUNT
     async with port_stack.factory() as session:
         read = await store.read_applied(session, symbol="fUST")
     assert read == written

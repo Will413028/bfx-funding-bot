@@ -8,6 +8,12 @@ REPEATABLE READ READ ONLY transaction, `COPY (SELECT '<table>', t.* ...) TO STDO
 generated script runs on both, so the two sides need no shared canonicalizer: equal stored
 values print equal COPY text (same PostgreSQL build, pinned image labels).
 
+Scope. A scope is one exchange account. The scripts name ``exchange_account_id`` only, so the
+same text runs on a schema that still has the per-row realm column (a copy older than
+545b2877e9bd) and on one without it: the drill of the release that drops the column reads both
+in one run (the restored copy before and after the rehearsed migration). A database holds one
+realm (its stamp), so the account alone identified a scope before the column left too.
+
 Boundary (W). Rows carry no common commit stamp, so each table is bounded by a key that is
 commit-ordered per scope (every ledger writer of a scope holds the scope's transaction advisory
 lock until commit, and the tables are append-only by trigger). W is taken from the RESTORED
@@ -35,6 +41,10 @@ copy -- its newest committed state -- and production is read at that W:
 
 The restored copy's bounded set must equal its whole table (resolutions: at most), so a bound
 rule that drops restored rows fails instead of hiding them.
+
+``DIGEST_VERSION`` names the digest algorithm (domain, hash, line framing), not the receipt's
+scope keys: receipts older than 545b2877e9bd carry ``deployment_environment`` per scope under
+the same version.
 
 Digest per table: count plus the sum of sha256(domain + row line) modulo 2**256 (a multiset
 hash: no ORDER BY on production, O(1) memory while streaming).
@@ -78,7 +88,7 @@ class Rule:
     bound: str  # the restored maximum the rule is bounded by (evidence)
 
 
-_SCOPE = "JOIN b ON ({a}.exchange_account_id, {a}.deployment_environment) = (b.account, b.env)"
+_SCOPE = "JOIN b ON {a}.exchange_account_id = b.account"
 _QUERY_OF_OBS = "JOIN public.ledger_observation_query q ON q.query_id = o.query_id "
 _VIA_OBSERVATION = (
     "JOIN public.ledger_observation o ON o.id = t.observation_id " + _QUERY_OF_OBS
@@ -155,7 +165,6 @@ _SCOPE_OWNERS = (
 @dataclass(frozen=True, slots=True)
 class ScopeBounds:
     account: str
-    environment: str
     q_query: int | None
     q_obs: int | None
     q_acc: int | None
@@ -165,7 +174,7 @@ class ScopeBounds:
 
     def evidence(self) -> dict[str, object]:
         return {
-            "exchange_account_id": self.account, "deployment_environment": self.environment,
+            "exchange_account_id": self.account,
             "query_revision": self.q_query, "observation_query_revision": self.q_obs,
             "accepted_observation_query_revision": self.q_acc, "attempt_seq": self.a_max,
             "opened_revision": self.r_open, "clock_revision": self.clock,
@@ -188,10 +197,9 @@ def bounds_script() -> str:
     """Restored copy only: schema, present tables, per-scope W, pending attempts, self-checks."""
     names = ", ".join(f"'{name}'" for name in LEDGER_TABLES)
     scopes = " UNION ".join(
-        f"SELECT exchange_account_id, deployment_environment FROM public.{owner}"
-        for owner in _SCOPE_OWNERS
+        f"SELECT exchange_account_id FROM public.{owner}" for owner in _SCOPE_OWNERS
     )
-    in_scope = "(x.exchange_account_id, x.deployment_environment) = (s.account, s.env)"
+    in_scope = "x.exchange_account_id = s.account"
     return (
         "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;\n"
         "SET LOCAL lock_timeout = '10s';\n"
@@ -200,7 +208,7 @@ def bounds_script() -> str:
         "SELECT 'table', c.relname FROM pg_catalog.pg_class c "
         "WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p') "
         f"AND c.relname = ANY(ARRAY[{names}]) ORDER BY 2;\n"
-        f"WITH s(account, env) AS ({scopes}), w AS (SELECT s.account, s.env, "
+        f"WITH s(account) AS ({scopes}), w AS (SELECT s.account, "
         f"(SELECT max(x.query_revision) FROM public.ledger_observation_query x WHERE {in_scope}) "
         "AS q_query, "
         "(SELECT max(q.query_revision) FROM public.ledger_observation x JOIN "
@@ -214,17 +222,17 @@ def bounds_script() -> str:
         "AS r_open, "
         f"(SELECT x.revision FROM public.capital_command_clock x WHERE {in_scope}) AS clock "
         "FROM s) "
-        "SELECT 'scope', account, env, q_query, q_obs, q_acc, a_max, r_open, clock FROM w "
-        "ORDER BY 2, 3;\n"
+        "SELECT 'scope', account, q_query, q_obs, q_acc, a_max, r_open, clock FROM w "
+        "ORDER BY 2;\n"
         "SELECT 'pending', a.attempt_id FROM public.submission_attempt_journal a "
         "WHERE NOT EXISTS (SELECT 1 FROM public.transport_outcome_journal t "
         "WHERE t.attempt_id = a.attempt_id) ORDER BY 2;\n"
         "SELECT 'epoch', (SELECT max(epoch_seq) FROM public.capital_authority_epoch), "
         "(SELECT authority FROM public.capital_authority_epoch ORDER BY epoch_seq DESC LIMIT 1);\n"
         # The clock is bumped by every opening and read by every accept: never behind either.
-        f"WITH s(account, env) AS ({scopes}) SELECT 'inconsistent', 'clock_behind', count(*) "
+        f"WITH s(account) AS ({scopes}) SELECT 'inconsistent', 'clock_behind', count(*) "
         "FROM s LEFT JOIN public.capital_command_clock c "
-        "ON (c.exchange_account_id, c.deployment_environment) = (s.account, s.env) "
+        "ON c.exchange_account_id = s.account "
         "CROSS JOIN LATERAL (SELECT "
         f"(SELECT max(x.opened_revision) FROM public.quarantine_opening x WHERE {in_scope}) AS o, "
         f"(SELECT max(x.accept_revision) FROM public.ledger_observation x WHERE {in_scope} "
@@ -235,8 +243,7 @@ def bounds_script() -> str:
             f"SELECT 'inconsistent', '{name}_orphans', count(*) FROM public.{name} m "
             "WHERE NOT EXISTS (SELECT 1 FROM public.ledger_observation o "
             "WHERE o.id = m.last_accepted_observation_id AND o.accepted "
-            "AND (o.exchange_account_id, o.deployment_environment) "
-            "= (m.exchange_account_id, m.deployment_environment));\n"
+            "AND o.exchange_account_id = m.exchange_account_id);\n"
             for name in ("venue_offer_mirror", "venue_credit_mirror")
         )
         + "ROLLBACK;\n"
@@ -284,12 +291,10 @@ def parse_bounds(output: str) -> Bounds:
             schema = (version, heads)
         elif kind == "table" and len(fields) == 2 and fields[1] in LEDGER_TABLES:
             present.add(fields[1])
-        elif kind == "scope" and len(fields) == 9:
-            if _ENVIRONMENT.fullmatch(fields[2]) is None:
-                _fail("ledger_bounds_invalid")
+        elif kind == "scope" and len(fields) == 8:
             scopes.append(ScopeBounds(
-                _canonical_uuid(fields[1]), fields[2],
-                *(_optional_int(value) for value in fields[3:]),  # type: ignore[arg-type]
+                _canonical_uuid(fields[1]),
+                *(_optional_int(value) for value in fields[2:]),  # type: ignore[arg-type]
             ))
         elif kind == "pending" and len(fields) == 2:
             pending.append(_canonical_uuid(fields[1]))
@@ -303,7 +308,7 @@ def parse_bounds(output: str) -> Bounds:
             inconsistencies[fields[1]] = count
         else:
             _fail("ledger_bounds_invalid")
-    keys = [(scope.account, scope.environment) for scope in scopes]
+    keys = [scope.account for scope in scopes]
     if (schema is None or epoch is None or len(keys) != len(set(keys))
             or len(pending) != len(set(pending)) or len(pending) > _MAX_PENDING
             or set(inconsistencies) != {"clock_behind", "venue_offer_mirror_orphans",
@@ -321,12 +326,12 @@ def _literal(value: int | None) -> str:
 
 def _bounds_cte(bounds: Bounds) -> str:
     rows = ", ".join(
-        f"('{scope.account}'::uuid, '{scope.environment}'::text, {_literal(scope.q_query)}, "
+        f"('{scope.account}'::uuid, {_literal(scope.q_query)}, "
         f"{_literal(scope.q_obs)}, {_literal(scope.q_acc)}, {_literal(scope.a_max)}, "
         f"{_literal(scope.r_open)})"
         for scope in bounds.scopes
     )
-    return f"WITH b(account, env, q_query, q_obs, q_acc, a_max, r_open) AS (VALUES {rows}) "
+    return f"WITH b(account, q_query, q_obs, q_acc, a_max, r_open) AS (VALUES {rows}) "
 
 
 def compared_tables(bounds: Bounds) -> tuple[str, ...]:
@@ -403,8 +408,8 @@ def digest_script(bounds: Bounds, *, restored: bool, timeout_ms: int) -> str:
             f"WHERE {where}) TO STDOUT;"
         )
     lines.append(
-        f"COPY ({cte}SELECT '#clock'::text, t.exchange_account_id, t.deployment_environment, "
-        f"t.revision FROM public.capital_command_clock t {_SCOPE.format(a='t')}) TO STDOUT;"
+        f"COPY ({cte}SELECT '#clock'::text, t.exchange_account_id, t.revision "
+        f"FROM public.capital_command_clock t {_SCOPE.format(a='t')}) TO STDOUT;"
     )
     if restored:
         lines.extend(
@@ -422,7 +427,7 @@ class StreamDigest:
     tables: tuple[str, ...]
     counts: dict[str, int] = field(default_factory=dict)
     sums: dict[str, int] = field(default_factory=dict)
-    clocks: dict[tuple[str, str], int] = field(default_factory=dict)
+    clocks: dict[str, int] = field(default_factory=dict)
     totals: dict[str, int] = field(default_factory=dict)
     invalid: bool = False
 
@@ -446,11 +451,10 @@ class StreamDigest:
             ) % _MODULUS
             return
         fields = rest.decode("utf-8", errors="replace").split("\t")
-        if table == "#clock" and len(fields) == 3 and fields[2].isdigit():
-            key = (fields[0], fields[1])
-            if key in self.clocks:
+        if table == "#clock" and len(fields) == 2 and fields[1].isdigit():
+            if fields[0] in self.clocks:
                 self.invalid = True
-            self.clocks[key] = int(fields[2])
+            self.clocks[fields[0]] = int(fields[1])
         elif table == "#count" and len(fields) == 2 and fields[1].isdigit() \
                 and fields[0] not in self.totals:
             self.totals[fields[0]] = int(fields[1])
@@ -485,10 +489,9 @@ def compare(bounds: Bounds, restored: StreamDigest, production: StreamDigest) ->
     )
     if unbounded:
         _fail("ledger_bound_invalid", unbounded)
-    scope_keys = {(scope.account, scope.environment) for scope in bounds.scopes}
+    scope_keys = {scope.account for scope in bounds.scopes}
     expected_clocks = {
-        (scope.account, scope.environment): scope.clock
-        for scope in bounds.scopes if scope.clock is not None
+        scope.account: scope.clock for scope in bounds.scopes if scope.clock is not None
     }
     if restored.clocks != expected_clocks or not set(production.clocks) <= scope_keys:
         _fail("restore_output_invalid")
@@ -504,7 +507,7 @@ def compare(bounds: Bounds, restored: StreamDigest, production: StreamDigest) ->
         "digest_version": DIGEST_VERSION,
         "scopes": [
             {**scope.evidence(),
-             "production_clock_revision": production.clocks.get((scope.account, scope.environment))}
+             "production_clock_revision": production.clocks.get(scope.account)}
             for scope in bounds.scopes
         ],
         "pending_attempts": len(bounds.pending),
@@ -551,10 +554,10 @@ def boot_failure_code(stdout: str) -> str:
 
 # The boot check's output contract. The JSON comes from the DEPLOYED image and is parsed by the
 # TARGET release's drill, so each level is validated by its required keys and their types and
-# unknown keys are ignored (a newer image may report more); the receipt keeps the known keys.
+# unknown keys are ignored (a newer image may report more; an image older than 545b2877e9bd
+# still names ``deployment_environment`` per scope); the receipt keeps the known keys.
 _BOOT_KEYS = {"schema_head": str, "realm": str, "authority": str, "scopes": list}
-_BOOT_SCOPE_KEYS = {"exchange_account_id": str, "deployment_environment": str, "basis_id": str,
-                    "reads": list}
+_BOOT_SCOPE_KEYS = {"exchange_account_id": str, "basis_id": str, "reads": list}
 _BOOT_READ_KEYS = {"symbol": str, "cell_id": str, "basis_id": (str, type(None)), "result": str}
 
 
@@ -580,11 +583,11 @@ def parse_boot(output: str, bounds: Bounds) -> dict[str, object]:
         _fail("restore_output_invalid")
     if (boot["schema_head"],) != tuple(bounds.migration_heads):
         _fail("boot_schema_head_mismatch")
-    seen: list[tuple[str, str]] = []
+    seen: list[str] = []
     scopes: list[dict[str, Any]] = []
     for raw_scope in boot["scopes"]:
         scope = _known(raw_scope, _BOOT_SCOPE_KEYS)
-        seen.append((scope["exchange_account_id"], scope["deployment_environment"]))
+        seen.append(scope["exchange_account_id"])
         _canonical_uuid(scope["basis_id"])
         reads = [_known(read, _BOOT_READ_KEYS) for read in scope["reads"]]
         for read in reads:
@@ -593,7 +596,7 @@ def parse_boot(output: str, bounds: Bounds) -> dict[str, object]:
                         and read["result"] != "blocked:snapshot_query_pending")):
                 _fail("restore_output_invalid")
         scopes.append({**scope, "reads": reads})
-    expected = sorted((scope.account, scope.environment) for scope in bounds.scopes)
+    expected = sorted(scope.account for scope in bounds.scopes)
     # A scope may have no reads: its newest basis has no cells (the account holds nothing),
     # which the row-by-row comparison with production already confirmed.
     if len(seen) != len(set(seen)) or sorted(seen) != expected:

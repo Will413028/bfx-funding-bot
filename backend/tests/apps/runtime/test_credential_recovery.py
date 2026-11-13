@@ -191,7 +191,7 @@ def _daemon(engine: AsyncEngine, venue: Venue, *, clock: Clock | None = None,
 
     fake = SimpleNamespace(
         config=SimpleNamespace(cells=[]), scheduler=MagicMock(), boot_mts=T0,
-        boot_recovery=venue, observation_scope=Scope(ACCOUNT, "ci"),
+        boot_recovery=venue, observation_scope=Scope(ACCOUNT),
         protection=SimpleNamespace(run_pending=AsyncMock()), periodic_reconcile=None,
         writer_lock_watch=SimpleNamespace(check=AsyncMock(return_value=True)),
         writer_lock=writer_lock, boot_retry_delay_s=lambda _n: 0.0,
@@ -396,7 +396,7 @@ async def test_an_applied_rotation_in_recovery_mode_ends_the_run(engine, sent) -
     started = T0 - 2 * SETTLE_MS
     async with factory.begin() as session:
         session.add(BotRunRow(run_id=run_id, exchange_account_id=ACCOUNT,
-                              deployment_environment="ci", started_at_ms=started,
+                              started_at_ms=started,
                               host_name="test", pid=1))
     holder: dict[str, Any] = {}
     restarts: list[int] = []
@@ -409,7 +409,7 @@ async def test_an_applied_rotation_in_recovery_mode_ends_the_run(engine, sent) -
         return True
 
     worker = CredentialRotationWorker(
-        session_factory=factory, account_id=ACCOUNT, environment="ci", authority=authority,
+        session_factory=factory, account_id=ACCOUNT, authority=authority,
         client_factory=_NewKeyClient,
         kek_loader=lambda: KEK, restart=restart,
         clock=lambda: T0, poll_interval_s=0.01, scope_lock=build_scope_lock())
@@ -422,10 +422,9 @@ async def test_an_applied_rotation_in_recovery_mode_ends_the_run(engine, sent) -
     async with factory.begin() as session:
         request_id = await commands.request_credential_rotation(
             session, OperatorContext(exchange_account_id=ACCOUNT, user_id="operator-1",
-                                     role="owner", lifecycle_status="active",
-                                     deployment_environment="ci"),
+                                     role="owner", lifecycle_status="active"),
             api_key=NEW_KEY, api_secret=NEW_SECRET, label="rotated", reason="key revoked",
-            now_ms=T0, deployment_environment="ci")
+            now_ms=T0)
     async def settled() -> str | None:
         async with factory() as session:
             state = await session.scalar(text(

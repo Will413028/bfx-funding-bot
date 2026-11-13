@@ -36,7 +36,7 @@ _OFFERS_PATH = f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/offers"
 _EXECUTIONS_PATH = f"/api/v1/exchange-accounts/{_ACCOUNT_ID}/executions"
 
 
-_SCOPE = Scope(_ACCOUNT_ID, _ENV)
+_SCOPE = Scope(_ACCOUNT_ID)
 
 
 class _Reads:
@@ -99,7 +99,6 @@ async def reads() -> _Reads:
 @pytest_asyncio.fixture
 async def app_client(factory, reads, monkeypatch):
     app = FastAPI()
-    app.state.deployment_environment = "prod"
     app.include_router(build_projections_router())
     app.state.read_models = _models(reads)
 

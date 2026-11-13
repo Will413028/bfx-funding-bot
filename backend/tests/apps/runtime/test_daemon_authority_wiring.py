@@ -82,7 +82,7 @@ def variable_is_legacy(name: str) -> bool:
 async def _apply_policies(factory, realm: str = "ci") -> None:
     from bfx_funding_bot.modules.ledger.wiring import build_policy_store
 
-    store = build_policy_store(Scope(TEST_EXCHANGE_ACCOUNT_ID, realm))
+    store = build_policy_store(Scope(TEST_EXCHANGE_ACCOUNT_ID))
     async with factory.begin() as session:
         await store.apply_policy(session, symbol="fUST", policy=CapitalPolicy(enabled=True),
                                  expected_revision=0, source={"fixture": True})
@@ -166,7 +166,7 @@ async def test_the_daemon_observes_through_cycle_effects(monkeypatch, tmp_path, 
         assert runtime._inner._inner._grace_ms == 120_000
         assert daemon.boot_recovery._foreign_grace_ms == 0
         assert runtime._inner._foreign_grace_ms == 120_000
-        assert daemon.observation_scope == Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci")
+        assert daemon.observation_scope == Scope(TEST_EXCHANGE_ACCOUNT_ID)
         # The consumers that only cached the projection take none.
         assert type(daemon.trading_status._exposure).__name__ == "CapitalStatusReads"
         status = await daemon.trading_status.snapshot()

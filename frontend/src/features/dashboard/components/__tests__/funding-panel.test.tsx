@@ -6,7 +6,6 @@ import { FundingPanel } from "../funding-panel";
 const account = "11111111-1111-4111-8111-111111111111";
 const status = {
   account_id: account,
-  deployment_environment: "prod",
   halt: { halted: true, reason: "operator_hold", sources: {} },
   configured_cells: [
     {
@@ -47,7 +46,6 @@ const status = {
   },
   dry_run: {
     account_id: account,
-    deployment_environment: "prod",
     symbols: {
       fUST: {
         blocked_by: "manual_kill",

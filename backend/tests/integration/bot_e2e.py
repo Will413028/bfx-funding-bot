@@ -62,7 +62,7 @@ from tests.apps.runtime.test_daemon_wiring import _write_cells_yaml
 
 from .test_ledger_schema_roles import ledger_db
 
-SCOPE = Scope(TEST_EXCHANGE_ACCOUNT_ID, "ci")
+SCOPE = Scope(TEST_EXCHANGE_ACCOUNT_ID)
 CELL = "fUST_a30"
 POLICY = CapitalPolicy(enabled=True, reserve_amount=Decimal("100"), max_cell_fraction=Decimal(1))
 T0 = 1_700_000_000_000  # far from the wall clock: any time source off the composition shows
@@ -219,7 +219,7 @@ class BotEnv:
         return daemon.periodic_reconcile._deployment.venue_offers
 
     def capital_scope(self, symbol: str = "fUST") -> CapitalScope:
-        return CapitalScope(TEST_EXCHANGE_ACCOUNT_ID, "ci", symbol, CELL)
+        return CapitalScope(TEST_EXCHANGE_ACCOUNT_ID, symbol, CELL)
 
     async def capital(self, daemon: Any) -> CapitalAvailable | CapitalBlocked:
         authority = daemon.trading_status._exposure.authority  # the bot's own capital authority
@@ -259,8 +259,7 @@ class BotEnv:
         async with self.factory.begin() as session:
             session.add(ExecutionDecisionRow(
                 decision_id=decision_id, account_id=str(TEST_EXCHANGE_ACCOUNT_ID),
-                exchange_account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci",
-                reconcile_id="gate", cell_id=CELL, symbol="fUST",
+                exchange_account_id=TEST_EXCHANGE_ACCOUNT_ID, reconcile_id="gate", cell_id=CELL, symbol="fUST",
                 signal_correlation_id=str(correlation), outcome="ready",
                 signal_rate=Decimal("0.0001"), applied_rate=Decimal("0.0001"),
                 amount_usdt=amount, duration_days=2, model_evidence={}, safety_result={},

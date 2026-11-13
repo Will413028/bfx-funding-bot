@@ -32,7 +32,7 @@ async def _build(monkeypatch, tmp_path: Path, httpx_mock: HTTPXMock, *, active: 
         # An operator's explicit ACTIVE: without any decision the account is
         # treated as HALTED and nothing trades.
         await TradingStateRepository(async_sessionmaker(engine, expire_on_commit=False),
-            account_id=TEST_EXCHANGE_ACCOUNT_ID, deployment_environment="ci", scope_lock=build_scope_lock(),
+            account_id=TEST_EXCHANGE_ACCOUNT_ID, scope_lock=build_scope_lock(),
         ).transition("ACTIVE", cause="operator", reason="fixture: trading", actor="test")
 
     daemon, engine = await boot_live_construction(
@@ -76,7 +76,7 @@ async def test_reported_capital_is_the_applied_authoritys_not_a_legacy_tier(
     assert fust["capital_available"] is False and fust["reason"]
     assert "cap" not in fust and "buffer" not in fust
     assert "env_fallback_cap" not in snap and "env_fallback_buffer" not in snap
-    assert snap["deployment_environment"] == "ci"
+    assert "deployment_environment" not in snap
     assert snap["account_id"] == str(TEST_EXCHANGE_ACCOUNT_ID)
     assert snap["deployment"] is not None
 

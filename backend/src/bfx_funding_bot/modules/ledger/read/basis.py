@@ -19,7 +19,7 @@ async def previous_basis(session: AsyncSession, scope: Scope) -> AcceptedCapital
 
     The query's own scope columns are repeated (the basis and observation insert
     triggers already make them equal to the basis's) so the planner can walk
-    ``ix_ledger_observation_query_scope_revision`` newest-first and stop at the
+    ``uq_ledger_observation_query_scope_revision`` backward (newest-first) and stop at the
     first query with a basis, instead of sorting every basis of the scope.
     """
     row: AcceptedCapitalBasisRow | None = await session.scalar(
@@ -33,9 +33,7 @@ async def previous_basis(session: AsyncSession, scope: Scope) -> AcceptedCapital
         )
         .where(
             LedgerObservationQueryRow.exchange_account_id == scope.exchange_account_id,
-            LedgerObservationQueryRow.deployment_environment == scope.deployment_environment,
             AcceptedCapitalBasisRow.exchange_account_id == scope.exchange_account_id,
-            AcceptedCapitalBasisRow.deployment_environment == scope.deployment_environment,
         )
         .order_by(LedgerObservationQueryRow.query_revision.desc())
         .limit(1)

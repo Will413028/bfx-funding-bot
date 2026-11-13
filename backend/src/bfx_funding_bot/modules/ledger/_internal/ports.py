@@ -77,7 +77,7 @@ class LedgerCapitalAuthority:
             # Same key as every ledger writer and the legacy writer: a writer that
             # committed before this point is visible to the READ COMMITTED reads
             # below, and one after it waits until the caller's transaction ends.
-            await clock.lock_scope(session, Scope(scope.account_id, scope.environment))
+            await clock.lock_scope(session, Scope(scope.account_id))
             read = await capital_reader.read_capital_locked(
                 session, scope, now_ms=now_ms, max_snapshot_age_ms=self._max_snapshot_age_ms
             )
@@ -107,7 +107,6 @@ class LedgerCapitalAuthority:
 def _record(scope: Scope, item: OpenUncertainty) -> UncertaintyRecord:
     return UncertaintyRecord(
         scope.exchange_account_id,
-        scope.deployment_environment,
         item.symbol,
         reads.UNCERTAINTY_KINDS[item.subject_kind],
     )

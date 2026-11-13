@@ -131,9 +131,9 @@ def label(record: Record) -> str:
 class Recording:
     """What the gate made durable, as the ordered journal transactions it asked for."""
 
-    def __init__(self, *, environment: str, account_id: UUID,
+    def __init__(self, *, account_id: UUID,
                  on_record: Callable[[Record], None] | None = None) -> None:
-        self.scope = Scope(account_id, environment)
+        self.scope = Scope(account_id)
         self.txns: list[tuple[Record, ...]] = []
         self.attempts: dict[str, CommandAttempt] = {}
         # What the effects were told after each outcome committed.

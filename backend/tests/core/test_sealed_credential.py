@@ -28,7 +28,7 @@ SECRET = "FAKE-SECRET-not-a-real-bitfinex-secret-0000"
 
 
 def _context(**change: Any) -> SealContext:
-    values: dict[str, Any] = {"exchange_account_id": ACCOUNT, "deployment_environment": "ci",
+    values: dict[str, Any] = {"exchange_account_id": ACCOUNT,
                               "recipient_id": UUID(int=1), "request_id": UUID(int=2)}
     return SealContext(**{**values, **change})
 
@@ -50,12 +50,11 @@ def test_a_sealed_credential_opens_for_its_recipient_and_context() -> None:
 
 @pytest.mark.parametrize("change", [
     {"exchange_account_id": uuid4()},
-    {"deployment_environment": "prod"},
     {"recipient_id": UUID(int=9)},
     {"request_id": UUID(int=9)},
 ])
 def test_any_other_context_does_not_open(change: dict[str, Any]) -> None:
-    """The ciphertext moved to another account, environment, recipient or request."""
+    """The ciphertext moved to another account, recipient or request."""
     recipient = generate_recipient()
     sealed = seal(KEY, SECRET, public_key=recipient.public_key, context=_context())
     with pytest.raises(SealedPayloadError) as refused:

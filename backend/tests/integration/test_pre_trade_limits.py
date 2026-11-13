@@ -94,7 +94,8 @@ async def _amend(stack: Stack, changes: PolicyChanges, *,
     async with stack.factory() as session:
         report = await amend_capital_policy(session, store=build_policy_store(SCOPE),
                                             scope_lock=stack.lock,
-                                            symbol="fUST", changes=changes, apply_digest=digest)
+                                            symbol="fUST", changes=changes, apply_digest=digest,
+                                            realm=None)
         if report["status"] == "applied":
             await session.commit()
         else:
@@ -214,7 +215,7 @@ def _reconciled(account, nav: str, at_ms: int) -> PositionReconciled:
 @pytest.mark.asyncio
 async def test_loss_window_survives_a_restart_and_the_nav_drop_still_alerts(gate_stack):  # noqa: F811
     factory, account = gate_stack.factory, ACCOUNT
-    store = NavWindowStore(factory, account_id=account, deployment_environment="ci")
+    store = NavWindowStore(factory, account_id=account)
     hour = 3_600_000
     before = ReconcileNavTracker(str(account), window_store=store)
     for nav, at in (("1000", 1 * hour), ("1000", 1 * hour + 60_000), ("900", 2 * hour)):
@@ -334,8 +335,7 @@ async def test_disabling_a_currency_pulls_only_its_managed_offers(gate_stack):  
     for name, port in planner_ports(gate_stack).items():
         setattr(planner, f"_{name}", port)
     planner._managed_sweep = ManagedOfferSweep(
-        session_factory=gate_stack.factory, account_id=ACCOUNT, environment="ci",
-        canceller=canceller, ctx=ctx, offers=gate_stack.offers)
+        session_factory=gate_stack.factory, account_id=ACCOUNT, canceller=canceller, ctx=ctx, offers=gate_stack.offers)
 
     assert await planner._pull_if_stopped("fUST") is False    # enabled, ACTIVE: nothing happens
     assert canceller.cancelled == []
@@ -365,8 +365,7 @@ async def test_a_halt_pulls_managed_offers_every_tick_until_none_is_left(gate_st
     for name, port in planner_ports(gate_stack).items():
         setattr(planner, f"_{name}", port)
     planner._managed_sweep = ManagedOfferSweep(
-        session_factory=gate_stack.factory, account_id=ACCOUNT, environment="ci",
-        canceller=canceller, ctx=ctx, offers=gate_stack.offers)
+        session_factory=gate_stack.factory, account_id=ACCOUNT, canceller=canceller, ctx=ctx, offers=gate_stack.offers)
     assert await planner._pull_if_stopped("fUST") is True
     assert canceller.cancelled == []            # 101 failed; 555 is foreign
     canceller.fail.clear()
@@ -401,7 +400,6 @@ async def test_a_halt_sweep_cancels_while_market_data_was_never_seen(gate_stack)
     for name, port in planner_ports(gate_stack).items():
         setattr(planner, f"_{name}", port)
     planner._managed_sweep = ManagedOfferSweep(
-        session_factory=gate_stack.factory, account_id=ACCOUNT, environment="ci",
-        canceller=rig.gate, ctx=rig.ctx, offers=gate_stack.offers)
+        session_factory=gate_stack.factory, account_id=ACCOUNT, canceller=rig.gate, ctx=rig.ctx, offers=gate_stack.offers)
     assert await planner._pull_if_stopped("fUST") is True
     assert rig.venue.received == ["101"]

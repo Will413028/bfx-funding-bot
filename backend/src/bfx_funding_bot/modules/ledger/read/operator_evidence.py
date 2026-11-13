@@ -61,7 +61,6 @@ async def latest_accepted(session: AsyncSession, scope: Scope) -> LedgerObservat
         )
         .where(
             LedgerObservationRow.exchange_account_id == scope.exchange_account_id,
-            LedgerObservationRow.deployment_environment == scope.deployment_environment,
             LedgerObservationRow.accepted.is_(True),
         )
         .order_by(LedgerObservationQueryRow.query_revision.desc())
@@ -97,7 +96,6 @@ class LedgerOperatorEvidence:
                 select(
                     LedgerObservationRow.accepted,
                     LedgerObservationRow.exchange_account_id,
-                    LedgerObservationRow.deployment_environment,
                     LedgerObservationRow.query_id,
                     LedgerObservationRow.query_finished_at_ms,
                     LedgerObservationRow.first_digest,
@@ -119,7 +117,6 @@ class LedgerOperatorEvidence:
             or latest is None
             or latest.id != identifier
             or observation.exchange_account_id != scope.exchange_account_id
-            or observation.deployment_environment != scope.deployment_environment
         ):
             raise ResolutionRejected("stale_reconcile_fence")
         if subject.attempt_id is not None:
@@ -127,7 +124,6 @@ class LedgerOperatorEvidence:
                 await session.execute(
                     select(
                         SubmissionAttemptJournalRow.exchange_account_id,
-                        SubmissionAttemptJournalRow.deployment_environment,
                         SubmissionAttemptJournalRow.symbol,
                         # The uncertainty opens when the UNKNOWN was recorded, not at submit
                         # (G2: the same moment ``record_resolution`` judges the observation by).
@@ -149,7 +145,6 @@ class LedgerOperatorEvidence:
                 await session.execute(
                     select(
                         QuarantineOpeningRow.exchange_account_id,
-                        QuarantineOpeningRow.deployment_environment,
                         QuarantineOpeningRow.symbol,
                         QuarantineOpeningRow.opened_at_ms,
                     ).where(QuarantineOpeningRow.quarantine_id == subject.uncertainty_id)
@@ -158,7 +153,6 @@ class LedgerOperatorEvidence:
         if (
             opening is None
             or opening.exchange_account_id != scope.exchange_account_id
-            or opening.deployment_environment != scope.deployment_environment
             or opening.symbol != subject.symbol
         ):
             raise ResolutionRejected("not_found", kind="not_found")
@@ -168,7 +162,6 @@ class LedgerOperatorEvidence:
                 select(
                     LedgerObservationQueryRow.started_at_ms,
                     LedgerObservationQueryRow.exchange_account_id,
-                    LedgerObservationQueryRow.deployment_environment,
                 ).where(LedgerObservationQueryRow.query_id == observation.query_id)
             )
         ).one_or_none()
@@ -177,7 +170,6 @@ class LedgerOperatorEvidence:
             or opened_at is None
             or query.started_at_ms <= opened_at
             or query.exchange_account_id != scope.exchange_account_id
-            or query.deployment_environment != scope.deployment_environment
             or observation.query_finished_at_ms < query.started_at_ms
             or observation.first_digest != observation.confirmation_digest
         ):

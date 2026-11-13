@@ -63,19 +63,18 @@ class InternalFailure:
 
 @dataclass(frozen=True, slots=True)
 class SimAccount:
-    """One simulated venue account: `(exchange_account_id, deployment_environment)`."""
+    """One simulated venue account.
+
+    It names no realm: the configuration refuses the simulated venue outside
+    `SIMULATED_REALM` (`require_simulated_realm`), and the store refuses a database
+    stamped with any other.
+    """
 
     exchange_account_id: str
-    deployment_environment: str
 
     def __post_init__(self) -> None:
         if not self.exchange_account_id:
             raise ValueError("simulated account needs an exchange_account_id")
-        if self.deployment_environment != SIMULATED_REALM:
-            raise RealmRefusedError(
-                f"simulated venue refuses realm {self.deployment_environment!r}; "
-                f"allowed: {SIMULATED_REALM!r}"
-            )
 
 
 @dataclass(frozen=True, slots=True)

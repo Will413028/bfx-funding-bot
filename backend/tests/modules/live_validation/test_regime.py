@@ -20,7 +20,6 @@ async def test_record_config_regime_inserts_row(session_factory):
     await record_config_regime(
         session_factory,
         account_id="primary",
-        deployment_environment="prod",
         clamp_enabled=True,
         reprice_enabled=True,
         git_sha="abc1234",
@@ -39,7 +38,6 @@ async def test_record_config_regime_is_best_effort(session_factory):
         await record_config_regime(
             session_factory,
             account_id="primary",
-            deployment_environment="prod",
             clamp_enabled=False,
             reprice_enabled=False,
             git_sha=None,

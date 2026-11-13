@@ -41,10 +41,10 @@ from ..test_ledger_unknown_resolver_pg import (
     start,
     venue_offer,
 )
-from .stacks import ACCOUNT, ENVIRONMENT, SCOPE, Stack
+from .stacks import ACCOUNT, SCOPE, Stack
 
 OPERATOR = "operator-1"
-RSCOPE = ResolutionScope(ACCOUNT, ENVIRONMENT)
+RSCOPE = ResolutionScope(ACCOUNT)
 WORKER_NOW = 3_000_000
 
 

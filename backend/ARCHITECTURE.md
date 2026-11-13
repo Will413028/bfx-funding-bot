@@ -388,7 +388,7 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 
 **Venue hints 邊界**：`execution/ws_dispatcher.py` 把 WS `foc`／`fcc` 交給 ledger 的 `VenueHintSink`（`_internal/venue_hints.py`），scope 在建構時綁定；它不讀寫 DB，只同步呼叫 `request_resync(reason)`（每個 `(kind, venue id)` 本機 monotonic clock 的 5 秒 leading-edge 窗口）並逐筆發布 `VenueHintNotification`。offer 通知以 `venue_offer_id` 為 key，credit close 只帶 `credit_id`。
 
-**Account/環境隔離**：每筆讀寫都帶 `deployment_environment ∈ {prod, ci}`（`shadow` 已移除，ADR 2026-11-08-remove-the-shadow-realm），所有 money query 以 `(exchange_account_id, deployment_environment)` 複合過濾；ledger 的 scope trigger（`guard_ledger_scope`）拒絕跨 scope 的參照。legacy `account_id` 不再選擇 request/daemon scope；單一 DB 內可並行跑 prod/CI 而無 cross-account 或 cross-environment 污染。
+**Account/環境隔離**：一個資料庫只屬於一個 realm（`prod` 或 `ci`；`shadow` 已移除，ADR 2026-11-08-remove-the-shadow-realm）。realm 記在 `database_realm` 的單列 stamp（不可改），bot 開機時以 `assert_database_realm` 比對 stamp 與 `BFX_DEPLOYMENT_ENV`，不符就拒絕；live 表沒有 `deployment_environment` 欄，也沒有逐列的 realm trigger（migration `545b2877e9bd`，ADR 2026-11-08-drop-realm-columns）。scope 就是 `exchange_account_id`：所有 money query 以它過濾，ledger 的 scope trigger（`guard_ledger_scope`）拒絕跨帳號的參照。legacy `account_id` 不選擇 request/daemon scope。`BFX_DEPLOYMENT_ENV` 只有兩個用途（ADR 2026-11-08-drop-realm-columns D7）：bot 開機的 stamp 比對，以及遙測標籤（metrics、Sentry、告警、halt gauge），由組裝處（`apps/bot.py`、`apps/webapi.py`）讀一次後以參數注入（`tests/architecture/test_env_read_once.py`）；webapi、operator CLI 與腳本不需要它，密封請求的 HKDF info、對外 API 與領域型別都不帶 env。封存 schema（`legacy_archive`、`release_archive`）的表保留原欄位；`archived_execution_history.py` 讀 `legacy_archive.event_log` 時不以 env 過濾（migration `545b2877e9bd` 已斷言每列都等於 stamp）。
 
 **Typed outcome unions**：pre-trade 結果是 `ReadyToSubmit | BlockedExecution | NoRecommendation`（`execution/contracts.py`）；venue submit 結果是封閉的 `SubmitOutcome = SubmitAcknowledged | SubmitRejected | SubmitOutcomeUnknown | SubmitNotSent`（`external/bitfinex/submit_outcomes.py::classify_submit_response`）。transport 開始前的例外 → `SubmitNotSent`；transport 開始後的任何例外（timeout、network error、cancel）、5xx、缺 response 或無法辨識的 body 一律 `SubmitOutcomeUnknown`；只有明確 2xx 帶 venue offer id 才是 acknowledged、結構化拒絕才是 rejected。5xx 唯一的例外是 HTTP 500 帶 `["error", CODE, MESSAGE]` 且 `(CODE, MESSAGE)` 整組出現在 `VENUE_SUBMIT_REFUSALS_5XX`（只收從真實 venue 原樣錄到的配對；10001 是 Bitfinex 的通用碼，單看 code 不足以判定）→ rejected。其餘帶結構化錯誤的 UNKNOWN 把 code 與限長 message（憑證遮蔽）寫進 `transport_outcome_journal.evidence`，下一條待收的拒絕訊息從這裡讀。`transport_outcome_journal.kind` 的 CHECK 與此詞彙一一對應。
 
@@ -447,7 +447,7 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 
 **Process log 與安全事件（9j，`core/log_format.py`、`core/security_log.py`）**：bot（`apps/bot.py:main`）與 web API（`apps/webapi.py` import 時；lifespan 只套 `LOG_LEVEL`）都呼叫 `configure_logging(service)`：root logger 掛一個寫 stderr 的 handler，每筆 record 一行 JSON：`ts`（UTC ISO-8601、毫秒、`Z`）、`level`、`service`（`bot`／`webapi`）、`logger`、`msg`（`record.getMessage()`，原本的訊息文字），traceback 在 `exc`，呼叫端 `extra=` 的欄位原樣成為欄位（與核心欄位同名時改名 `extra_<名>`）。編碼用 `json.dumps(ensure_ascii=True)`：CR、LF、其他控制字元與 U+2028／U+0085 都被跳脫，request 帶進來的值無法另起一行偽造 log（F37）。沒有新依賴。uvicorn 的 logger 交給 root：web API 在 uvicorn 設定完自己的 logger 之後才 import app，所以 `configure_logging` 清掉它們的 handler、改成往上傳；bot 的 healthz 以 `log_config=None` 建 `uvicorn.Config`，不再裝回文字 handler。root 已經有別人的 handler（pytest 的 capture、CLI 的 `basicConfig`）時不接管，與 `basicConfig` 相同。遮罩不在 formatter：alert 文字在送進 log 前已去掉 secret，httpx 的 Telegram URL filter 改寫 record，Sentry 的 `before_send` 照舊處理 breadcrumb（含 extra 欄位）。Grafana 規則（homelab，`{container="bfx-bot"}` 的行數、`|= "deployment_skip"`、`|~ "deployment_submit_rejected|deployment_submit_error"`）比對的是整行原文，事件名仍在 `msg` 裡，所以不受影響。安全事件由 logger `bfx.security` 以 WARNING（開機拒絕為 CRITICAL）寫出，欄位 `event`、`reason`，以及已知時的呼叫者（Serve 轉送的 tailnet login、capability 帶的 node user ID、operator `user_id`），從不記 token、帶 token 的 header 或 request body，request 來的字串截到 200 字：`access_denied`（web API `require_operator` 的兩種 401、帳戶不是成員或 viewer 寫入的 `account_write_required`、bot `/admin/*` 的 401／403 含 peer 位址）、`request_rejected`（ingress 的 `host_not_allowed`／`cross_site_refused`／`json_required`，含失敗的 header 名與值）、`rate_limited`（429，含 bucket 與 `retry_after_s`）、`boot_refused`（web API 的四種拒絕開機；bot 未開機前的拒絕只記例外型別，訊息在已遮罩的 `boot_refused` 告警裡）、`admin_halt`（`actor`、`halt_reason` 是欄位，不進訊息）。uvicorn access log 仍有每個請求的狀態碼，安全事件補上原因與身分。
 
-**Writer lock（`core/writer_lock.py`）**：兩個 venue 的 daemon 開機時對 Postgres 取 session-level advisory lock，key 為 `blake2b("bfx-writer:{exchange_account_id}:{env}")` 的 signed int64（不用 process-salted `hash()`）；被別人持有 → `WriterLockUnacquired` → exit code 75（`EXIT_CODE_WRITER_LOCKED`）。帳戶的 per-transaction scope lock（`pg_advisory_xact_lock`，原語在 `core/xact_lock.py`）用不同 namespace（`bfx-writer-xact`），兩者不互等。scope lock 只有一個 owner：只有 `ledger/_internal/clock.lock_scope` 能 import 原語（import-linter `xact-lock-owner`），其他取鎖處（寫入者 operator request worker、trading state 轉移、capital amendment、`scripts/amend_capital_policy.py`）都經 composition root 注入的 ledger `ScopeLock` 取得（bot 由 `apps/bot_ports.build_capital_ports`，scripts 由 `build_policy_ports`；兩者都經 `ledger.wiring.build_scope_lock`）；`CapitalAuthority.read(session=…)` 的加鎖讀取（command gate 的 `CapitalPolicyGuard`、reconciler、trading status 讀有 cell 的 symbol）在 ledger 內部取鎖；`read_policy` 不取鎖。scripts 在 R11 之前由 `tests/architecture/test_import_contracts.py` 擋直接 import 原語與任何模組的 `wiring`（ADR 2026-10-19 D4）。`trading_state` 的 insert trigger 另取一把 DB 端的 advisory lock（`hashtextextended('bfx-trading-state:…')`，migration `2e835b6f4c12` 起），讓 id 依決策順序遞增、轉移規則由 DB 驗證；`TradingStateRepository.transition` 的順序固定是先 scope lock、後 trigger 的鎖。每筆真錢 submit 前 `WriterLockGuard.verify_held()` fail closed；`_writer_lock_liveness_loop` 每 30 s 以 `WriterLockWatch.check()` refresh（連線斷掉時重取），refresh 後仍未持有 → `WriterLockLostError`，daemon 退出、container 重啟；不寫 trading state。重啟後開機時若鎖仍被別人持有，`acquire` 以 exit 75 退出，由 restart policy 再啟動、再試，開機不會在 process 內等鎖。資料庫斷線撐過一次 refresh 也走這條（refresh 重取失敗）：這是 single-writer fencing（租約失去就立刻停止行動），刻意保留；重啟後由 `wait_for_database` 在 process 內等資料庫回來，不會 crash-loop。boot observation 重試前同樣先 `WriterLockWatch.check()`。
+**Writer lock（`core/writer_lock.py`）**：兩個 venue 的 daemon 開機時對 Postgres 取 session-level advisory lock，key 為 `blake2b("bfx-writer:{exchange_account_id}")` 的 signed int64（不用 process-salted `hash()`；key 只由 namespace 與帳號導出、不含 env，環境隔離靠一庫一 realm，ADR 2026-11-08-drop-realm-columns D6）；被別人持有 → `WriterLockUnacquired` → exit code 75（`EXIT_CODE_WRITER_LOCKED`）。帳戶的 per-transaction scope lock（`pg_advisory_xact_lock`，原語在 `core/xact_lock.py`）用不同 namespace（`bfx-writer-xact`，同樣是 namespace＋帳號），兩者不互等。scope lock 只有一個 owner：只有 `ledger/_internal/clock.lock_scope` 能 import 原語（import-linter `xact-lock-owner`），其他取鎖處（寫入者 operator request worker、trading state 轉移、capital amendment、`scripts/amend_capital_policy.py`）都經 composition root 注入的 ledger `ScopeLock` 取得（bot 由 `apps/bot_ports.build_capital_ports`，scripts 由 `build_policy_ports`；兩者都經 `ledger.wiring.build_scope_lock`）；`CapitalAuthority.read(session=…)` 的加鎖讀取（command gate 的 `CapitalPolicyGuard`、reconciler、trading status 讀有 cell 的 symbol）在 ledger 內部取鎖；`read_policy` 不取鎖。scripts 在 R11 之前由 `tests/architecture/test_import_contracts.py` 擋直接 import 原語與任何模組的 `wiring`（ADR 2026-10-19 D4）。`trading_state` 的 insert trigger 另取一把 DB 端的 advisory lock（`hashtextextended('bfx-trading-state:' || exchange_account_id)`，migration `2e835b6f4c12` 起；`545b2877e9bd` 起 key 不含 env），讓 id 依決策順序遞增、轉移規則由 DB 驗證；`TradingStateRepository.transition` 的順序固定是先 scope lock、後 trigger 的鎖。每筆真錢 submit 前 `WriterLockGuard.verify_held()` fail closed；`_writer_lock_liveness_loop` 每 30 s 以 `WriterLockWatch.check()` refresh（連線斷掉時重取），refresh 後仍未持有 → `WriterLockLostError`，daemon 退出、container 重啟；不寫 trading state。重啟後開機時若鎖仍被別人持有，`acquire` 以 exit 75 退出，由 restart policy 再啟動、再試，開機不會在 process 內等鎖。資料庫斷線撐過一次 refresh 也走這條（refresh 重取失敗）：這是 single-writer fencing（租約失去就立刻停止行動），刻意保留；重啟後由 `wait_for_database` 在 process 內等資料庫回來，不會 crash-loop。boot observation 重試前同樣先 `WriterLockWatch.check()`。
 
 **Heartbeat：liveness vs activity vs dependency（`core/health.py`、`apps/runtime/health_monitor.py`）**：每個 sub-task 只屬於一類（import 時 assert 三類互不重疊）。`LIVENESS_THRESHOLDS` 的 beat 只代表「這個 task 自己的迴圈完成了一輪」，從不代表「外部依賴有回應」：`ws` 90 s（市場資料的 candle WS poller 每 15 s 一輪，`MarketDataRuntime._ws_freshness_tick`）、`candle_writer` 65 min（每個取出的 candle，不論 upsert 成敗，及佇列空著時每 60 s）、`scheduler` 65 min（每一輪，不論 callback 成敗）、`health_check` 6 min、`db_keepalive` 7 min（每次 ping 嘗試，不論成敗）、`periodic_reconcile` 270 s（每個 tick 之後）。超過 3 倍 threshold → `FatalError` → TaskGroup 結束 → process 退出、由 container restart policy 重啟——這只發生在 task 卡在永不返回的 await；loop 本身被卡住由上方 event loop watchdog 處理。`DEPENDENCY_THRESHOLDS`（只在依賴有回應時跳動：`ws_data` 90 s＝帳戶的 book feed 60 s 內實際收到過 frame、`db` 7 min＝keepalive `SELECT 1` 成功；過期判斷一律 `dependency_is_stale`，與 `HeartbeatGuard` 同一份）過期只發 degraded／down 觀測事件（只在 severity 轉換時）並令 `/readyz` not ready，永不致命、永不令 `/healthz` 503：重啟修不好 venue 或資料庫，只會在開機時再撞上同一個 outage。依賴斷線期間擋送單的是 `HeartbeatGuard`（`ws_data`）、book freshness gate（`BFX_BOOK_MAX_AGE_SECONDS`）與 execution gate 的 audit commit（資料庫不通 → `execution_audit_unavailable`）。`ACTIVITY_THRESHOLDS`（reactive，靜市場時合法不跳：`safety_chain`、`executor`、`writer_lock`）同樣只發轉換事件、永不致命——把 reactive task 接到 liveness 就是 2026-05-26 idle-market restart loop 的成因。auth WS 健康同樣只觀測、不驅動 restart。未登記的 sub-task 名稱在 `scan_staleness` 以預設 60 s 計、可致命，`/healthz` 不看。
 
@@ -463,7 +463,7 @@ capital_authority_epoch (insert-only；最新 epoch_seq 決定 authority ∈ {le
   epoch_seq, authority, set_at_ms, actor, reason, evidence
 
 capital_command_clock  (每 scope 一列，可 UPDATE 的單調計數；attempt、outcome、resolution、cancel 都推進它)
-  PK (exchange_account_id, deployment_environment), revision
+  PK (exchange_account_id), revision
 
 ledger_observation_query (每次 cycle 一列)
   PK query_id; UNIQUE (scope, query_revision); started_at_ms, start_revision
@@ -505,7 +505,7 @@ uncertainty_resolution_requests (CLI→daemon 裁決請求；bfx_operator 只 IN
   reason, requested_by, created_at_ms, state, ...
 
 execution_decisions    (append-only pre-trade audit；不是 ledger 事實)
-  decision_id, reconcile_id, exchange_account_id, deployment_environment,
+  decision_id, reconcile_id, exchange_account_id,
   outcome, reason_code, failed_dependency, signal_rate, applied_rate,
   amount_usdt, period_days, market_snapshot_evidence, model_evidence,
   safety_result, execution_policy, service_version, config_hash,
@@ -513,7 +513,7 @@ execution_decisions    (append-only pre-trade audit；不是 ledger 事實)
 
 trading_state          (append-only 交易狀態；帳戶層停機的唯一權威)
   PK id（insert trigger 在 scope lock 下指派，id 序即決策序）
-  exchange_account_id (FK RESTRICT), deployment_environment,
+  exchange_account_id (FK RESTRICT),
   state{ACTIVE|HALTED}, cause{operator|auto}, actor, reason, created_at_ms, legacy_halt_id,
   operator_request_id
   -- operator_request_id：寫下這列的 operator 請求（NULL＝自動保護或 /admin/halt；restate 不寫列），
@@ -550,7 +550,7 @@ trading_control_requests (webapi→daemon 請求；webapi 只 INSERT 請求欄�
   -- （請求表原本的 trading_state_id 由 41cec7caf291 移除）。
 
 capital_policy_requests (webapi→daemon 幣別啟停請求；migration 7d2a9c4e6b13)
-  request_id, exchange_account_id, deployment_environment, symbol, action{enable|disable},
+  request_id, exchange_account_id, symbol, action{enable|disable},
   reason, requested_by, created_at_ms, state{requested|applied|rejected|failed},
   processed_at_ms, outcome_reason
   -- 同一幣別同一動作至多一筆 pending；套用寫出的 revision 以 operator_request_id 指回請求，
@@ -566,14 +566,14 @@ capital_policy_revisions / capital_policy_heads (append-only 版本化 CapitalPo
   -- bfx_webapi 只有 SELECT（overview 列出 policy 與包絡）。
 
 funding_cancel_all_audit (append-only；kill switch 每次 venue cancel-all 的紀錄)
-  PK id, exchange_account_id, deployment_environment, trading_state_id, operator_request_id,
+  PK id, exchange_account_id, trading_state_id, operator_request_id,
   attempt_id, currency, phase{requested|acknowledged|rejected|failed|skipped},
   venue_status, detail, actor, occurred_at_ms
   -- 每個 attempt 一筆 requested、至多一筆終態（partial unique）。trading_state_id 與 operator_request_id
   -- 都是含 scope 的複合 FK；operator_request_id 為 NULL＝/admin/halt 或自動保護。
 
 diagnostics            (非 SoT forensic, prunable)
-  exchange_account_id, deployment_environment, kind, payload(JSONB),
+  exchange_account_id, kind, payload(JSONB),
   occurred_at(TIMESTAMPTZ), recorded_at
 
 funding_candles        (訊號層輸入)
@@ -590,7 +590,7 @@ funding_candle_revisions (定稿後被拒寫入的證據，每個被拒的值一
   -- 用來回答「venue 到底會不會修訂已收盤 bar」。長期為空 = bitemporal 層可降級。
 
 config_regime          (非 SoT telemetry, prunable, 每次 daemon boot 一筆)
-  PK (deployment_environment, exchange_account_id, recorded_at_ms)
+  PK (exchange_account_id, recorded_at_ms)
   clamp_enabled (legacy telemetry; always false), reprice_enabled,
   git_sha
   用途：flag flip 需重啟（config boot-immutable），boot 即為 regime
@@ -608,12 +608,12 @@ exchange_account_credentials (AEAD 加密；AAD = canonical account UUID)
   operator_request_id FK credential_rotation_requests（輪替產生的列；其他為 NULL）
   UNIQUE partial (exchange_account_id, venue) WHERE lifecycle_status = 'active'
 credential_rotation_recipients (每次 bot run 一把 HPKE X25519 公鑰；runtime 不可改／刪)
-  PK recipient_id, exchange_account_id, deployment_environment, run_id FK bot_runs,
+  PK recipient_id, exchange_account_id, run_id FK bot_runs,
   public_key (32 bytes), created_at_ms
 credential_rotation_requests (operator outbox；sealed_credential 只有該次 run 解得開)
   PK request_id, recipient_id FK, replaces_credential_id FK credentials,
   sealed_credential, label, reason, requested_by, state/processed_at_ms/outcome_reason
-  UNIQUE partial (exchange_account_id, deployment_environment) WHERE state = 'requested'
+  UNIQUE partial (exchange_account_id) WHERE state = 'requested'
 
 funding_stats          (Bitfinex /v2/funding/stats/{symbol}/hist)
   PK (symbol, mts)；symbol 一律帶 `f` 前綴（`fUSD`/`fUST`）
@@ -742,7 +742,7 @@ production volume，也不是 **venue rollback**。任何 restore point 之後�
 Halt 2 DR 收據）已由 ADR 2026-09-25 的 release flow 取代並刪除，資料見 `release_archive`。
 
 **Phase ⟷ Realm guard**（`load_config()`）：realm 只有 `prod` 與 `ci`；
-production 使用 prod，ci 僅供測試。phase shadow（simulated venue）禁止 prod（模擬不可污染真錢資料），`sim_venue_event` 的 CHECK 只收 `ci`。
+production 使用 prod，ci 僅供測試。phase shadow（simulated venue）禁止 prod（模擬不可污染真錢資料）；simulated venue 的 store 開啟時讀 `database_realm`，stamp 不是 `ci` 就拒絕（`simulated_venue/_internal/store_sql.py` 的 `_check_database_realm`）。
 違規 `ValueError` fail-fast；webapi 必須明確設定與 daemon 相同的 realm。
 
 **Cells**：`cells.yaml`（shadow，多對跨 fUSD/fUST 與 p2/p30/a30）；本輪
@@ -847,7 +847,7 @@ CLI 的 `rotate-credential` 從 stdin 讀新 key，只封給「scope 最新、�
     group／other 不可寫、不是 symlink）。
 - one-shot 與 `SENTRY_DSN`（依設計公開）留在 env。輪替見 `docs/runbooks/secret-rotation.md`。
 
-**關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`、`DATABASE_URL`（bot／webapi 是秘密檔，見上）、
+**關鍵 env vars**：`BFX_PHASE`、`BFX_DEPLOYMENT_ENV`（只有 bot 必填；webapi 只拿來當 Sentry 標籤）、`DATABASE_URL`（bot／webapi 是秘密檔，見上）、
 `BFX_EXCHANGE_ACCOUNT_ID`、`BFX_VAULT_KEK`（bot 是秘密檔）、
 `BFX_RECONCILE_INTERVAL_S`、`BFX_QUOTE_TTL_MS`、`BFX_SCHEDULER_BUFFER_S`、
 `BFX_SAFETY_CONFIG`、`BFX_CELLS_YAML`、`BFX_LOOP_WATCHDOG_S`（event loop watchdog 秒數，預設 120）。已退役、設了就拒絕開機：`BFX_EXECUTOR` 與舊資金 env（`BFX_ALLOCATION_CAP_USDT`、`BFX_BALANCE_BUFFER_USDT`、`BFX_CONCENTRATION_PCT`、`BFX_VENUE_FLOOR_USD`、`BFX_MIN_OFFER_BUFFER_PCT`）。
@@ -859,7 +859,7 @@ credential vault 解密。公開站（I-PUB）不經 webapi：`bfx-public-site` 
 - **Weekly chain**：VM systemd timer `bfx-weekly-report.timer`（Mon 04:17 UTC，unit 檔在 `deploy/vm/systemd/`）→ `bfx-weekly-report.service` 以主機工具的 `deploy/vm/ops/bfx_weekly_report.py` 跑 compose one-shot `weekly-report`（`deploy/vm/ops/docker-compose.weekly-report.yml`，隨每次部署安裝；image＝ledger 的 backend digest）：`ingest_funding_stats`（AlwaysFRR arm 資料）→ `run_weekly_attribution`（per-cell fee-adjusted APR → `attribution_weekly` 表，全量重算 delete-then-insert；2026-09-27 起來源是 bot 的 `CreditHistorySync` 每小時同步的 `funding_credit_history`／`funding_trades`（venue credit/loan history 的 實際持有時間（每筆自 max(MTS_OPENING, MTS_CREATE) 起算，loan 轉成的 credit 不重複計），以 (symbol, period, MTS_OPENING) 對到 MTS_CREATE 同一時刻的 trade（rate／amount／id 不是 key：credit rate 精度不同，loan 會轉成新 id、拆分金額的 credit），trade 的 OFFER_ID 對回 execution decision 的 cell，對不上歸 `unattributed`；authority 切到 ledger 後新 offer 只存在 ledger journal、open credit 只在 `venue_credit_mirror`，loader 經 `modules/ledger/attribution_reads.py`（公開讀 port，ack outcome 的 attempt → cell；mirror 的 open credit）與切換前 offer 的 cell 取聯集（切換前的 offer → cell 由 migration `a0b1c2d3e4f5` 在 epoch 為 `ledger` 後，從凍結的 `offer_claims`／`venue_offer_state`／`event_log` ORDER_FILL 經 `execution_decisions`／`diagnostics` 解析一次，寫進 attribution 自己的 `attribution_legacy_offer_cells`；同一 offer 解出多個 cell 則全部寫入、當 conflict；loader 不再讀 legacy 表與 diagnostics，`bfx_bot` 只有 SELECT），同一 offer 被 legacy 紀錄及／或 journal 放在多個 cell 則列入報告的 `OFFER CELL CONFLICTS` 並歸 `unattributed`，不擇一；offer 來源是 ledger 的 provenance＝ack outcome ∪ `bound_to_venue` resolution，同一 offer 多個 attempt 同 cell 合併、不同 cell 算 conflict；尚未進 history 的 credit 以 mirror 為準（opening 用 `mts_opening`，所以 loan 轉成的 credit 會落到原始 trade 的週與 cell；已結束但 history 未同步者以 `mts_updated` 為結束），G3 報告與 json 也列出 conflict），不再用 ORDER_FILL×held-to-term 或 CREDIT_CLOSED 的 rate/period/close；同一步輸出每週「credit 推得的 net 利息 vs `funding_interest_payments` 帳本」對帳 `<date>-attribution-reconciliation.md`，帳本窗 = credit 週往後平移一天（每日利息隔日 ~01:30Z 入帳），|diff| > max(5%, 0.01) 標 FLAG；規則見 `modules/live_validation/credit_attribution.py`）→ `report_interest`（帳本週報）→ `run_g3_live_validation`（報告 → VM `~/bfx/reports/<date>-g3-live-validation.{md,json}`；2026-09-27 起 active arm 同樣用 bot cell 的 venue credits × 實際持有時間（按日曆週切分；分到多個 cell 的 credit 依上述 amount 分配的比例計入各 cell），C = 帳本 funding wallet 餘額（`--capital` 可覆寫），信任 gate 由 deployment/NAV anchor 改為上述帳本對帳：只看最近 8 個已結算週，其中 FLAG → UNRELIABLE，除非 operator 以 `--ack-week YYYY-MM-DD=理由` 確認（加進 `deploy/vm/ops/docker-compose.weekly-report.yml` 的 G3 指令，隨部署生效並留在 git，報告回顯），更舊的 FLAG 只列出不擋；MR-alpha 每個 bot cell 對自己 period_agg 的市場利率序列、另有 total 列（缺序列的 cell 標 unavailable、不進 total，total 註明覆蓋的 capital-days 比例）；資料門檻 = 評估窗平均帳本錢包餘額 × 7 天；over-deploy clamp 移除改報 peak；此前的 G3 報告與之後不可比，報告內有 Methodology change 段。程式在 `modules/live_validation/{attribution_loader,g3,g3_report}.py`，scripts 只是 CLI）。報告不進本 repo。
 - **研究重驗（Proposal E，2026-09-22）**：同一個 `weekly-report` 在 G3 之後接研究步驟，每步 `timeout` + fail-soft、絕不阻斷營運報告：外部訊號 topup（`ingest_perp_funding`、`ingest_liquidations`）→ `learn_book_fill_rate`（book-replay artifact，`source="book"`）→ `run_period_structure_backtest`（`--fill-model book` 與 linear 各一份）→ `run_oos_profitability` → `diff_research_report`（champion 漂移＝最近 12 窗中位數跌破全歷史 p25；challenger 反超＝配對 CI 下界連續 3 週 >0；只開 registry review，永不 auto-promote）。報告落 VM `~/bfx/reports/<date>-{period-structure-book,period-structure-linear,oos-profitability,weekly-research-*}.md`。systemd `TimeoutStartSec=5400`。
 - **DB role**：weekly chain 與研究用一次性容器都以 `bfx_research` 連線（`/opt/bfx/runtime/research.env`，不用 `bot.env`）。migration `3c5e7a9b1d2f` 給它精確 allowlist：寫入只限研究表（`funding_stats`／`perp_funding_rates`／`liquidations` upsert，`attribution_weekly`／`fill_rate_stats` delete＋insert，`fill_rate_model_artifacts` insert），讀取只限上述步驟用到的表；不能寫 ledger、`trading_state` 與 outbox，讀不到憑證表。`tests/integration/test_research_privilege_allowlist.py` 釘住 effective privileges，`test_research_role_behaviour.py` 以這個 role 登入跑實際語句。
-- **儀表**：webapi `GET /api/v1/exchange-accounts/{exchange_account_id}/attribution/weekly`（`bfx_webapi` 需 `GRANT SELECT ON attribution_weekly`，非 migration）→ FE `/attribution` 頁三線圖（bot net APR / always-close / AlwaysFRR）。webapi 與 weekly job 必須使用同一個 account UUID 與 `BFX_DEPLOYMENT_ENV`；不再依 process-global `BFX_ACCOUNT_ID` 選 scope。
+- **儀表**：webapi `GET /api/v1/exchange-accounts/{exchange_account_id}/attribution/weekly`（`bfx_webapi` 需 `GRANT SELECT ON attribution_weekly`，非 migration）→ FE `/attribution` 頁三線圖（bot net APR / always-close / AlwaysFRR）。webapi 與 weekly job 必須使用同一個 account UUID；不再依 process-global `BFX_ACCOUNT_ID` 選 scope。
 - **歷史政策（per-symbol cap 加碼 gate，非現行 all_available authority）**：舊政策要求調高（已刪除的）`safety.canary.yaml` 的 `allocation_cap.caps[symbol]` 前，最新 weekly G3 verdict = PASS **且** AlwaysFRR benchmark spread 非負（`frr_benchmark` unavailable 時不加碼）。fUST 3000→10000（`aa4842c`）是在 INSUFFICIENT_DATA 上拉的；保留此失敗歷史與 G3 績效證據。現行沒有提高固定 cap 的操作，也不能把 policy conversion 或 canary 成功解讀為績效通過。
 - **FRR 單位**：AlwaysFRR arm 的 rate = `funding_stats.frr × 365`（≈ ticker per-day FRR，2026-07-06 實測誤差 <0.5%；`live_attribution.FRR_ANNUALIZATION`），換算後必過 `assert_market_rate_band`。`funding_stats.frr` 原值仍非市場利率（ADR 2026-05-28 不變）。
 
@@ -869,7 +869,7 @@ credential vault 解密。公開站（I-PUB）不經 webapi：`bfx-public-site` 
 
 - **I-SW 單一寫入者曝險**：`DeploymentReconciler` 是 venue 提交的唯一寫入者；訊號層只寫 StandingQuote。每個 scope 的 ledger 寫入都持有 scope 的 transaction advisory lock；attempt、outcome、resolution、cancel 與 quarantine 的寫入推進同一個 command clock，query 只記下起始 revision、acceptance 只在 clock 未前進時成立（兩者都不推進 clock）；送單授權以 basis token 對 clock 做 CAS，不靠 in-memory 狀態。
 - **I-VTA venue 即真相**：venue 事實只來自被接受的觀測：不帶 symbol filter 的 wallets、offers、credits／loans、history 與 trades，加上一次時間上不重疊、digest 相同的 active confirmation，且這期間 scope 的 query 與 command clock 都沒動。WS 只產生 venue hint；90s cycle 保證收斂。
-- **I-CAP canonical capital authority**：每 account/environment/symbol 獨立計算。A=venue available，L=尚未證明反映於 snapshot 的 durable commitments，R=applied reserve，T=canonical available+offers+lent（去重），E_cell=該 cell 的 offers + unreflected commitments + 歸屬該 cell 的 active credits。credit 的歸屬在觀測接受時決定並寫進 basis（`accepted_capital_basis_credit_cell`），authorization read 只查表、不問 venue（`ledger/_internal/basis.py`）：以 (symbol, period, MTS_OPENING) 分組 active credits/loans（rate 精度與 trade 不同，loan 會轉成新 id／拆分金額的 credits，但 MTS_OPENING 不變）：(1) **trade**——該觀測自己的 funding trades 中 MTS_CREATE 等於該 opening（同 symbol/period）者，OFFER_ID → provenance → attempt 的 cell，組內每筆都計入所有這些 cell；(2) **carry**——上一個 accepted basis 已歸屬的同一組沿用（按組而非 id）；(3) **recent fill**——尚無 trade 也無 carry 的新 credit，歸給本觀測可見、可能產生它的我方成交（同 symbol、金額 ≤ 成交量、offer 建立不晚於 opening），候選有多個 cell 就每個都計入。新 opening 沒有 trades 涵蓋時該 symbol 以 `trades_range_uncovered` block。都不成立的是 unattributed credits（U）：只在 T 算一次、不計入任何 cell；外來 offer（D2）不進 T 也不進 E_cell；未知 attribution 不捏造 ownership。
+- **I-CAP canonical capital authority**：每 account/symbol 獨立計算。A=venue available，L=尚未證明反映於 snapshot 的 durable commitments，R=applied reserve，T=canonical available+offers+lent（去重），E_cell=該 cell 的 offers + unreflected commitments + 歸屬該 cell 的 active credits。credit 的歸屬在觀測接受時決定並寫進 basis（`accepted_capital_basis_credit_cell`），authorization read 只查表、不問 venue（`ledger/_internal/basis.py`）：以 (symbol, period, MTS_OPENING) 分組 active credits/loans（rate 精度與 trade 不同，loan 會轉成新 id／拆分金額的 credits，但 MTS_OPENING 不變）：(1) **trade**——該觀測自己的 funding trades 中 MTS_CREATE 等於該 opening（同 symbol/period）者，OFFER_ID → provenance → attempt 的 cell，組內每筆都計入所有這些 cell；(2) **carry**——上一個 accepted basis 已歸屬的同一組沿用（按組而非 id）；(3) **recent fill**——尚無 trade 也無 carry 的新 credit，歸給本觀測可見、可能產生它的我方成交（同 symbol、金額 ≤ 成交量、offer 建立不晚於 opening），候選有多個 cell 就每個都計入。新 opening 沒有 trades 涵蓋時該 symbol 以 `trades_range_uncovered` block。都不成立的是 unattributed credits（U）：只在 T 算一次、不計入任何 cell；外來 offer（D2）不進 T 也不進 E_cell；未知 attribution 不捏造 ownership。
 - **I-SP spendable**：`spendable=max(0,A-L-R)`；每 tick 多 cells 共用此 pool。planner、command admission、status 共用 evaluator；command gate 在 scope lock 與同一 transaction 內以 CAS 重驗 query、clock、basis 與 policy head、重算預算並跑 guard，才 insert attempt；授權不讀任何 in-memory 狀態。
 - **I-CC concentration**：`cell_limit=max(0,T-R)*0.70`，`cell_headroom=max(0,cell_limit-E_cell)`，`new_offer_amount≤min(spendable,cell_headroom)`；單一 active cell 也固定70%。reserve 增加或資金下降不召回貸款，只阻擋超限新單。金額向下量化並通過 adapter minimum/precision；不足 minimum 就 block，不增加金額跨越 headroom。
 - **歷史／simulation 說明**：舊 `allocate_gap`（已刪除）、reserved-only tracker rescale、固定 cap 與153 dust threshold 不是 live authority；`0d29fc8` 的單 active cell100% relaxation 已移除。相關歷史及 G3 未通過結果保留，不作新命令授權。
@@ -1039,7 +1039,7 @@ tailnet IP），加上 operator 自己 Bitfinex 帳戶的帳務資料（餘額�
 | 用途 | 演算法 | key 與位置 | 保護 | 保護不了 |
 |---|---|---|---|---|
 | 交易所憑證落地（vault） | AES-256-GCM 信封：每筆一把 DEK 加密 secret，KEK 包住 DEK，兩層都帶帳戶 UUID 為 AAD（`core/crypto.py:53-85`） | KEK：bot 的秘密檔 `secrets/bot/BFX_VAULT_KEK`（`root:4600 0640`），webapi 拒絕持有（`apps/webapi.py:49-53`） | DB 或備份外洩時的 API secret；把密文搬到別的帳戶列（AAD 不符就解不開） | 主機 root（讀得到 KEK 檔，D14 接受「主機等同 root」）；bot 程序記憶體 |
-| 換憑證時的傳遞 | HPKE base mode：DHKEM(X25519, HKDF-SHA256)／HKDF-SHA256／ChaCha20-Poly1305，`info` 綁帳戶、環境、recipient 與 request（`core/sealed_credential.py:1-13,100-113`） | 私鑰只在這次 bot 程序的記憶體；公鑰在 `credential_rotation_recipients` | 從 operator CLI 到 bot 的路上（outbox、DB、log 都只看到密文）；重啟後舊密文永遠打不開 | operator 自己的終端機輸入；執行中的 bot 程序 |
+| 換憑證時的傳遞 | HPKE base mode：DHKEM(X25519, HKDF-SHA256)／HKDF-SHA256／ChaCha20-Poly1305，`info` 綁帳戶、recipient 與 request（`core/sealed_credential.py` 的 `SealContext.info`） | 私鑰只在這次 bot 程序的記憶體；公鑰在 `credential_rotation_recipients` | 從 operator CLI 到 bot 的路上（outbox、DB、log 都只看到密文）；重啟後舊密文永遠打不開 | operator 自己的終端機輸入；執行中的 bot 程序 |
 | Bitfinex 請求簽章 | HMAC-SHA384（`external/bitfinex/auth_ws.py:336-361`，REST 與 WS 認證） | API secret（解密後只在 bot 記憶體） | 請求的完整性與身分 | 機密性（請求內容靠 TLS）；secret 本身外洩 |
 | 異地備份 | pgBackRest `repo1-cipher-type=aes-256-cbc`，key 由 `repo1-cipher-pass` 導出（`deploy/vm/pgbackrest/pgbackrest.conf:8`） | passphrase：VM 的 `/home/ubuntu/bfx/pgbackrest/conf.d/r2.conf`，另有離線保管（`docs/runbooks/offsite-dr.md:128-129`）；新設的至少 32 字（`scripts/setup-pgbackrest-r2.sh`） | R2 上的備份內容 | 竄改偵測（CBC 沒有 AEAD；接受，靠 manifest checksum 與每月 restore test，ASVS V11.3.3 裁決）；VM 上的明文資料庫 |
 | 傳輸 | TLS：Tailscale Serve（營運入口，§10e）；R2、Bitfinex、Telegram、Sentry、Cloudflare 的 HTTPS | 各服務端的憑證；VM 不持有私鑰（Serve 的憑證由 tailscaled 管理） | 路上的竊聽與竄改 | 端點本身；VM 內部的明文連線（webapi→bot、Postgres，D14 接受） |

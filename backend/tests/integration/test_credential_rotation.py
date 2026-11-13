@@ -98,8 +98,8 @@ def db(pg_templates, pg_clone):
              "n": envelope.secret_nonce, "w": envelope.wrapped_dek, "d": envelope.dek_nonce,
              "v": envelope.key_version})
         conn.execute(text(
-            "INSERT INTO bot_runs (run_id, exchange_account_id, deployment_environment, "
-            "started_at_ms, host_name, pid) VALUES (:r, :a, 'ci', 1, 'test', 1)"),
+            "INSERT INTO bot_runs (run_id, exchange_account_id, "
+            "started_at_ms, host_name, pid) VALUES (:r, :a, 1, 'test', 1)"),
             {"r": run_id, "a": ACCOUNT})
     try:
         yield Db(url, owner, old, run_id)
@@ -190,7 +190,7 @@ async def bot(db):
         return user in authorized
 
     worker = CredentialRotationWorker(
-        session_factory=factory, account_id=ACCOUNT, environment="ci", authority=authority,
+        session_factory=factory, account_id=ACCOUNT, authority=authority,
         client_factory=lambda: client,
         kek_loader=lambda: KEK, restart=lambda: restarts.append(1), clock=lambda: NOW_MS, scope_lock=build_scope_lock())
     worker.bind_run(db.run_id, RUN_STARTED_MS)
@@ -308,8 +308,8 @@ async def test_without_a_running_bot_nothing_is_queued(db, operator_env, bot) ->
     # A newer run that never published a key is not running for the CLI either.
     with db.owner.begin() as conn:
         conn.execute(text(
-            "INSERT INTO bot_runs (run_id, exchange_account_id, deployment_environment, "
-            "started_at_ms, host_name, pid) VALUES (:r, :a, 'ci', 5, 'test', 2)"),
+            "INSERT INTO bot_runs (run_id, exchange_account_id, "
+            "started_at_ms, host_name, pid) VALUES (:r, :a, 5, 'test', 2)"),
             {"r": uuid4(), "a": ACCOUNT})
     assert (await rotate())[:2] == (3, {"error": "bot_not_running", "kind": "unavailable"})
 
@@ -343,7 +343,7 @@ async def test_a_request_sealed_to_a_previous_boot_is_stale(db, operator_env, bo
     _, queued, _ = await rotate()
     # The bot restarted: the new run has its own key pair, the old private key is gone.
     restarted = CredentialRotationWorker(
-        session_factory=bot.factory, account_id=ACCOUNT, environment="ci",
+        session_factory=bot.factory, account_id=ACCOUNT,
         authority=bot.worker.authority, client_factory=lambda: bot.client,
         kek_loader=lambda: KEK, restart=lambda: None, clock=lambda: NOW_MS, scope_lock=build_scope_lock())
     restarted.bind_run(db.run_id, RUN_STARTED_MS)

@@ -26,7 +26,6 @@ def _ready_audit_decision() -> ExecutionDecision:
     """A persisted READY audit must retain the evidence needed for reconstruction."""
     context = AuditContext(
         account_id="acct-1",
-        deployment_environment="ci",
         reconcile_id="reconcile-7",
         cell_id="cell-3",
         symbol="fUST",
@@ -37,7 +36,6 @@ def _ready_audit_decision() -> ExecutionDecision:
     return ExecutionDecision(
         decision_id="decision-9",
         account_id=context.account_id,
-        deployment_environment=context.deployment_environment,
         reconcile_id=context.reconcile_id,
         cell_id=context.cell_id,
         symbol=context.symbol,

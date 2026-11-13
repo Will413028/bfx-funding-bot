@@ -9,7 +9,6 @@ def test_execution_decision_table_is_registered_with_audit_columns() -> None:
         "decision_id",
         "account_id",
         "exchange_account_id",
-        "deployment_environment",
         "reconcile_id",
         "cell_id",
         "strategy",
@@ -52,7 +51,7 @@ def test_execution_decision_indexes_are_bounded_audit_queries() -> None:
     }
 
     assert indexes == {
-        "idx_execution_decisions_env_occurred": ("deployment_environment", "occurred_at_ms"),
+        "idx_execution_decisions_env_occurred": ("occurred_at_ms",),
         "idx_execution_decisions_outcome_reason": ("outcome", "reason_code"),
         "idx_execution_decisions_symbol_occurred": ("symbol", "occurred_at_ms"),
     }

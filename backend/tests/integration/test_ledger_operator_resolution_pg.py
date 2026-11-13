@@ -71,7 +71,7 @@ pytestmark = pytest.mark.integration
 OPERATOR = "operator-1"
 RESOLUTION = build_operator_resolution()
 READS = build_operator_reads()
-RSCOPE = ResolutionScope(SCOPE.exchange_account_id, SCOPE.deployment_environment)
+RSCOPE = ResolutionScope(SCOPE.exchange_account_id)
 # After the UNKNOWN (1_050_000) and inside the settle window (STARTED + 120_000): the
 # automatic resolver leaves the attempt open, so only an operator can resolve it.
 OPEN_AT = 1_100_000

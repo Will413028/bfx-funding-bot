@@ -298,8 +298,6 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
                 select(SubmissionAttemptJournalRow)
                 .where(
                     SubmissionAttemptJournalRow.exchange_account_id == scope.exchange_account_id,
-                    SubmissionAttemptJournalRow.deployment_environment
-                    == scope.deployment_environment,
                     or_(
                         SubmissionAttemptJournalRow.attempt_seq > high_water,
                         SubmissionAttemptJournalRow.attempt_id.in_(
@@ -517,9 +515,8 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         source = converted.get(attempt.attempt_id)
         source_matches = source is None or (
             source.exchange_account_id,
-            source.deployment_environment,
             source.symbol,
-        ) == (scope.exchange_account_id, scope.deployment_environment, attempt.symbol)
+        ) == (scope.exchange_account_id, attempt.symbol)
         if (
             venue_id is not None
             and source_matches
@@ -628,7 +625,6 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         AcceptedCapitalBasisRow(
             id=basis_id,
             exchange_account_id=scope.exchange_account_id,
-            deployment_environment=scope.deployment_environment,
             observation_id=observation_id,
             accepted=True,
             accept_revision=observation.accept_revision,

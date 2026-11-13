@@ -149,7 +149,6 @@
       "data": {
         "phase": "live",
         "account_id": "550e8400-e29b-41d4-a716-446655440000",
-        "deployment_environment": "prod",
         "configured_cells": [
           {
             "symbol": "fUST",
@@ -228,7 +227,6 @@
         },
         "dry_run": {
           "account_id": "550e8400-e29b-41d4-a716-446655440000",
-          "deployment_environment": "prod",
           "would_submit_any": false,
           "symbols": {
             "fUST": {
@@ -505,7 +503,6 @@
           },
           "blockedScope": {
             "exchangeAccountId": "550e8400-e29b-41d4-a716-446655440000",
-            "environment": "prod",
             "symbol": "fUST"
           },
           "resolvedByOperatorId": null,
@@ -549,7 +546,6 @@
           },
           "blockedScope": {
             "exchangeAccountId": "550e8400-e29b-41d4-a716-446655440000",
-            "environment": "prod",
             "symbol": "fUST"
           },
           "resolvedByOperatorId": null,
@@ -590,7 +586,6 @@
         },
         "blockedScope": {
           "exchangeAccountId": "550e8400-e29b-41d4-a716-446655440000",
-          "environment": "prod",
           "symbol": "fUST"
         },
         "resolvedByOperatorId": null,

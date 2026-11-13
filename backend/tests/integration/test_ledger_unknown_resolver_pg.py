@@ -57,7 +57,7 @@ from .test_ledger_capital_reader import (
 from .test_ledger_schema_roles import _A, ledger_db  # noqa: F401 - fixture re-export
 
 pytestmark = pytest.mark.integration
-SCOPE = Scope(UUID(_A), "ci")
+SCOPE = Scope(UUID(_A))
 JOURNAL = build_ledger_journal()
 ATTEMPT_POLICY = UUID("00000000-0000-0000-0000-00000000b001")
 STARTED = 1_000_000
@@ -153,10 +153,10 @@ async def seed_unknown(
         await session.execute(
             text(
                 "INSERT INTO execution_decisions(decision_id, account_id, exchange_account_id, "
-                "deployment_environment, reconcile_id, cell_id, symbol, signal_correlation_id, "
+                "reconcile_id, cell_id, symbol, signal_correlation_id, "
                 "outcome, signal_rate, amount_usdt, duration_days, model_evidence, safety_result, "
                 "execution_policy, service_version, config_hash, occurred_at_ms, recorded_at_ms) "
-                "VALUES (:d, 'account', :a, 'ci', 'r', 'a30', :s, :d, 'submitted', 0, :amount, 2, "
+                "VALUES (:d, 'account', :a, 'r', 'a30', :s, :d, 'submitted', 0, :amount, 2, "
                 "'{}', '{}', 'policy', 'test', 'hash', 0, 0)"
             ),
             {"d": decision_id, "a": _A, "s": symbol, "amount": amount},
@@ -169,7 +169,7 @@ async def seed_unknown(
             latest = await session.scalar(select(func.max(SubmissionAttemptJournalRow.attempt_seq)))
             session.add(SubmissionAttemptJournalRow(
                 attempt_id=attempt_id, execution_decision_id=decision_id,
-                exchange_account_id=SCOPE.exchange_account_id, deployment_environment="ci",
+                exchange_account_id=SCOPE.exchange_account_id,
                 symbol=symbol, cell_id="a30", attempt_seq=(latest or 0) + 1,
                 normalized_payload=body, payload_sha256=digest, basis_id=book_.basis_id,
                 policy_revision_id=ATTEMPT_POLICY, authorization_evidence={}, started_at_ms=started,

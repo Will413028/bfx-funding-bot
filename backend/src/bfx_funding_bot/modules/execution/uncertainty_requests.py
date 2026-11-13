@@ -61,7 +61,6 @@ class ResolutionRequestPending(ResolutionRejected):
 @dataclass(frozen=True, slots=True)
 class ResolutionScope:
     account_id: UUID
-    environment: str
 
 
 def intent_from_request(row: UncertaintyResolutionRequestRow) -> ResolutionIntent:
@@ -119,7 +118,6 @@ class UncertaintyResolutionRequests:
             .where(
                 UncertaintyResolutionRequestRow.request_id == request_id,
                 UncertaintyResolutionRequestRow.exchange_account_id == self.scope.account_id,
-                UncertaintyResolutionRequestRow.deployment_environment == self.scope.environment,
             )
             .execution_options(populate_existing=True)
         )
@@ -135,7 +133,6 @@ class UncertaintyResolutionRequests:
         rows = await session.scalars(
             select(UncertaintyResolutionRequestRow).where(
                 UncertaintyResolutionRequestRow.exchange_account_id == self.scope.account_id,
-                UncertaintyResolutionRequestRow.deployment_environment == self.scope.environment,
                 UncertaintyResolutionRequestRow.uncertainty_id.in_(uncertainty_ids),
                 UncertaintyResolutionRequestRow.state == "requested",
             )
@@ -152,7 +149,6 @@ class UncertaintyResolutionRequests:
             select(UncertaintyResolutionRequestRow)
             .where(
                 UncertaintyResolutionRequestRow.exchange_account_id == self.scope.account_id,
-                UncertaintyResolutionRequestRow.deployment_environment == self.scope.environment,
                 UncertaintyResolutionRequestRow.uncertainty_id.in_(uncertainty_ids),
             )
             .order_by(
@@ -204,7 +200,7 @@ class UncertaintyResolutionRequests:
             return pending
         try:
             columns = await self.resolution.prepare(
-                session, Scope(self.scope.account_id, self.scope.environment), intent,
+                session, Scope(self.scope.account_id), intent,
                 now_ms=now_ms,
             )
         except EvidenceRejected as exc:
@@ -229,7 +225,6 @@ def request_values(
     return {
         "request_id": uuid4(),
         "exchange_account_id": scope.account_id,
-        "deployment_environment": scope.environment,
         "uncertainty_id": intent.uncertainty_id,
         "action": intent.action,
         "observation_id": columns.observation_id,

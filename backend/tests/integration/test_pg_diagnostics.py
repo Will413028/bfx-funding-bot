@@ -17,7 +17,7 @@ pytestmark = pytest.mark.integration
 
 async def test_emit_decision_round_trip(pg_session_factory) -> None:
     acct = str(uuid4())
-    sink = DiagnosticsSink(session_factory=pg_session_factory, account_id=acct, deployment_environment="ci")
+    sink = DiagnosticsSink(session_factory=pg_session_factory, account_id=acct)
     scid = str(uuid4())
     await sink.emit({
         "timestamp": datetime.now(UTC).isoformat(),

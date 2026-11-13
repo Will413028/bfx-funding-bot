@@ -62,13 +62,11 @@ class BotRunRecord:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         exchange_account_id: UUID,
-        deployment_environment: str,
         environ: Mapping[str, str] = os.environ,
         clock_ms: Callable[[], int] = _now_ms,
     ) -> None:
         self._session_factory = session_factory
         self.exchange_account_id = exchange_account_id
-        self.deployment_environment = deployment_environment
         self.run_id = uuid4()
         # When this run's row says it started (set by ``start``).
         self.started_at_ms: int | None = None
@@ -107,7 +105,6 @@ class BotRunRecord:
             open_runs = (await session.scalars(
                 select(BotRunRow).where(
                     BotRunRow.exchange_account_id == self.exchange_account_id,
-                    BotRunRow.deployment_environment == self.deployment_environment,
                     BotRunRow.end_reason.is_(None),
                 ).order_by(BotRunRow.started_at_ms).with_for_update()
             )).all()
@@ -122,7 +119,6 @@ class BotRunRecord:
             session.add(BotRunRow(
                 run_id=self.run_id,
                 exchange_account_id=self.exchange_account_id,
-                deployment_environment=self.deployment_environment,
                 started_at_ms=now,
                 source_revision=self._environ.get("BFX_SOURCE_REVISION") or None,
                 image_digest=self._environ.get("BFX_IMAGE_DIGEST") or None,

@@ -42,7 +42,7 @@ from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 from bfx_funding_bot.modules.trading import CapitalPolicy, CapitalScope
 from tests.async_wait import until
 
-from .contracts.stacks import ACCOUNT, ENVIRONMENT, NOW, SCOPE, Stack, build_stack, seed_account
+from .contracts.stacks import ACCOUNT, NOW, SCOPE, Stack, build_stack, seed_account
 from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture re-export
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -90,7 +90,7 @@ def policy_guard(stack: Stack) -> CapitalPolicyGuard:
 
 async def read_capital(stack: Stack, cell_id: str, symbol: str = "fUST") -> CapitalAvailable:
     """What the planner reads for one cell."""
-    view = await stack.capital.read(CapitalScope(ACCOUNT, ENVIRONMENT, symbol, cell_id),
+    view = await stack.capital.read(CapitalScope(ACCOUNT, symbol, cell_id),
                                     now_ms=NOW)
     assert isinstance(view, CapitalAvailable), view
     return view
@@ -131,7 +131,7 @@ async def decision(stack: Stack, amount: str = AMOUNT, *, cell: str = "a30",
     async with stack.factory.begin() as session:
         session.add(ExecutionDecisionRow(
             decision_id=decision_id, account_id=str(ACCOUNT), exchange_account_id=ACCOUNT,
-            deployment_environment=ENVIRONMENT, reconcile_id="test", cell_id=cell, symbol=symbol,
+            reconcile_id="test", cell_id=cell, symbol=symbol,
             signal_correlation_id=str(signal), outcome="ready", signal_rate=Decimal("0.0001"),
             applied_rate=Decimal("0.0001"), amount_usdt=Decimal(amount), duration_days=2,
             model_evidence={}, safety_result={}, execution_policy="test", service_version="test",
@@ -206,13 +206,13 @@ async def boundary(stack: Stack, *, available: str = "1000") -> Rig:
         market_snapshot=replace(_valid_snapshot(), snapshot_id="book", max_age_ms=30000),
         funding_amount_evidence=evidence(),
     )
-    halt = TradingStateRepository(stack.factory, account_id=ACCOUNT, deployment_environment="ci", scope_lock=build_scope_lock())
+    halt = TradingStateRepository(stack.factory, account_id=ACCOUNT, scope_lock=build_scope_lock())
     await halt.transition("ACTIVE", cause="operator", reason="isolated test only", actor="test",
                           now_ms=1200)
     venue = Venue(stack)
     gate = AccountCommandGate(venue, bus=DomainEventBus(),
         uncertainty_reader=stack.uncertainties, safety_evaluator=stop_chain(halt),
-        deployment_environment="ci", boundary=stack.boundary(LedgerCommandEffects(DomainEventBus())),
+        boundary=stack.boundary(LedgerCommandEffects(DomainEventBus())),
         managed_offers=stack.offers, clock=lambda: NOW)
     ctx = AccountContext(str(ACCOUNT), Credentials("mock", "mock"), Decimal("0"))
     return Rig(gate, venue, ready, ctx, stack, halt)
@@ -316,12 +316,13 @@ async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(gat
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30", account_id=str(ACCOUNT))
     service = TradingStatusService(chain=chain, account_ctx=rig.ctx,
+                                   deployment_environment="ci",
         cells=[_cell("fUST", "a30"), _cell("fUST", "p2")], phase=Phase.LIVE,
         attempts=SubmitAttemptRecorder(), trading_state=rig.halt,
         exposure=status_reads(gate_stack))
     snapshot = await service.snapshot()
     assert snapshot["account_id"] == str(ACCOUNT)
-    assert snapshot["deployment_environment"] == "ci"
+    assert "deployment_environment" not in snapshot
     status = snapshot["symbols"]["fUST"]
     missing = (await service.snapshot())["symbols"]["fUSD"]
     assert missing == {"capital_available": False, "reason": "policy_unavailable"}
@@ -337,7 +338,7 @@ async def test_status_shares_policy_budget_and_dry_run_blocks_without_writes(gat
     before = (await attempts(gate_stack), await clock_revision(gate_stack))
     result = await service.dry_run(symbol="fUST", amount=701)
     assert result["account_id"] == str(ACCOUNT)
-    assert result["deployment_environment"] == "ci"
+    assert "deployment_environment" not in result
     assert not result["would_submit_any"]
     assert (await attempts(gate_stack), await clock_revision(gate_stack)) == before
     async with gate_stack.factory.begin() as session:
@@ -380,6 +381,7 @@ async def test_status_with_an_envelope_serializes_to_json(gate_stack):
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30", account_id=str(ACCOUNT))
     service = TradingStatusService(chain=chain, account_ctx=rig.ctx,
+                                   deployment_environment="ci",
         cells=[_cell("fUST", "a30")], phase=Phase.LIVE, attempts=SubmitAttemptRecorder(),
         trading_state=rig.halt, exposure=status_reads(gate_stack))
     symbols = json.loads(json.dumps(await service.snapshot()))["symbols"]
@@ -470,6 +472,7 @@ async def test_status_of_a_symbol_without_cells_does_not_wait_for_the_account_wr
         strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30", account_id=str(ACCOUNT))
     reads = status_reads(gate_stack)
     service = TradingStatusService(chain=chain, account_ctx=rig.ctx,
+                                   deployment_environment="ci",
         cells=[_cell("fUST", "a30")], phase=Phase.LIVE, attempts=SubmitAttemptRecorder(),
         trading_state=rig.halt, exposure=reads)
     async with gate_stack.factory.begin() as writer:
@@ -486,11 +489,11 @@ async def test_halt_writer_waits_for_authorization_lock(pg_session_factory):
     account = uuid4()
     async with factory.begin() as session:
         session.add(ExchangeAccount(id=account, venue="bitfinex", label="halt-lock"))
-    halt = TradingStateRepository(factory, account_id=account, deployment_environment="ci", scope_lock=build_scope_lock())
+    halt = TradingStateRepository(factory, account_id=account, scope_lock=build_scope_lock())
     task = None
     try:
         async with factory.begin() as session:
-            await build_scope_lock().lock(session, Scope(account, "ci"))
+            await build_scope_lock().lock(session, Scope(account))
             task = asyncio.create_task(halt.transition("HALTED", cause="operator", reason="stop",
                                                        actor="test"))
 
@@ -532,8 +535,7 @@ async def test_locked_guard_observes_same_transaction_halt(gate_stack):
     class HaltInTransaction(_Delegate):
         async def authorize(self, session, scope, attempt, token, *, now_ms, locked_guard):
             async def guarded(locked):
-                locked.add(TradingStateRow(exchange_account_id=ACCOUNT, deployment_environment="ci",
-                    state="HALTED", cause="operator", reason="uncommitted halt",
+                locked.add(TradingStateRow(exchange_account_id=ACCOUNT, state="HALTED", cause="operator", reason="uncommitted halt",
                     actor="test", created_at_ms=0))
                 await locked.flush()
                 await locked_guard(locked)
@@ -552,8 +554,7 @@ async def test_independent_command_gates_cannot_spend_same_budget(gate_stack):
     second = await second_ready(rig, "499.99990501")
     competitor = AccountCommandGate(rig.venue, bus=DomainEventBus(),
         uncertainty_reader=gate_stack.uncertainties,
-        safety_evaluator=ManualKillGuard(trading_state=rig.halt), deployment_environment="ci",
-        boundary=rig.gate._boundary, managed_offers=gate_stack.offers, clock=lambda: NOW)
+        safety_evaluator=ManualKillGuard(trading_state=rig.halt), boundary=rig.gate._boundary, managed_offers=gate_stack.offers, clock=lambda: NOW)
     results = await asyncio.gather(rig.gate.submit(rig.ready, rig.ctx),
                                    competitor.submit(second, rig.ctx), return_exceptions=True)
     assert sum(isinstance(r, SubmittedOrder) for r in results) == 1
@@ -572,7 +573,7 @@ async def test_final_amount_cannot_round_up_across_capital_guard(gate_stack):
     assert rig.venue.received == []
 
 
-@pytest.mark.parametrize("identity", ["unknown", "other_account", "runtime_environment"])
+@pytest.mark.parametrize("identity", ["unknown", "other_account"])
 async def test_cancel_requires_scoped_managed_provenance(gate_stack, identity):
     from bfx_funding_bot.modules.ledger import Scope
     rig = await boundary(gate_stack)
@@ -583,15 +584,13 @@ async def test_cancel_requires_scoped_managed_provenance(gate_stack, identity):
         other = uuid4()
         async with gate_stack.factory.begin() as session:
             session.add(ExchangeAccount(id=other, venue="bitfinex", label="other"))
-        rig.gate._boundary = replace(rig.gate._boundary, scope=Scope(other, "ci"))
+        rig.gate._boundary = replace(rig.gate._boundary, scope=Scope(other))
         account_id = str(other)
         ctx = replace(rig.ctx, account_id=account_id)
     else:
-        if identity == "runtime_environment":
-            rig.gate._boundary = replace(rig.gate._boundary, scope=Scope(ACCOUNT, "shadow"))
         account_id, ctx = rig.ctx.account_id, rig.ctx
     before = await clock_revision(gate_stack)
-    with pytest.raises(CommandGateBlocked, match=r"cancel_(provenance|environment)"):
+    with pytest.raises(CommandGateBlocked, match="cancel_provenance"):
         await rig.gate.cancel(venue_offer_id=target, signal_correlation_id=uuid4(),
                               account_id=account_id, ctx=ctx)
     assert rig.venue.received == []
@@ -644,7 +643,7 @@ async def test_real_guard_chain_reuses_authorization_session_without_double_rese
     rig = await boundary(gate_stack)
     rig.gate._safety_evaluator = SafetyGuardChain(
         guards=[ManualKillGuard(trading_state=rig.halt), UncertaintyGuard(
-            reader=gate_stack.uncertainties, deployment_environment="ci"),
+            reader=gate_stack.uncertainties),
             policy_guard(gate_stack)],
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, cell="a30", account_id=str(ACCOUNT))
@@ -703,7 +702,7 @@ async def cancel_http_boundary(stack: Stack, http, *, state="ACTIVE") -> Rig:
                                   actor="test")
     rig.gate._safety_evaluator = SafetyGuardChain(
         guards=[ManualKillGuard(trading_state=rig.halt), UncertaintyGuard(
-            reader=stack.uncertainties, deployment_environment="ci"), policy_guard(stack)],
+            reader=stack.uncertainties), policy_guard(stack)],
         probe=HealthProbe(), diagnostics=_CapturingSink(), phase=Phase.LIVE,
         strategy=StrategyName.MEAN_REVERSION, cell="a30", account_id=str(ACCOUNT))
     rig.gate._inner = BitfinexLiveExecutor(

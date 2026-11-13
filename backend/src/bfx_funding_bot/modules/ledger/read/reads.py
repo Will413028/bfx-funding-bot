@@ -4,7 +4,7 @@ Every read runs on the caller's session and is bounded by keys, the live
 mirror, or the latest accepted basis -- never by history:
 
 1. latest accepted basis: ``previous_basis`` (query revision DESC via
-   ``ix_ledger_observation_query_scope_revision`` -> unique
+   ``uq_ledger_observation_query_scope_revision`` backward -> unique
    ``ledger_observation.query_id`` -> unique ``accepted_capital_basis.observation_id``,
    LIMIT 1).
 2. its ``unresolved`` attempts (``accepted_capital_basis_attempt`` PK prefix
@@ -127,7 +127,6 @@ async def _candidates(
     tail = await tail_attempts(
         session,
         scope.exchange_account_id,
-        scope.deployment_environment,
         basis.attempt_seq_high_water,
         limit=MAX_TAIL_ATTEMPTS + 1,
         with_payload=with_payload,
@@ -170,7 +169,6 @@ async def live_offer_candidates(session: AsyncSession, scope: Scope) -> tuple[Li
         select(VenueOfferMirrorRow.venue_offer_id, VenueOfferMirrorRow.symbol)
         .where(
             VenueOfferMirrorRow.exchange_account_id == scope.exchange_account_id,
-            VenueOfferMirrorRow.deployment_environment == scope.deployment_environment,
             VenueOfferMirrorRow.present_in_latest_accepted_snapshot,
         )
         .order_by(VenueOfferMirrorRow.venue_offer_id)
@@ -195,7 +193,6 @@ async def observation_window(session: AsyncSession, scope: Scope) -> Observation
         tail = await tail_attempts(
             session,
             scope.exchange_account_id,
-            scope.deployment_environment,
             0,
             limit=MAX_TAIL_ATTEMPTS + 1,
         )
@@ -305,7 +302,6 @@ def _live_mirror(scope: Scope) -> Select[tuple[VenueOfferMirrorRow]]:
         )
         .where(
             VenueOfferMirrorRow.exchange_account_id == scope.exchange_account_id,
-            VenueOfferMirrorRow.deployment_environment == scope.deployment_environment,
             VenueOfferMirrorRow.present_in_latest_accepted_snapshot,
         )
     )
@@ -371,7 +367,6 @@ async def live_symbols(session: AsyncSession, scope: Scope) -> frozenset[str]:
             select(VenueOfferMirrorRow.symbol)
             .where(
                 VenueOfferMirrorRow.exchange_account_id == scope.exchange_account_id,
-                VenueOfferMirrorRow.deployment_environment == scope.deployment_environment,
                 VenueOfferMirrorRow.present_in_latest_accepted_snapshot,
             )
             .distinct()
@@ -449,7 +444,7 @@ async def cancel_provenance(
     session: AsyncSession, scope: Scope, venue_offer_id: str
 ) -> CancelProvenance | None:
     mirror = await session.get(VenueOfferMirrorRow, (
-        scope.exchange_account_id, scope.deployment_environment, venue_offer_id,
+        scope.exchange_account_id, venue_offer_id,
     ), populate_existing=True)
     if mirror is not None and mirror.terminal_evidence_id is not None:
         return None
@@ -486,7 +481,6 @@ async def cancel_provenance(
         resolution.action != "bound_to_venue" or resolution.venue_offer_id != venue_offer_id
         or resolution.symbol != attempt.symbol
         or resolution.exchange_account_id != scope.exchange_account_id
-        or resolution.deployment_environment != scope.deployment_environment
     ):
         raise ProvenanceConflict(venue_offer_id)
     return CancelProvenance(

@@ -184,8 +184,11 @@ EXPECTED_TABLES: dict[str, set[str]] = {
     **{table: held for table, held in REVERSIBLE_TABLES.items() if table != "api_keys"},
     "exchange_account_credentials": _R,
 }
+# 545b2877e9bd: every live table loses deployment_environment and its column grants with it
+# (the archive keeps the column: ARCHIVE_COLUMNS).
 EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
-    key: cols for key, cols in REVERSIBLE_COLUMNS.items() if key != _REQUEST_INSERT}
+    key: cols - {"deployment_environment"}
+    for key, cols in REVERSIBLE_COLUMNS.items() if key != _REQUEST_INSERT}
 # Before e4f5a6b7c8d9 revoked it, the web API could still insert the pre-switch evidence column.
 PRE_CONTRACT_COLUMNS = {
     **REVERSIBLE_COLUMNS,

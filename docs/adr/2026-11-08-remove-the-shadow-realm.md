@@ -50,3 +50,7 @@ realm（`deployment_environment`，資料隔離的範圍）原本有 `prod`、`s
 
 - 取代：[2026-05-23-deployment-environment-realm-and-backend-ci-gate](2026-05-23-deployment-environment-realm-and-backend-ci-gate.md) D1 的 `shadow` 值（見該檔 Amendment 2026-11-08）；[2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue](2026-10-03-simulation-runs-the-ledger-on-a-simulated-venue.md) D1 的 realm `shadow`（見該檔 Amendment 2026-11-08）。
 - 接續：[2026-11-08-retire-the-simulation-soak](2026-11-08-retire-the-simulation-soak.md)。
+
+## Amendment (2026-11-12): 每列標記與 `ck_sim_venue_event_realm` 被取代
+
+Followup 第三項已由 owner 決定：每列的 `deployment_environment` 欄與 realm trigger 拿掉，見 [2026-11-08-drop-realm-columns](2026-11-08-drop-realm-columns.md)。隨之 D2 的三道關卡剩兩道：`sim_venue_event` 沒有本欄，`ck_sim_venue_event_realm` 不存在；DB 這一層改由 `SqlVenueEventStore.open` 讀 `database_realm`、stamp 不是 `ci` 就拒絕（`_check_database_realm`）。D3 提到的 `guard_database_realm` trigger 只存在於 `545b2877e9bd` 之前的 revision。

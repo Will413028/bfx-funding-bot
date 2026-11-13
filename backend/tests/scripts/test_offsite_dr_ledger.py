@@ -73,7 +73,7 @@ def _bounds_output(*, scope: str | None = None, epoch: str = "2\tledger", pendin
                    tables: tuple[str, ...] = ledger.LEDGER_TABLES, clock_behind: int = 0,
                    head: str = HEAD) -> str:
     lines = [f"schema\t180000\t{head}", *(f"table\t{name}" for name in tables),
-             scope if scope is not None else f"scope\t{ACCOUNT}\tprod\t5\t5\t4\t3\t1\t7",
+             scope if scope is not None else f"scope\t{ACCOUNT}\t5\t5\t4\t3\t1\t7",
              *((f"pending\t{PENDING}",) if pending else ()), f"epoch\t{epoch}",
              f"inconsistent\tclock_behind\t{clock_behind}",
              "inconsistent\tvenue_offer_mirror_orphans\t0",
@@ -86,7 +86,7 @@ def _bounds(**kwargs: Any) -> Any:
 
 
 ROWS = {
-    "ledger_observation_query": [f"q{i}\t{ACCOUNT}\tprod" for i in range(5)],
+    "ledger_observation_query": [f"q{i}\t{ACCOUNT}" for i in range(5)],
     "ledger_observation_wallet": ["o1\tfunding\tUST\t1.10\t2.5", "o1\tfunding\tBTC\t0\t0"],
     "capital_authority_epoch": ["1\tlegacy", "2\tledger"],
 }
@@ -96,7 +96,7 @@ def _stream_lines(*, clock: int, rows: dict[str, list[str]] = ROWS, restored: bo
                   extra: tuple[str, ...] = ()) -> list[bytes]:
     lines = [f"{table}\t{row}" for table, table_rows in rows.items() for row in table_rows]
     lines += list(extra)
-    lines.append(f"#clock\t{ACCOUNT}\tprod\t{clock}")
+    lines.append(f"#clock\t{ACCOUNT}\t{clock}")
     if restored:
         counts = {name: len(rows.get(name, ())) for name in ledger.LEDGER_TABLES}
         counts["execution_resolution_journal"] = 3  # rows naming the latest accepted observation
@@ -117,7 +117,7 @@ def _digests(*, production_rows: dict[str, list[str]] = ROWS, production_clock: 
 
 
 def _boot(*, head: str = HEAD, **scope: Any) -> str:
-    item = {"exchange_account_id": ACCOUNT, "deployment_environment": "prod", "basis_id": BASIS,
+    item = {"exchange_account_id": ACCOUNT, "basis_id": BASIS,
             "reads": [{"symbol": "fUST", "cell_id": "c1", "basis_id": BASIS,
                        "result": "available"}], **scope}
     return json.dumps({"boot": {"schema_head": head, "realm": "prod", "authority": "ledger",
@@ -160,7 +160,9 @@ def test_both_clusters_run_the_same_read_only_copy_script() -> None:
                       if line.startswith("COPY") and "'#count'" not in line]
     assert "'#count'" not in production
     assert len(copies) == len(ledger.RULES) + 1  # every compared table plus the clock
-    assert f"'{ACCOUNT}'::uuid, 'prod'::text, 5::bigint, 5::bigint, 4::bigint, 3::bigint" in production
+    assert f"'{ACCOUNT}'::uuid, 5::bigint, 5::bigint, 4::bigint, 3::bigint" in production
+    # No script names the realm column: the same text runs with and without it (545b2877e9bd).
+    assert "deployment_environment" not in restored + ledger.bounds_script()
     assert f"ARRAY['{PENDING}']::uuid[]" in production
     assert "t.epoch_seq <= 2::bigint" in production
     no_pending = ledger.digest_script(_bounds(pending=False), restored=False, timeout_ms=60_000)
@@ -177,12 +179,14 @@ def test_a_table_the_restored_schema_lacks_is_skipped_and_reported() -> None:
 
 @pytest.mark.parametrize(("output", "code"), [
     (_bounds_output().replace(f"schema\t180000\t{HEAD}\n", ""), "ledger_bounds_invalid"),
-    (_bounds_output(scope=f"scope\t{ACCOUNT.upper()}\tprod\t1\t1\t1\t1\t1\t1"), "ledger_bounds_invalid"),
-    (_bounds_output(scope=f"scope\t{ACCOUNT}\tprod\t-1\t1\t1\t1\t1\t1"), "ledger_bounds_invalid"),
-    (_bounds_output(scope=f"scope\t{ACCOUNT}\tProd; DROP\t1\t1\t1\t1\t1\t1"), "ledger_bounds_invalid"),
+    (_bounds_output(scope=f"scope\t{ACCOUNT.upper()}\t1\t1\t1\t1\t1\t1"), "ledger_bounds_invalid"),
+    (_bounds_output(scope=f"scope\t{ACCOUNT}\t-1\t1\t1\t1\t1\t1"), "ledger_bounds_invalid"),
+    (_bounds_output(scope=f"scope\t{ACCOUNT}'; DROP\t1\t1\t1\t1\t1\t1"), "ledger_bounds_invalid"),
     (_bounds_output() + "surprise\tline\n", "ledger_bounds_invalid"),
     (_bounds_output() + f"pending\t{PENDING}\n", "ledger_bounds_invalid"),          # duplicate
-    (_bounds_output() + f"scope\t{ACCOUNT}\tprod\t1\t1\t1\t1\t1\t1\n", "ledger_bounds_invalid"),
+    (_bounds_output() + f"scope\t{ACCOUNT}\t1\t1\t1\t1\t1\t1\n", "ledger_bounds_invalid"),   # duplicate
+    # The nine-field row of a drill older than 545b2877e9bd (account, realm, ...) is not accepted.
+    (_bounds_output(scope=f"scope\t{ACCOUNT}\tprod\t5\t5\t4\t3\t1\t7"), "ledger_bounds_invalid"),
     (_bounds_output().replace("inconsistent\tclock_behind\t0\n", ""), "ledger_bounds_invalid"),
     (_bounds_output(tables=("ledger_observation_wallet",)), "ledger_schema_incomplete"),
 ])
@@ -193,7 +197,7 @@ def test_bounds_output_is_parsed_strictly(output: str, code: str) -> None:
 
 def test_a_restored_copy_without_any_scope_is_refused() -> None:
     bounds = ledger.parse_bounds(_bounds_output().replace(
-        f"scope\t{ACCOUNT}\tprod\t5\t5\t4\t3\t1\t7\n", ""))
+        f"scope\t{ACCOUNT}\t5\t5\t4\t3\t1\t7\n", ""))
     with pytest.raises(ledger.LedgerVerificationError, match=r"^ledger_empty$"):
         ledger.digest_script(bounds, restored=True, timeout_ms=60_000)
 
@@ -223,7 +227,7 @@ def test_matching_ledger_summarizes_every_table() -> None:
         "count": 0, "digest": "0" * 64, "bound": "accepted_observation_query_revision",
         "restored_total": 3}
     assert summary["scopes"] == [{
-        "exchange_account_id": ACCOUNT, "deployment_environment": "prod", "query_revision": 5,
+        "exchange_account_id": ACCOUNT, "query_revision": 5,
         "observation_query_revision": 5, "accepted_observation_query_revision": 4,
         "attempt_seq": 3, "opened_revision": 1, "clock_revision": 7,
         "production_clock_revision": 9}]
@@ -253,7 +257,7 @@ def test_comparison_fails_closed(kwargs: dict[str, Any], code: str, detail: tupl
 @pytest.mark.parametrize(("change", "code"), [
     (lambda bounds, restored, production: setattr(production, "invalid", True), "production_read_failed"),
     (lambda bounds, restored, production: restored(b"unknown_table\tx\n"), "restore_output_invalid"),
-    (lambda bounds, restored, production: production.clocks.update({("x", "prod"): 1}),
+    (lambda bounds, restored, production: production.clocks.update({"x": 1}),
      "restore_output_invalid"),
     (lambda bounds, restored, production: restored.totals.pop("venue_offer_mirror"),
      "restore_output_invalid"),
@@ -289,7 +293,7 @@ def test_boot_output_is_bound_to_the_restored_bounds() -> None:
 
 @pytest.mark.parametrize(("output", "code"), [
     (_boot().replace(HEAD, "a1b2c3d4e5f6"), "boot_schema_head_mismatch"),
-    (_boot(deployment_environment="shadow"), "restore_output_invalid"),     # another scope set
+    (_boot(exchange_account_id=PENDING), "restore_output_invalid"),         # another scope set
     (_boot(reads=[{"symbol": "fUST", "cell_id": "c1", "basis_id": BASIS, "result": "unknown"}]),
      "restore_output_invalid"),                                             # neither available nor blocked
     (_boot(reads=[{"symbol": "fUST", "cell_id": "c1", "basis_id": None, "result": "available"}]),
@@ -330,8 +334,7 @@ def test_a_newer_images_extra_keys_at_every_level_parse_and_stay_out_of_the_rece
     boot = ledger.parse_boot(json.dumps(payload) + "\n", _bounds())
     assert boot == ledger.parse_boot(_boot(), _bounds())
     assert set(boot) == {"schema_head", "realm", "authority", "scopes"}
-    assert set(boot["scopes"][0]) == {"exchange_account_id", "deployment_environment",
-                                      "basis_id", "reads"}
+    assert set(boot["scopes"][0]) == {"exchange_account_id", "basis_id", "reads"}
     assert set(boot["scopes"][0]["reads"][0]) == {"symbol", "cell_id", "basis_id", "result"}
 
 

@@ -27,7 +27,7 @@ from bfx_funding_bot.modules.ledger import CycleResult, Scope
 
 
 def _daemon(decision: str, *, protection=None, periodic=None):
-    scope = Scope(uuid4(), "ci")
+    scope = Scope(uuid4())
     sink = AsyncMock()
     sink.run.return_value = CycleResult(decision, uuid4() if decision == "accepted" else None)
     return scope, sink, SimpleNamespace(

@@ -214,7 +214,6 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
         *,
         session_factory: async_sessionmaker[AsyncSession],
         account_id: UUID,
-        environment: str,
         authority: OperatorAuthority,
         scope_lock: ScopeLock,
         client_factory: Callable[[], KeyClient],
@@ -225,7 +224,7 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
         poll_interval_s: float = 2.0,
     ) -> None:
         super().__init__(session_factory=session_factory, account_id=account_id,
-                         environment=environment, authority=authority, scope_lock=scope_lock,
+                         authority=authority, scope_lock=scope_lock,
                          clock=clock,
                          ownership=ownership, poll_interval_s=poll_interval_s)
         # A client on its own nonce gate per verification: the new key's nonces must not
@@ -307,7 +306,7 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
             async with self.session_factory.begin() as session:
                 session.add(CredentialRotationRecipientRow(
                     recipient_id=recipient_id, exchange_account_id=self.account_id,
-                    deployment_environment=self.environment, run_id=self._run_id,
+                    run_id=self._run_id,
                     public_key=recipient.public_key, created_at_ms=self.clock()))
         except Exception as exc:
             log.warning("credential_rotation_recipient_unpublished reason=%s", type(exc).__name__)
@@ -352,8 +351,8 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
             return Refused(RECIPIENT_KEY_STALE)
         try:
             opened = open_sealed(row.sealed_credential, private_key=self._recipient[1].private_half,
-                                 context=SealContext(self.account_id, self.environment,
-                                                     row.recipient_id, row.request_id))
+                                 context=SealContext(self.account_id, row.recipient_id,
+                                                     row.request_id))
         except SealedPayloadError:
             return Refused(SEALED_PAYLOAD_INVALID)
         # Retired credentials are terminal; the active one is no rotation.

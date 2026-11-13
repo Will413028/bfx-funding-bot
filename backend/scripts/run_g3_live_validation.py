@@ -26,7 +26,6 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
-from bfx_funding_bot.core.settings import require_deployment_environment
 from bfx_funding_bot.modules.live_validation.g3_report import render_markdown, verdict_to_json
 from bfx_funding_bot.modules.live_validation.weekly_attribution import FEE_RATE
 
@@ -82,8 +81,7 @@ async def _amain() -> int:
     from bfx_funding_bot.modules.live_validation.g3 import build_g3_report
 
     report = await build_g3_report(capital=_parse_capital(args.capital),
-                                   acks=_parse_acks(args.ack_week),
-                                   deployment_environment=require_deployment_environment())
+                                   acks=_parse_acks(args.ack_week))
     out = Path(args.out)
     out.write_text(render_markdown(report=report, fee_rate=FEE_RATE))
     out.with_suffix(".json").write_text(

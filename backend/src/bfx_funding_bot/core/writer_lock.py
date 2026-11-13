@@ -22,14 +22,15 @@ log = logging.getLogger(__name__)
 _NAMESPACE = "bfx-writer"
 
 
-def derive_lock_key(account_id: str, env: str) -> int:
+def derive_lock_key(account_id: str) -> int:
     """Deterministic, process-independent signed int64 advisory-lock key.
 
     NOTE: never use builtin hash() — it is salted per process (PYTHONHASHSEED).
     The per-transaction scope lock (``core.xact_lock``) hashes the same identity in
-    its own namespace, so the two never collide.
+    its own namespace, so the two never collide. The key carries no deployment
+    environment: a database holds one realm, and advisory locks are per database.
     """
-    digest = hashlib.blake2b(f"{_NAMESPACE}:{account_id}:{env}".encode(), digest_size=8).digest()
+    digest = hashlib.blake2b(f"{_NAMESPACE}:{account_id}".encode(), digest_size=8).digest()
     return int.from_bytes(digest, "big", signed=True)
 
 

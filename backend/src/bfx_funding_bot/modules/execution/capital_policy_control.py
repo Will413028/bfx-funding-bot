@@ -68,7 +68,6 @@ class CapitalPolicyRequestWorker(OperatorRequestWorker[CapitalPolicyRequestRow, 
         *,
         session_factory: async_sessionmaker[AsyncSession],
         account_id: UUID,
-        environment: str,
         authority: OperatorAuthority,
         policy_store: PolicyStore,
         scope_lock: ScopeLock,
@@ -77,7 +76,7 @@ class CapitalPolicyRequestWorker(OperatorRequestWorker[CapitalPolicyRequestRow, 
         poll_interval_s: float = 2.0,
     ) -> None:
         super().__init__(session_factory=session_factory, account_id=account_id,
-                         environment=environment, authority=authority, scope_lock=scope_lock,
+                         authority=authority, scope_lock=scope_lock,
                          clock=clock, ownership=ownership, poll_interval_s=poll_interval_s)
         if policy_store.scope != self.ledger_scope:
             raise ValueError("policy store scope differs from the worker's")
@@ -90,13 +89,13 @@ class CapitalPolicyRequestWorker(OperatorRequestWorker[CapitalPolicyRequestRow, 
         try:
             report = await amend_capital_policy(session, store=self.policy_store,
                                                 scope_lock=self.scope_lock, symbol=row.symbol,
-                                                changes=changes, apply_digest=None)
+                                                changes=changes, apply_digest=None, realm=None)
             if report["status"] == "unchanged":
                 return Outcome(APPLIED, f"unchanged: already {'enabled' if enabled else 'disabled'}")
             written = await amend_capital_policy(
                 session, store=self.policy_store, scope_lock=self.scope_lock, symbol=row.symbol,
                 changes=changes,
-                apply_digest=report["amendment_digest"],
+                apply_digest=report["amendment_digest"], realm=None,
                 operator_request_id=row.request_id)
         except PolicyRefused as exc:
             code = str(exc)

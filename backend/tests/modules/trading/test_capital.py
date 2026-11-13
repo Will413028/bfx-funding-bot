@@ -32,14 +32,14 @@ from bfx_funding_bot.modules.trading import (
 
 D = Decimal
 ACCOUNT = UUID(int=1)
-SCOPE = CapitalScope(ACCOUNT, "test", "fUSD", "alpha")
+SCOPE = CapitalScope(ACCOUNT, "fUSD", "alpha")
 VALUES = SymbolCapital("fUSD", D("1000"), D("200"), D("300"), D("50"), D("90"),
                        (("alpha", D("350")), ("beta", D("150"))), None)
 BASIS = AcceptedCapitalBasis(
-    ACCOUNT, "test", UUID(int=20), UUID(int=2), 10, 1000, 1100, (VALUES,),
+    ACCOUNT, UUID(int=20), UUID(int=2), 10, 1000, 1100, (VALUES,),
     frozenset(), frozenset(), (), (), None,
 )
-POLICY = AppliedPolicy(ACCOUNT, "test", "fUSD", 7, "policy-digest", UUID(int=3),
+POLICY = AppliedPolicy(ACCOUNT, "fUSD", 7, "policy-digest", UUID(int=3),
                        CapitalPolicy(True, reserve_amount=D("100"), max_cell_fraction=D("0.5")))
 CONTEXT = CapitalReadContext(1200, 500, BASIS.query_id, None)
 
@@ -51,7 +51,7 @@ def attempt(number: int, amount: str, outcome: AttemptOutcome = "pending", *,
 
 
 def uncertainty(*, symbol: str = "fUSD", is_open: bool = True) -> UncertaintyFact:
-    return UncertaintyFact(UUID(int=500), ACCOUNT, "test", symbol, is_open)
+    return UncertaintyFact(UUID(int=500), ACCOUNT, symbol, is_open)
 
 
 def fold(*, scope: CapitalScope = SCOPE, basis: AcceptedCapitalBasis | None = BASIS,
@@ -279,9 +279,8 @@ def test_missing_symbol_does_not_mean_zero_capital() -> None:
 
 
 @pytest.mark.parametrize("source", ["basis", "policy", "attempt", "uncertainty"])
-@pytest.mark.parametrize("field", ["account_id", "environment"])
-def test_cross_scope_inputs_fail_closed(source: str, field: str) -> None:
-    changes = {field: UUID(int=99) if field == "account_id" else "other"}
+def test_cross_scope_inputs_fail_closed(source: str) -> None:
+    changes = {"account_id": UUID(int=99)}
     if source == "basis":
         result = fold(basis=replace(BASIS, **changes))
     elif source == "policy":

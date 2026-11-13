@@ -245,7 +245,6 @@ class Acceptance:
 @dataclass(frozen=True, slots=True)
 class Scope:
     exchange_account_id: UUID
-    deployment_environment: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -969,13 +968,12 @@ class UncertaintyRecord:
     """One open uncertainty. ``kind`` is the authority's code; unknown kinds block."""
 
     exchange_account_id: UUID
-    deployment_environment: str
     symbol: str
     kind: str
 
 
 class UncertaintyReader(Protocol):
-    """Open uncertainty for one exact account/environment (and symbol).
+    """Open uncertainty for one exact account (and symbol).
 
     ``session=None`` reads in the reader's own short session.
     """

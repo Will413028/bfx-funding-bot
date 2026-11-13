@@ -215,7 +215,6 @@ log = logging.getLogger(__name__)
 @dataclass(frozen=True, slots=True)
 class _AuditContextFactory:
     account_id: str
-    deployment_environment: str
     service_version: str
     config_hash: str
 
@@ -224,7 +223,6 @@ class _AuditContextFactory:
     ) -> AuditContext:
         return AuditContext(
             account_id=self.account_id,
-            deployment_environment=self.deployment_environment,
             reconcile_id=reconcile_id,
             cell_id=cell_id,
             symbol=candidate.symbol,
@@ -326,16 +324,14 @@ async def build_daemon(
     try:
         async with session_factory() as bootstrap_session:
             account_bootstrap = await load_account_bootstrap(
-                bootstrap_session,
-                deployment_environment=config.deployment_environment.value,
-                phase=config.phase,
+                bootstrap_session, phase=config.phase,
             )
     except Exception:
         await db_engine.dispose()
         raise
     # Capital ports: every adapter a consumer binds to is the ledger's (apps/bot_ports.py).
     env_str = config.deployment_environment.value
-    capital_scope = Scope(account_bootstrap.exchange_account_id, env_str)
+    capital_scope = Scope(account_bootstrap.exchange_account_id)
     account_id = account_bootstrap.account_id
     bus = DomainEventBus()
     resync = ResyncChannel()
@@ -490,7 +486,6 @@ async def build_daemon(
 
     diagnostics = DiagnosticsSink(
         session_factory=session_factory, account_id=account_id,
-        deployment_environment=env_str,
         metrics=metrics,  # bfx_diagnostic_events_total (safety trips / decisions)
     )
     # Safety config — immutable for daemon lifetime. Config change = redeploy.
@@ -512,12 +507,9 @@ async def build_daemon(
     window_account = account_id_uuid_or_none(account_id)
     pnl_source = ReconcileNavTracker(
         account_id=account_id,
-        peak_store=NavPeakStore(
-            session_factory, account_id=account_id, deployment_environment=env_str,
-        ),
+        peak_store=NavPeakStore(session_factory, account_id=account_id),
         # T9: the 24h loss window survives restarts (canonical accounts only).
-        window_store=(NavWindowStore(session_factory, account_id=window_account,
-                                     deployment_environment=env_str)
+        window_store=(NavWindowStore(session_factory, account_id=window_account)
                       if window_account is not None else None),
     )
     # Seed the all-time peak from nav_peak so drawdown_pct survives restarts
@@ -530,8 +522,7 @@ async def build_daemon(
     # peak store above: an unreadable trading state blocks submits rather than
     # degrading gracefully — see ManualKillGuard.
     trading_state = TradingStateRepository(
-        session_factory, account_id=account_id, deployment_environment=env_str,
-        scope_lock=capital.scope_lock,
+        session_factory, account_id=account_id, scope_lock=capital.scope_lock,
     )
 
     # cells[0] used for safety_chain emit envelope (phase/strategy/cell) —
@@ -564,7 +555,7 @@ async def build_daemon(
     # guard-append and the return.
     writer_lock = WriterLock(
         database_url=config.database_url,
-        key=derive_lock_key(account_id, env_str),
+        key=derive_lock_key(account_id),
     )
     if config.database_url.startswith(("postgres", "postgresql")):
         await writer_lock.acquire()  # raises WriterLockUnacquired on contention
@@ -577,14 +568,11 @@ async def build_daemon(
                 pending_stop=protection.pending_reason,
             )
         )
-    # UNKNOWN/orphan exposure is always account+environment+symbol scoped and
+    # UNKNOWN/orphan exposure is always account+symbol scoped and
     # must be read before the reconciler computes an economic gap.  It is not
     # configurable off in canary/live because an unreadable projection fails
     # closed inside the guard.
-    guards.append(UncertaintyGuard(
-        reader=uncertainty_reader,
-        deployment_environment=env_str,
-    ))
+    guards.append(UncertaintyGuard(reader=uncertainty_reader))
     if hg.auth_health.enabled:
         guards.append(AuthHealthGuard(probe=probe))
     if hg.heartbeat.enabled:
@@ -638,14 +626,12 @@ async def build_daemon(
     interest_ledger_sync = InterestLedgerSync(
         rest=auth_rest, ctx=account_ctx, session_factory=session_factory,
         exchange_account_id=account_bootstrap.exchange_account_id,
-        deployment_environment=env_str,
         currencies=sorted({funding_currency(s) for s in configured_symbols(config.cells)}),
     )
     # Per-credit truth (credit history + funding trades), read-only: see credit_history.
     credit_history_sync = CreditHistorySync(
         rest=auth_rest, ctx=account_ctx, session_factory=session_factory,
         exchange_account_id=account_bootstrap.exchange_account_id,
-        deployment_environment=env_str,
         symbols=sorted(configured_symbols(config.cells)),
     )
     reconcile_interval_s = float(os.environ.get("BFX_RECONCILE_INTERVAL_S", "90"))
@@ -738,13 +724,13 @@ async def build_daemon(
     funding_rules = FundingRules(http=bitfinex_http, clock=now_ms_utc)
     trading_control = TradingControlWorker(
         session_factory=session_factory, account_id=UUID(account_id),
-        environment=env_str, authority=operator_authorized, scope_lock=capital.scope_lock,
+        authority=operator_authorized, scope_lock=capital.scope_lock,
         clock=now_ms_utc,
         ownership=writer_lock.verify_held,
     )
     capital_policy_control = CapitalPolicyRequestWorker(
         session_factory=session_factory, account_id=UUID(account_id),
-        environment=env_str, authority=operator_authorized,
+        authority=operator_authorized,
         policy_store=capital.policy_store, scope_lock=capital.scope_lock,
         clock=now_ms_utc,
         ownership=writer_lock.verify_held,
@@ -756,7 +742,8 @@ async def build_daemon(
         rotation_http = venue_wiring.auth_http
         credential_rotation = CredentialRotationWorker(
             session_factory=session_factory, account_id=UUID(account_id),
-            environment=env_str, authority=operator_authorized, scope_lock=capital.scope_lock,
+            authority=operator_authorized,
+            scope_lock=capital.scope_lock,
             client_factory=lambda: BitfinexAuthREST(http=rotation_http,
                                                     auth_gate=AuthRequestGate()),
             kek_loader=load_kek, restart=stop_event.set,
@@ -802,20 +789,19 @@ async def build_daemon(
         # image digest the deploy tool injected.
         audit_context_factory=_AuditContextFactory(
             account_id=account_id,
-            deployment_environment=env_str,
             service_version=deployment_identity.source_revision or "unidentified",
             config_hash=deployment_identity.backend_digest or "unidentified",
         ),
         protection=protection,
         managed_sweep=ManagedOfferSweep(
             session_factory=session_factory, account_id=UUID(account_id),
-            environment=env_str, canceller=reservation_middleware, ctx=account_ctx,
+            canceller=reservation_middleware, ctx=account_ctx,
             offers=managed_offers),
     )
     # The web API queues operator adjudications; only this writer appends them.
     uncertainty_worker = UncertaintyResolutionWorker(
         session_factory=session_factory,
-        scope=ResolutionScope(account_bootstrap.exchange_account_id, env_str),
+        scope=ResolutionScope(account_bootstrap.exchange_account_id),
         authority=operator_authorized, scope_lock=capital.scope_lock,
         clock=now_ms_utc,
         ownership=writer_lock.verify_held,
@@ -827,7 +813,6 @@ async def build_daemon(
     await record_config_regime(
         session_factory,
         account_id=account_id,
-        deployment_environment=env_str,
         clamp_enabled=False,
         reprice_enabled=reprice_policy.enabled,
         git_sha=deployment_identity.source_revision,
@@ -1045,6 +1030,7 @@ async def build_daemon(
         account_ctx=account_ctx,
         cells=config.cells,
         phase=config.phase,
+        deployment_environment=env_str,
         attempts=attempt_recorder,
         trading_state=trading_state,
         kill_switch=kill_switch,
@@ -1227,7 +1213,6 @@ async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
     run_record = BotRunRecord(
         daemon.session_factory,
         exchange_account_id=daemon.account_bootstrap.exchange_account_id,
-        deployment_environment=daemon.account_bootstrap.deployment_environment,
     )
     await run_record.start()
     # The rotation worker publishes its recipient key under this run: a CLI only seals to

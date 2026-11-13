@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -34,7 +34,7 @@ from bfx_funding_bot.modules.observability.alerts import (
     VENUE_OBSERVATION_HISTORY_INCOMPLETE as HISTORY_INCOMPLETE_ALERT,
 )
 
-SCOPE = Scope(UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"), "test")
+SCOPE = Scope(UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"))
 QUERY_START = 1_000_000
 EMPTY_WINDOW = ObservationWindow(None, None, None)
 ACTIVE_PATHS = ["wallets", "funding/offers", "funding/credits", "funding/loans"]
@@ -397,7 +397,7 @@ async def test_scope_mismatch_rejected_before_http() -> None:
                                      scope=SCOPE)
         port = BitfinexVenueObservation(rest=BitfinexAuthREST(http=http), ctx=CTX, scope=SCOPE)
         with pytest.raises(ValueError, match="scope mismatch"):
-            await port.observe(replace(SCOPE, deployment_environment="other"), QUERY_START, EMPTY_WINDOW)
+            await port.observe(replace(SCOPE, exchange_account_id=uuid4()), QUERY_START, EMPTY_WINDOW)
     assert venue.paths == []
 
 

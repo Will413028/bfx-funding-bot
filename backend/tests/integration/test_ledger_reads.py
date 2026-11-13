@@ -46,7 +46,7 @@ from bfx_funding_bot.modules.ledger.wiring import (
 )
 
 from .test_ledger_basis import _ledger_mappers, _observation, _offer
-from .test_ledger_capital_reader import SCOPE, Book
+from .test_ledger_capital_reader import Book
 from .test_ledger_capital_reader import book as book
 from .test_ledger_schema_roles import ledger_db  # noqa: F401 - fixture re-export
 
@@ -165,7 +165,7 @@ async def test_scopes_are_isolated(ledger) -> None:
         await session.execute(
             text("INSERT INTO exchange_accounts(id,venue,label) VALUES (:id,'bitfinex','other')"),
             {"id": account})
-    other = Book(ledger.factory, Scope(account, SCOPE.deployment_environment))
+    other = Book(ledger.factory, Scope(account))
     await other.accept()
     await ledger.attempt("200", outcome="unknown")
     await ledger.quarantine()
@@ -440,8 +440,10 @@ async def test_read_plans_use_the_bounding_indexes(ledger) -> None:
 
     With sequential scans disabled (tiny tables otherwise prefer them), the live
     mirror must come from the partial ``ix_venue_offer_mirror_live`` and the
-    latest basis must walk ``ix_ledger_observation_query_scope_revision`` without
-    sorting every basis of the scope.
+    latest basis must walk ``uq_ledger_observation_query_scope_revision`` backward without
+    sorting every basis of the scope. The tables are analyzed first: on default
+    statistics the planner prices a sort of the scope's (estimated two) bases below
+    the walk, with or without a dedicated descending index.
     """
     await ledger.attempt("100", venue_offer_id="live")
     await ledger.accept(_live(_offer("live", "100"), available="900"))
@@ -464,6 +466,7 @@ async def test_read_plans_use_the_bounding_indexes(ledger) -> None:
         event.remove(engine.sync_engine, "before_cursor_execute", grab)
     plans: dict[str, str] = {}
     async with engine.connect() as conn:
+        await conn.exec_driver_sql("ANALYZE")
         await conn.exec_driver_sql("SET enable_seqscan = off")
         for statement, parameters in captured:
             rows = await conn.exec_driver_sql("EXPLAIN " + statement, parameters)
@@ -479,5 +482,5 @@ async def test_read_plans_use_the_bounding_indexes(ledger) -> None:
         for plan in mirror
     ), mirror
     assert sum("ix_venue_offer_mirror_live" in plan for plan in mirror) >= 2, mirror
-    assert "ix_ledger_observation_query_scope_revision" in basis[0], basis[0]
+    assert "uq_ledger_observation_query_scope_revision" in basis[0], basis[0]
     assert "Sort" not in basis[0], basis[0]

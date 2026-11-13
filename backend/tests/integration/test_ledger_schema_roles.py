@@ -29,7 +29,6 @@ from bfx_funding_bot.modules.ledger.tables import LEDGER_TABLES
 from tests.pg_templates import (
     LAST_REVERSIBLE_REVISION,
     alembic,
-    disable_realm_triggers,
     stamp_realm,
     template_at,
 )
@@ -117,6 +116,27 @@ def _build(url: str) -> None:
 _build_reversible = template_at(LAST_REVERSIBLE_REVISION, _prepare)
 
 
+def _realm(realm: bool) -> tuple[str, str]:
+    """The realm column and its value, for a schema older than 545b2877e9bd (which dropped it)."""
+    return ("deployment_environment, ", "'ci', ") if realm else ("", "")
+
+
+def _has_realm_column(conn) -> bool:
+    """Whether this database is older than 545b2877e9bd, so its rows still carry the realm."""
+    return bool(conn.scalar(text(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' "
+        "AND table_name = 'capital_command_clock' AND column_name = 'deployment_environment')"
+    )))
+
+
+def _other_account(conn) -> str:
+    """A second exchange account, for the rows a scope guard must refuse."""
+    other = str(uuid4())
+    conn.exec_driver_sql(
+        f"INSERT INTO exchange_accounts(id,venue,label) VALUES ('{other}','bitfinex','other')")
+    return other
+
+
 def _observation_sql(
     observation_id: str,
     query_id: str,
@@ -129,6 +149,8 @@ def _observation_sql(
     finished_at_ms: int = 2,
     trades_complete: bool | None = None,
     legacy: bool = False,
+    account: str = _A,
+    realm: bool = False,
 ) -> str:
     state = str(accepted).lower()
     coverage = str(complete).lower()
@@ -136,13 +158,14 @@ def _observation_sql(
     accepted_revision = 0 if accept_revision is None else accept_revision
     # ``legacy``: before d4e5f6a7b8c9 the header had no trade coverage.
     trade_column, trade_value = ("", "") if legacy else ("trades_complete, ", f"{trades}, ")
+    realm_column, realm_value = _realm(realm)
     return f"""INSERT INTO ledger_observation (
-      id, query_id, exchange_account_id, deployment_environment, schema_version,
+      id, query_id, exchange_account_id, {realm_column}schema_version,
       query_finished_at_ms, confirmation_finished_at_ms,
       accept_revision, wallets_complete, offers_complete,
       credits_complete, loans_complete, offer_history_complete, credit_history_complete,
       {trade_column}first_digest, confirmation_digest, accepted, evidence)
-      VALUES ('{observation_id}', '{query_id}', '{_A}', 'ci', 1,
+      VALUES ('{observation_id}', '{query_id}', '{account}', {realm_value}1,
       {finished_at_ms}, {finished_at_ms + 1}, {accepted_revision}, {coverage}, {coverage},
       {coverage}, {coverage}, {coverage}, {coverage},
       {trade_value}'{first}', '{confirmation}', {state}, '{{}}')"""
@@ -161,13 +184,15 @@ def _query_sql(
     query_revision: int,
     start_revision: int = 0,
     *,
-    environment: str = "ci",
+    account: str = _A,
     started_at_ms: int = 1,
+    realm: bool = False,
 ) -> str:
+    realm_column, realm_value = _realm(realm)
     return f"""INSERT INTO ledger_observation_query (
-      query_id, exchange_account_id, deployment_environment, query_revision,
+      query_id, exchange_account_id, {realm_column}query_revision,
       started_at_ms, start_revision)
-      VALUES ('{query_id}', '{_A}', '{environment}', {query_revision},
+      VALUES ('{query_id}', '{account}', {realm_value}{query_revision},
               {started_at_ms}, {start_revision})"""
 
 
@@ -176,9 +201,10 @@ def _basis_sql(
     observation_id: str,
     revision: int = 0,
     *,
-    environment: str = "ci",
+    account: str = _A,
     high_water: int = 0,
     legacy: bool = False,
+    realm: bool = False,
 ) -> str:
     # ``legacy``: the pre-d4e5f6a7b8c9 shape, which bound one policy revision.
     columns, values = (
@@ -186,11 +212,12 @@ def _basis_sql(
         if legacy
         else ("attempt_seq_high_water", str(high_water))
     )
+    realm_column, realm_value = _realm(realm)
     return f"""INSERT INTO accepted_capital_basis (
-      id, exchange_account_id, deployment_environment, observation_id,
+      id, exchange_account_id, {realm_column}observation_id,
       accepted, accept_revision, {columns},
       schema_version, digest, accepted_at_ms)
-      VALUES ('{basis_id}', '{_A}', '{environment}', '{observation_id}',
+      VALUES ('{basis_id}', '{account}', {realm_value}'{observation_id}',
       true, {revision}, {values}, 1, 'basis-digest', 3)"""
 
 
@@ -233,11 +260,14 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
     # ``opened_revision`` arrived with e5f6a7b8c9d0 (after the old-member shape).
     revision_column = "" if old_member else "\n      opened_revision,"
     revision_value = "" if old_member else "\n      1,"
+    # The realm column left with 545b2877e9bd; a database stopped before it still requires it.
+    realm = _has_realm_column(conn)
+    realm_column = "\n      deployment_environment," if realm else ""
+    realm_value = "\n      'ci'," if realm else ""
     statements = (
         f"INSERT INTO exchange_accounts(id,venue,label) VALUES ('{_A}','bitfinex','ledger')",
         f"""INSERT INTO capital_policy_revisions(id,
-      exchange_account_id,
-      deployment_environment,
+      exchange_account_id,{realm_column}
       symbol,
       revision,
       schema_version,
@@ -245,22 +275,19 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       digest,
       source)
       VALUES ('{_P}',
-      '{_A}',
-      'ci',
+      '{_A}',{realm_value}
       'fUST',
       1,
       1,
       '{{}}',
       'p',
       '{{}}')""",
-        f"""INSERT INTO capital_command_clock(exchange_account_id,
-      deployment_environment,
+        f"""INSERT INTO capital_command_clock(exchange_account_id,{realm_column}
       revision)
-      VALUES ('{_A}',
-      'ci',
+      VALUES ('{_A}',{realm_value}
       0)""",
-        _query_sql(_QID, 1),
-        _observation_sql(_O, _QID, accepted=True, legacy=old_member),
+        _query_sql(_QID, 1, realm=realm),
+        _observation_sql(_O, _QID, accepted=True, legacy=old_member, realm=realm),
         f"""INSERT INTO ledger_observation_wallet(observation_id,
       wallet_type,
       currency,
@@ -335,8 +362,7 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       'closed',
       3,
       '{{}}')""",
-        f"""INSERT INTO venue_offer_mirror(exchange_account_id,
-      deployment_environment,
+        f"""INSERT INTO venue_offer_mirror(exchange_account_id,{realm_column}
       venue_offer_id,
       symbol,
       amount_original,
@@ -346,8 +372,7 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       mts_created,
       last_accepted_observation_id,
       present_in_latest_accepted_snapshot)
-      VALUES ('{_A}',
-      'ci',
+      VALUES ('{_A}',{realm_value}
       'offer-1',
       'fUST',
       1,
@@ -357,8 +382,7 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       1,
       '{_O}',
       true)""",
-        f"""INSERT INTO venue_credit_mirror(exchange_account_id,
-      deployment_environment,
+        f"""INSERT INTO venue_credit_mirror(exchange_account_id,{realm_column}
       venue_credit_id,
       source_kind,
       symbol,
@@ -366,8 +390,7 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       status,
       last_accepted_observation_id,
       present_in_latest_accepted_snapshot)
-      VALUES ('{_A}',
-      'ci',
+      VALUES ('{_A}',{realm_value}
       'credit-1',
       'credit',
       'fUST',
@@ -375,7 +398,7 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       'ACTIVE',
       '{_O}',
       true)""",
-        _basis_sql(_B, _O, legacy=old_member),
+        _basis_sql(_B, _O, legacy=old_member, realm=realm),
         f"""INSERT INTO accepted_capital_basis_symbol(basis_id,
       symbol,
       available,
@@ -406,8 +429,7 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       VALUES ('{_B}', 'credit', 'credit-1', 'cell')""",
         f"""INSERT INTO execution_decisions(decision_id,
       account_id,
-      exchange_account_id,
-      deployment_environment,
+      exchange_account_id,{realm_column}
       reconcile_id,
       cell_id,
       symbol,
@@ -425,8 +447,7 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       recorded_at_ms)
       VALUES ('{_D}',
       'account',
-      '{_A}',
-      'ci',
+      '{_A}',{realm_value}
       'r',
       'cell',
       'fUST',
@@ -444,8 +465,7 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       1)""",
         f"""INSERT INTO execution_decisions(decision_id,
       account_id,
-      exchange_account_id,
-      deployment_environment,
+      exchange_account_id,{realm_column}
       reconcile_id,
       cell_id,
       symbol,
@@ -463,8 +483,7 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       recorded_at_ms)
       VALUES ('{_D2}',
       'account',
-      '{_A}',
-      'ci',
+      '{_A}',{realm_value}
       'r',
       'cell',
       'fUST',
@@ -482,8 +501,7 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       1)""",
         f"""INSERT INTO submission_attempt_journal(attempt_id,
       execution_decision_id,
-      exchange_account_id,
-      deployment_environment,
+      exchange_account_id,{realm_column}
       symbol,{cell_column}
       attempt_seq,
       normalized_payload,
@@ -494,8 +512,7 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       started_at_ms)
       VALUES ('{_T}',
       '{_D}',
-      '{_A}',
-      'ci',
+      '{_A}',{realm_value}
       'fUST',{cell_value}
       1,
       '{{"amount": "1"}}',
@@ -515,15 +532,13 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       5,
       '{{}}')""",
         f"""INSERT INTO quarantine_opening(quarantine_id,
-      exchange_account_id,
-      deployment_environment,
+      exchange_account_id,{realm_column}
       symbol,
       intended_amount,
       opened_at_ms,{revision_column}
       evidence)
       VALUES ('{_Q}',
-      '{_A}',
-      'ci',
+      '{_A}',{realm_value}
       'fUST',
       1,
       4,{revision_value}
@@ -545,8 +560,7 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
         ),
         f"""INSERT INTO execution_resolution_journal(id,
       quarantine_id,
-      exchange_account_id,
-      deployment_environment,
+      exchange_account_id,{realm_column}
       symbol,
       action,
       venue_offer_id,
@@ -558,8 +572,7 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       evidence)
       VALUES ('{_R}',
       '{_Q}',
-      '{_A}',
-      'ci',
+      '{_A}',{realm_value}
       'fUST',
       'bound_to_venue',
       'offer-1',
@@ -607,9 +620,9 @@ def reversible_seeded(reversible_ledger_db):
 def test_r6_source_attempt_unique_fk_and_nulls(seeded) -> None:
     statement = (
         "INSERT INTO quarantine_opening(quarantine_id, exchange_account_id, "
-        "deployment_environment, symbol, intended_amount, opened_at_ms, "
+        "symbol, intended_amount, opened_at_ms, "
         "opened_revision, evidence, source_attempt_id) "
-        "VALUES (:id, :a, 'ci', 'fUST', 1, 5, 1, '{}', :source)"
+        "VALUES (:id, :a, 'fUST', 1, 5, 1, '{}', :source)"
     )
     with seeded.begin() as conn:
         conn.execute(text(statement), {"id": uuid4(), "a": _A, "source": _T})
@@ -636,10 +649,8 @@ def test_r6_source_attempt_unique_fk_and_nulls(seeded) -> None:
             )
 
 
-@pytest.mark.parametrize("field", ["account", "environment", "symbol"])
+@pytest.mark.parametrize("field", ["account", "symbol"])
 def test_r6_source_opening_cannot_cross_scope_or_symbol(seeded, field: str) -> None:
-    # The scope mismatch needs a row of another realm; the realm trigger would refuse it first.
-    disable_realm_triggers(seeded)
     other = str(uuid4())
     with seeded.begin() as conn:
         conn.execute(
@@ -653,14 +664,13 @@ def test_r6_source_opening_cannot_cross_scope_or_symbol(seeded, field: str) -> N
         conn.execute(
             text(
                 "INSERT INTO quarantine_opening(quarantine_id, exchange_account_id, "
-                "deployment_environment, symbol, intended_amount, opened_at_ms, "
+                "symbol, intended_amount, opened_at_ms, "
                 "opened_revision, evidence, source_attempt_id) "
-                "VALUES (:id, :a, :env, :symbol, 1, 5, 1, '{}', :source)"
+                "VALUES (:id, :a, :symbol, 1, 5, 1, '{}', :source)"
             ),
             {
                 "id": uuid4(),
                 "a": other if field == "account" else _A,
-                "env": "other" if field == "environment" else "ci",
                 "symbol": "fUSD" if field == "symbol" else "fUST",
                 "source": _T,
             },
@@ -751,32 +761,27 @@ def test_mirror_terminal_cannot_clear_or_reappear(seeded) -> None:
 
 
 def test_a_mirror_row_never_changes_scope(seeded) -> None:
-    # The realm and scope triggers would refuse first (another realm, no accepted observation in
-    # the new scope); this proves the mirror's own rule underneath them.
-    disable_realm_triggers(seeded)
+    # The scope trigger would refuse first (no accepted observation in the new scope); this
+    # proves the mirror's own rule underneath it.
     with seeded.begin() as conn:
         for table in ("venue_offer_mirror", "venue_credit_mirror"):
             conn.exec_driver_sql(f"ALTER TABLE {table} DISABLE TRIGGER guard_ledger_mirror_scope")
     for table in ("venue_offer_mirror", "venue_credit_mirror"):
-        for change in ("deployment_environment = 'other'",
-                       f"exchange_account_id = '{uuid4()}'"):
-            with (
-                seeded.begin() as conn,
-                pytest.raises(Exception, match="immutable ledger mirror scope"),
-            ):
-                conn.exec_driver_sql(f"UPDATE {table} SET {change}")
+        with (
+            seeded.begin() as conn,
+            pytest.raises(Exception, match="immutable ledger mirror scope"),
+        ):
+            conn.exec_driver_sql(f"UPDATE {table} SET exchange_account_id = '{uuid4()}'")
 
 
 def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
-    # The scope mismatch needs a row of another realm; the realm trigger would refuse it first.
-    disable_realm_triggers(seeded)
     with seeded.begin() as conn:
+        other = _other_account(conn)
         conn.exec_driver_sql(_offer_sql(str(uuid4()), "offer-other", "fEUR"))
         conn.exec_driver_sql(
             f"""INSERT INTO execution_resolution_journal(id,
       attempt_id,
       exchange_account_id,
-      deployment_environment,
       symbol,
       action,
       observation_id,
@@ -788,7 +793,6 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
       VALUES ('{uuid4()}',
       '{_T}',
       '{_A}',
-      'ci',
       'fUST',
       'not_accepted',
       '{_O}',
@@ -814,7 +818,6 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
             f"""INSERT INTO execution_resolution_journal(id,
       quarantine_id,
       exchange_account_id,
-      deployment_environment,
       symbol,
       action,
       observation_id,
@@ -826,7 +829,6 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
       VALUES ('{uuid4()}',
       '{_Q}',
       '{_A}',
-      'ci',
       'fUST',
       'not_accepted',
       '{_O}',
@@ -841,7 +843,6 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
             f"""INSERT INTO execution_resolution_journal(id,
       attempt_id,
       exchange_account_id,
-      deployment_environment,
       symbol,
       action,
       observation_id,
@@ -853,7 +854,6 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
       VALUES ('{uuid4()}',
       '{_T}',
       '{_A}',
-      'ci',
       'fUST',
       'not_accepted',
       '{_O}',
@@ -894,7 +894,6 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
             f"""INSERT INTO submission_attempt_journal(attempt_id,
       execution_decision_id,
       exchange_account_id,
-      deployment_environment,
       symbol,
       cell_id,
       attempt_seq,
@@ -906,8 +905,7 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
       started_at_ms)
       VALUES ('{uuid4()}',
       '{_D2}',
-      '{_A}',
-      'wrong',
+      '{other}',
       'fUST',
       'cell',
       2,
@@ -923,7 +921,6 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
             f"""INSERT INTO execution_resolution_journal(id,
       attempt_id,
       exchange_account_id,
-      deployment_environment,
       symbol,
       action,
       observation_id,
@@ -934,8 +931,7 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
       evidence)
       VALUES ('{uuid4()}',
       '{_T}',
-      '{_A}',
-      'wrong',
+      '{other}',
       'fUST',
       'not_accepted',
       '{_O}',
@@ -953,8 +949,6 @@ def test_duplicate_facts_and_scope_mismatch_fail(seeded) -> None:
 
 
 def test_credit_and_loan_members_match_detail_or_history_and_scope(seeded) -> None:
-    # The scope mismatch needs a row of another realm; the realm trigger would refuse it first.
-    disable_realm_triggers(seeded)
     with seeded.begin() as conn:
         conn.exec_driver_sql(_member_sql("credit", "credit-1"))
         for kind, venue_id, table in (
@@ -981,18 +975,14 @@ def test_credit_and_loan_members_match_detail_or_history_and_scope(seeded) -> No
             conn.exec_driver_sql(_member_sql(kind, venue_id))
 
     with seeded.begin() as conn:
-        for symbol, environment, venue_id in (
-            ("fEUR", "ci", "wrong-symbol"),
-            ("fUST", "other", "wrong-scope"),
+        for symbol, account, venue_id in (
+            ("fEUR", _A, "wrong-symbol"),
+            ("fUST", _other_account(conn), "wrong-scope"),
         ):
             query_id, observation_id = str(uuid4()), str(uuid4())
+            conn.exec_driver_sql(_query_sql(query_id, 2, account=account))
             conn.exec_driver_sql(
-                # Revisions of their own, so the rows stay distinct without the realm in the key.
-                _query_sql(query_id, 2 if environment == "ci" else 3, environment=environment)
-            )
-            observation_sql = _observation_sql(observation_id, query_id, accepted=False)
-            conn.exec_driver_sql(
-                observation_sql.replace(f"'{_A}', 'ci', 1,", f"'{_A}', '{environment}', 1,")
+                _observation_sql(observation_id, query_id, accepted=False, account=account)
             )
             conn.exec_driver_sql(
                 "INSERT INTO ledger_observation_credit "
@@ -1027,11 +1017,10 @@ def test_basis_credit_constraints_and_foreign_key(seeded) -> None:
 
 
 def test_observation_pair_and_accepted_basis_are_enforced(seeded) -> None:
-    # The scope mismatch needs a row of another realm; the realm trigger would refuse it first.
-    disable_realm_triggers(seeded)
     other = str(uuid4())
     other_query = str(uuid4())
     with seeded.begin() as conn:
+        other_account = _other_account(conn)
         conn.exec_driver_sql(_query_sql(other_query, 2))
         conn.exec_driver_sql(_observation_sql(other, other_query, accepted=False))
     with seeded.begin() as conn, pytest.raises(Exception, match="fk_accepted_basis_observation"):
@@ -1051,7 +1040,7 @@ def test_observation_pair_and_accepted_basis_are_enforced(seeded) -> None:
             f"UPDATE venue_credit_mirror SET last_accepted_observation_id='{other}'"
         )
     with seeded.begin() as conn, pytest.raises(Exception, match="ledger basis scope mismatch"):
-        conn.exec_driver_sql(_basis_sql(str(uuid4()), _O, environment="wrong"))
+        conn.exec_driver_sql(_basis_sql(str(uuid4()), _O, account=other_account))
     with seeded.begin() as conn, pytest.raises(Exception, match="ledger basis scope mismatch"):
         conn.exec_driver_sql(_basis_sql(str(uuid4()), _O, revision=1))
     with seeded.begin() as conn, pytest.raises(Exception, match="ck_accepted_basis_high_water"):
@@ -1134,12 +1123,9 @@ def test_accept_revision_must_match_query_start_and_current_clock(seeded) -> Non
 
 
 def test_observation_query_scope_mismatch_fails(seeded) -> None:
-    # The scope mismatch needs a row of another realm; the realm trigger would refuse it first.
-    disable_realm_triggers(seeded)
     query_id = str(uuid4())
     with seeded.begin() as conn:
-        # A revision of its own, so the row stays distinct without the realm in the key.
-        conn.exec_driver_sql(_query_sql(query_id, 2, environment="wrong"))
+        conn.exec_driver_sql(_query_sql(query_id, 2, account=_other_account(conn)))
     with (
         seeded.begin() as conn,
         pytest.raises(Exception, match="ledger observation query scope mismatch"),
@@ -1300,10 +1286,10 @@ def test_corrective_downgrade_restores_offer_member_guard(reversible_ledger_db) 
 
 def test_attempt_cell_must_equal_its_decision_cell(seeded) -> None:
     statement = f"""INSERT INTO submission_attempt_journal(attempt_id, execution_decision_id,
-      exchange_account_id, deployment_environment, symbol, cell_id, attempt_seq,
+      exchange_account_id, symbol, cell_id, attempt_seq,
       normalized_payload, payload_sha256, basis_id, policy_revision_id,
       authorization_evidence, started_at_ms)
-      VALUES ('{uuid4()}', '{_D2}', '{_A}', 'ci', 'fUST', '{{cell}}', 2, '{{{{"amount": "1"}}}}', 'hash',
+      VALUES ('{uuid4()}', '{_D2}', '{_A}', 'fUST', '{{cell}}', 2, '{{{{"amount": "1"}}}}', 'hash',
       '{_B}', '{_P}', '{{{{}}}}', 4)"""
     with seeded.begin() as conn, pytest.raises(Exception, match="ledger decision scope mismatch"):
         conn.exec_driver_sql(statement.format(cell="other-cell"))
@@ -1315,8 +1301,8 @@ def test_manual_resolution_is_for_quarantines_only(seeded) -> None:
     with seeded.begin() as conn, pytest.raises(Exception, match="ck_execution_resolution_manual"):
         conn.exec_driver_sql(
             f"""INSERT INTO execution_resolution_journal(id, attempt_id, exchange_account_id,
-      deployment_environment, symbol, action, observation_id, actor_kind, actor_id,
+      symbol, action, observation_id, actor_kind, actor_id,
       resolved_at_ms, reason, evidence)
-      VALUES ('{uuid4()}', '{_T}', '{_A}', 'ci', 'fUST', 'manual', '{_O}', 'operator',
+      VALUES ('{uuid4()}', '{_T}', '{_A}', 'fUST', 'manual', '{_O}', 'operator',
       'test', 5, 'test', '{{}}')"""
         )

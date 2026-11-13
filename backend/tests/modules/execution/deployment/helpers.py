@@ -32,7 +32,6 @@ def make_candidate() -> DecisionPayload:
 def make_audit_context(candidate: DecisionPayload) -> AuditContext:
     return AuditContext(
         account_id="acct",
-        deployment_environment="test",
         reconcile_id="reconcile-1",
         cell_id="cell-1",
         symbol=candidate.symbol,

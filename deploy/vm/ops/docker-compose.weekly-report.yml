@@ -14,9 +14,8 @@
 # Env: no env_file. The runner passes exactly the variables the steps read --
 # DATABASE_URL and BFX_EXCHANGE_ACCOUNT_ID from /opt/bfx/runtime/research.env (the
 # research role bfx_research: writes only the research tables, never the ledger or
-# trading state; never the bot's role or the migration owner), BFX_DEPLOYMENT_ENV from
-# the deployed revision's live.env -- so nothing of bot.env (vault KEK, admin token,
-# Telegram) reaches this container. Values arrive through Compose interpolation of the
+# trading state; never the bot's role or the migration owner) -- so nothing of bot.env
+# (vault KEK, admin token, Telegram) reaches this container. Values arrive through Compose interpolation of the
 # runner's own environment, which Compose substitutes literally.
 #
 # Hardening mirrors docker-compose.app.yml (read-only rootfs, UID 1000, all
@@ -47,7 +46,6 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
       BFX_EXCHANGE_ACCOUNT_ID: ${BFX_EXCHANGE_ACCOUNT_ID:?BFX_EXCHANGE_ACCOUNT_ID is required}
-      BFX_DEPLOYMENT_ENV: ${BFX_DEPLOYMENT_ENV:?BFX_DEPLOYMENT_ENV is required}
       BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
       BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
       PYTHONDONTWRITEBYTECODE: "1"

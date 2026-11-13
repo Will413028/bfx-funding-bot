@@ -31,9 +31,26 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
-from tests.pg_templates import LAST_REVERSIBLE_REVISION, alembic, template_at, upgrade_head_after_w3
+from tests.pg_templates import (
+    LAST_REVERSIBLE_REVISION,
+    alembic,
+    load_revision,
+    template_at,
+    upgrade_head_after_w3,
+)
 
-from .test_ledger_schema_roles import _A, _O, _P, _T, _build, _build_reversible, _prepare, _seed
+from .test_ledger_schema_roles import (
+    _A,
+    _O,
+    _P,
+    _T,
+    _build,
+    _build_reversible,
+    _has_realm_column,
+    _prepare,
+    _realm,
+    _seed,
+)
 from .test_uncertainty_request_evidence import _quarantine
 
 pytestmark = pytest.mark.integration
@@ -103,13 +120,19 @@ def _seeded(url: str):
 # ------------------------------------------------------------------ rows, as the owner
 
 
+def _rc(conn) -> tuple[str, str]:
+    """The realm column and its value where this database still has it (before 545b2877e9bd)."""
+    return _realm(_has_realm_column(conn))
+
+
 def _state(conn, *, state: str = "HALTED", cause: str = "operator", actor: str = "operator",
            reason: str = "test", at: int = 1, account: str = _A, request: str | None = None) -> int:
     request_column, request_value = ("", "") if request is None else (
         ", operator_request_id", f", '{request}'")
+    column, value = _rc(conn)
     return conn.scalar(text(
-        "INSERT INTO trading_state (exchange_account_id, deployment_environment, state, cause, actor, "
-        f"reason, created_at_ms{request_column}) VALUES (:a, 'ci', :s, :c, :actor, :r, :at"
+        f"INSERT INTO trading_state (exchange_account_id, {column}state, cause, actor, "
+        f"reason, created_at_ms{request_column}) VALUES (:a, {value}:s, :c, :actor, :r, :at"
         f"{request_value}) RETURNING id"),
         {"a": account, "s": state, "c": cause, "actor": actor, "r": reason, "at": at})
 
@@ -117,9 +140,10 @@ def _state(conn, *, state: str = "HALTED", cause: str = "operator", actor: str =
 def _trading(conn, *, action: str = "resume", reason: str = "x", by: str = "operator",
              created: int = 1, account: str = _A, settle: str = "") -> str:
     request_id = str(uuid4())
+    column, value = _rc(conn)
     conn.exec_driver_sql(
-        "INSERT INTO trading_control_requests (request_id, exchange_account_id, deployment_environment, "
-        f"action, reason, requested_by, created_at_ms) VALUES ('{request_id}', '{account}', 'ci', "
+        f"INSERT INTO trading_control_requests (request_id, exchange_account_id, {column}"
+        f"action, reason, requested_by, created_at_ms) VALUES ('{request_id}', '{account}', {value}"
         f"'{action}', '{reason}', '{by}', {created})")
     if settle:
         conn.exec_driver_sql(f"UPDATE trading_control_requests SET {settle} WHERE request_id = '{request_id}'")
@@ -128,9 +152,10 @@ def _trading(conn, *, action: str = "resume", reason: str = "x", by: str = "oper
 
 def _capital(conn, *, action: str = "disable", symbol: str = "fUST", settle: str = "") -> str:
     request_id = str(uuid4())
+    column, value = _rc(conn)
     conn.exec_driver_sql(
-        "INSERT INTO capital_policy_requests (request_id, exchange_account_id, deployment_environment, "
-        f"symbol, action, reason, requested_by, created_at_ms) VALUES ('{request_id}', '{_A}', 'ci', "
+        f"INSERT INTO capital_policy_requests (request_id, exchange_account_id, {column}"
+        f"symbol, action, reason, requested_by, created_at_ms) VALUES ('{request_id}', '{_A}', {value}"
         f"'{symbol}', '{action}', 'x', 'operator', 1)")
     if settle:
         conn.exec_driver_sql(f"UPDATE capital_policy_requests SET {settle} WHERE request_id = '{request_id}'")
@@ -142,19 +167,21 @@ def _revision(conn, *, revision: int, source: str = "{}", symbol: str = "fUST",
     revision_id = str(uuid4())
     request_column, request_value = ("", "") if request is None else (
         ", operator_request_id", f", '{request}'")
+    column, value = _rc(conn)
     conn.exec_driver_sql(
-        "INSERT INTO capital_policy_revisions (id, exchange_account_id, deployment_environment, symbol, "
+        f"INSERT INTO capital_policy_revisions (id, exchange_account_id, {column}symbol, "
         f"revision, schema_version, policy, digest, source{request_column}) VALUES ('{revision_id}', "
-        f"'{_A}', 'ci', '{symbol}', {revision}, 1, '{{}}', 'p', '{source}'{request_value})")
+        f"'{_A}', {value}'{symbol}', {revision}, 1, '{{}}', 'p', '{source}'{request_value})")
     return revision_id
 
 
 def _uncertainty(conn, *, uncertainty: str | None = None, settle: str = "") -> str:
     request_id = str(uuid4())
+    column, value = _rc(conn)
     conn.exec_driver_sql(
         "INSERT INTO uncertainty_resolution_requests (request_id, exchange_account_id, "
-        "deployment_environment, uncertainty_id, action, observation_id, requested_by, created_at_ms) "
-        f"VALUES ('{request_id}', '{_A}', 'ci', '{uncertainty or uuid4()}', 'mark_not_accepted', "
+        f"{column}uncertainty_id, action, observation_id, requested_by, created_at_ms) "
+        f"VALUES ('{request_id}', '{_A}', {value}'{uncertainty or uuid4()}', 'mark_not_accepted', "
         f"'{_O}', 'operator', 1)")
     if settle:
         conn.exec_driver_sql(
@@ -167,11 +194,12 @@ def _journal(conn, request: str | None, *, quarantine: str | None = None,
     subject_column, subject = ("attempt_id", attempt) if attempt else (
         "quarantine_id", quarantine or _quarantine(conn))
     request_sql = "NULL" if request is None else f"'{request}'"
+    column, value = _rc(conn)
     conn.exec_driver_sql(
         f"""INSERT INTO execution_resolution_journal(id, {subject_column}, exchange_account_id,
-      deployment_environment, symbol, action, observation_id, actor_kind, actor_id,
+      {column}symbol, action, observation_id, actor_kind, actor_id,
       operator_request_id, resolved_at_ms, reason, evidence)
-      VALUES ('{uuid4()}', '{subject}', '{account}', 'ci', 'fUST', 'not_accepted', '{_O}',
+      VALUES ('{uuid4()}', '{subject}', '{account}', {value}'fUST', 'not_accepted', '{_O}',
       'operator', 'test', {request_sql}, 6, 'test', '{{}}')""")
 
 
@@ -192,11 +220,12 @@ def _audit(conn, *, state_id: int, actor: str, currency: str, at: int, account: 
     attempt = str(uuid4())
     request_column, request_value = ("", "") if request is None else (
         ", operator_request_id", f", '{request}'")
+    column, value = _rc(conn)
     for phase, offset in (("requested", 0), ("acknowledged", 1)):
         conn.exec_driver_sql(
-            "INSERT INTO funding_cancel_all_audit (exchange_account_id, deployment_environment, "
+            f"INSERT INTO funding_cancel_all_audit (exchange_account_id, {column}"
             f"trading_state_id, attempt_id, currency, phase, actor, occurred_at_ms{request_column}) "
-            f"VALUES ('{account}', 'ci', {state_id}, '{attempt}', '{currency}', '{phase}', '{actor}', "
+            f"VALUES ('{account}', {value}{state_id}, '{attempt}', '{currency}', '{phase}', '{actor}', "
             f"{at + offset}{request_value})")
     return attempt
 
@@ -506,9 +535,8 @@ def _kill_with_two_cancel_alls_of_one_currency(conn) -> None:
 
 
 def test_every_precondition_has_a_violation_case() -> None:
-    from .test_database_realm import _load
-
-    names = [what for what, _sql in _load(f"{_REVISION}_operator_request_causation.py").PRECONDITIONS]
+    names = [what for what, _sql
+             in load_revision(f"{_REVISION}_operator_request_causation.py").PRECONDITIONS]
     assert sorted(names) == sorted(_VIOLATIONS)
 
 

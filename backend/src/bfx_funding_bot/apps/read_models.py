@@ -23,5 +23,6 @@ def build_read_models() -> ReadModels:
     """The web API boots only on the ``ledger`` authority (``apps/authority_support.py``)."""
     return ReadModels(
         build_operator_reads(), build_operator_evidence(),
-        build_execution_history(ArchivedExecutionHistory()), build_policy_reader,
+        build_execution_history(ArchivedExecutionHistory()),
+        build_policy_reader,
     )

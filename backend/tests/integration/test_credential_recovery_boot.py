@@ -49,7 +49,7 @@ async def _queue_kill(factory: Any) -> Any:
     async with factory.begin() as session:
         await session.execute(insert(TradingControlRequestRow).values(
             request_id=request_id, exchange_account_id=TEST_EXCHANGE_ACCOUNT_ID,
-            deployment_environment="ci", action="kill", reason="kill during recovery",
+            action="kill", reason="kill during recovery",
             requested_by="operator", created_at_ms=1))
     return request_id
 

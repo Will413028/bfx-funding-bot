@@ -56,7 +56,7 @@ from .test_ledger_schema_roles import _A, _B, _D2, _P, ledger_db  # noqa: F401 -
 from .test_ledger_schema_roles import seeded as seeded_fixture  # noqa: F401 - fixture re-export
 
 pytestmark = pytest.mark.integration
-SCOPE = Scope(UUID(_A), "ci")
+SCOPE = Scope(UUID(_A))
 JOURNAL = build_ledger_journal()
 OBSERVATIONS = build_ledger_observations()
 

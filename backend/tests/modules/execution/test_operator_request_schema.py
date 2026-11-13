@@ -54,6 +54,14 @@ def _migration(name: str = _MIGRATION):
 # that dropped it.
 _CAUSATION = "5e820d6dc7da_operator_request_causation.py"
 _DROP = "41cec7caf291_drop_request_product_columns.py"
+# The migration that dropped the realm column from every outbox (and every live table).
+_DROP_REALM = "545b2877e9bd_drop_realm_columns.py"
+
+
+def _without_realm(columns: tuple[str, ...]) -> tuple[str, ...]:
+    """The columns an earlier migration granted, minus the one 545b2877e9bd dropped."""
+    dropped = _migration(_DROP_REALM)
+    return tuple(c for c in columns if c != dropped.COLUMN)
 
 
 @pytest.mark.parametrize(("model", "migration_file", "prefix"), _OUTBOXES)
@@ -61,8 +69,10 @@ def test_migration_grants_exactly_the_declared_column_split(model, migration_fil
     migration = _migration(migration_file)
     closed = _migration(_CAUSATION).CLOSED_COLUMNS.get(model.__tablename__)
     granted = tuple(getattr(migration, f"{prefix}WORKER_COLUMNS").split(","))
-    assert tuple(getattr(migration, f"{prefix}REQUEST_COLUMNS").split(",")) == model.REQUEST_COLUMNS
-    assert tuple(c for c in granted if c != closed) == model.WORKER_COLUMNS
+    requested = tuple(getattr(migration, f"{prefix}REQUEST_COLUMNS").split(","))
+    assert f"public.{model.__tablename__}" in _migration(_DROP_REALM).LIVE_TABLES
+    assert _without_realm(requested) == model.REQUEST_COLUMNS
+    assert _without_realm(tuple(c for c in granted if c != closed)) == model.WORKER_COLUMNS
     assert _migration(_DROP).DROPPED_COLUMNS.get(model.__tablename__) == closed
 
 
@@ -79,12 +89,13 @@ def test_every_column_belongs_to_exactly_one_writer(model, migration_file, prefi
                                    if model not in _AFTER_CAUSATION])
 def test_the_causation_migration_guards_the_declared_request_columns(model) -> None:
     """Its grant assertion names exactly the columns no runtime role may UPDATE."""
-    assert _migration(_CAUSATION).REQUEST_COLUMNS[model.__tablename__] == model.REQUEST_COLUMNS
+    assert _without_realm(_migration(_CAUSATION).REQUEST_COLUMNS[model.__tablename__]) == (
+        model.REQUEST_COLUMNS)
 
 
 def test_web_api_insert_names_only_the_granted_request_columns() -> None:
     values = request_values(
-        ResolutionScope(uuid4(), "ci"),
+        ResolutionScope(uuid4()),
         ResolutionIntent(
             uncertainty_id=uuid4(), action="mark_not_accepted", evidence_ref="obs:x",
             operator_id="operator-1",

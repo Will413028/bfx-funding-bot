@@ -56,8 +56,7 @@ class CapitalPolicyGuard:
             if ctx.account_id != str(scope.exchange_account_id) or not ctx.capital_cell_id:
                 raise ValueError("capital_scope_missing")
             view = await self.authority.read(
-                CapitalScope(scope.exchange_account_id, scope.deployment_environment,
-                             decision.symbol, ctx.capital_cell_id),
+                CapitalScope(scope.exchange_account_id, decision.symbol, ctx.capital_cell_id),
                 now_ms=self.clock(), session=ctx.command_session)
             if isinstance(view, CapitalBlocked):
                 return GuardResult(False, self.name, f"capital_unavailable: {view.reason}")
@@ -203,7 +202,7 @@ class HeartbeatGuard:
 
 
 class UncertaintyGuard:
-    """Fail-closed hard guard for one exact account/environment/symbol scope.
+    """Fail-closed hard guard for one exact account/symbol scope.
 
     Unknown future uncertainty kinds are deliberately treated as blocking.  A
     reader failure is also a block; the chain can then emit its normal bounded
@@ -217,16 +216,8 @@ class UncertaintyGuard:
         "unsupported_venue_exposure",
     })
 
-    def __init__(
-        self,
-        *,
-        reader: UncertaintyReader,
-        deployment_environment: str,
-    ) -> None:
-        if not deployment_environment.strip():
-            raise ValueError("deployment_environment must be non-empty")
+    def __init__(self, *, reader: UncertaintyReader) -> None:
         self._reader = reader
-        self._deployment_environment = deployment_environment
 
     async def evaluate(
         self, decision: DecisionPayload, ctx: AccountContext,
@@ -244,7 +235,7 @@ class UncertaintyGuard:
         try:
             rows: Sequence[object] = await self._reader.list_open(
                 ctx.command_session,
-                Scope(account_id, self._deployment_environment),
+                Scope(account_id),
                 decision.symbol,
             )
         except Exception as exc:
@@ -266,11 +257,6 @@ class UncertaintyGuard:
                 if isinstance(row, dict)
                 else getattr(row, "exchange_account_id", account_id)
             )
-            row_environment = (
-                row.get("deployment_environment", self._deployment_environment)
-                if isinstance(row, dict)
-                else getattr(row, "deployment_environment", self._deployment_environment)
-            )
             row_symbol = (
                 row.get("symbol", decision.symbol)
                 if isinstance(row, dict)
@@ -278,7 +264,6 @@ class UncertaintyGuard:
             )
             if (
                 str(row_account) != str(account_id)
-                or str(row_environment) != self._deployment_environment
                 or str(row_symbol) != decision.symbol
             ):
                 # The database adapter already applies this exact predicate;

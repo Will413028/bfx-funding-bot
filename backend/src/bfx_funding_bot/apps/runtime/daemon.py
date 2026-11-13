@@ -139,7 +139,6 @@ class AccountBootstrap:
     """Immutable daemon account identity and boot-time runtime material."""
 
     exchange_account_id: UUID
-    deployment_environment: str
     config_draft: dict[str, object] | None
     config_revision: int | None
 
@@ -169,7 +168,6 @@ class AccountBootstrap:
 async def load_account_bootstrap(
     session: AsyncSession,
     *,
-    deployment_environment: str,
     phase: Phase | None = None,
 ) -> AccountBootstrap:
     """Resolve one explicit account row and its config draft at boot.
@@ -209,7 +207,6 @@ async def load_account_bootstrap(
     )
     return AccountBootstrap(
         exchange_account_id=exchange_account_id,
-        deployment_environment=deployment_environment,
         config_draft=dict(draft.config) if draft is not None else None,
         config_revision=draft.revision if draft is not None else None,
     )

@@ -30,7 +30,7 @@ from bfx_funding_bot.modules.observability.metrics import (
 )
 from bfx_funding_bot.modules.strategy import DecisionOutcome, DecisionPayload
 
-_SCOPE = Scope(UUID("00000000-0000-0000-0000-00000000a001"), "ci")
+_SCOPE = Scope(UUID("00000000-0000-0000-0000-00000000a001"))
 
 
 def _ctx() -> AccountContext:
@@ -189,7 +189,7 @@ async def test_cycle_wrapper_passes_scope_and_result_identity():
 
     from bfx_funding_bot.modules.ledger import CycleResult, Scope
 
-    scope = Scope(uuid4(), "ci")
+    scope = Scope(uuid4())
     result = CycleResult("fenced")
     sink = AsyncMock()
     sink.run.return_value = result

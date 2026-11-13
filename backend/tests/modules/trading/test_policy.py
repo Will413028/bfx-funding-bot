@@ -288,24 +288,24 @@ def test_evaluator_rejects_absent_or_unvalidated_snapshot_even_when_disabled(sna
 
 
 _ACCOUNT, _REVISION_ID = uuid4(), uuid4()
-_REVISION = (_REVISION_ID, _ACCOUNT, "prod", "fUST", 3)
+_REVISION = (_REVISION_ID, _ACCOUNT, "fUST", 3)
 
 
 def test_check_pointer_accepts_only_the_scope_s_own_head_revision() -> None:
-    assert check_pointer(_ACCOUNT, "prod", "fUST", (_REVISION_ID, 3), _REVISION) is None
-    assert check_pointer(_ACCOUNT, "prod", "fUST", None, None) == Blocked("policy_unavailable", ())
-    assert check_pointer(_ACCOUNT, "prod", "fUST", None, _REVISION) == Blocked(
+    assert check_pointer(_ACCOUNT, "fUST", (_REVISION_ID, 3), _REVISION) is None
+    assert check_pointer(_ACCOUNT, "fUST", None, None) == Blocked("policy_unavailable", ())
+    assert check_pointer(_ACCOUNT, "fUST", None, _REVISION) == Blocked(
         "policy_unavailable", ()
     )
     inconsistent = Blocked("inconsistent_policy_pointer", ())
-    assert check_pointer(_ACCOUNT, "prod", "fUST", (_REVISION_ID, 3), None) == inconsistent
+    assert check_pointer(_ACCOUNT, "fUST", (_REVISION_ID, 3), None) == inconsistent
 
 
-@pytest.mark.parametrize("field", range(5))
+@pytest.mark.parametrize("field", range(4))
 def test_check_pointer_refuses_any_mismatched_identity_field(field: int) -> None:
     wrong: list[Any] = list(_REVISION)
-    wrong[field] = {0: uuid4(), 1: uuid4(), 2: "paper", 3: "fUSD", 4: 4}[field]
-    assert check_pointer(_ACCOUNT, "prod", "fUST", (_REVISION_ID, 3), tuple(wrong)) == Blocked(
+    wrong[field] = {0: uuid4(), 1: uuid4(), 2: "fUSD", 3: 4}[field]
+    assert check_pointer(_ACCOUNT, "fUST", (_REVISION_ID, 3), tuple(wrong)) == Blocked(
         "inconsistent_policy_pointer", ()
     )
 

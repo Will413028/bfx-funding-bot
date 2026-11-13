@@ -161,9 +161,10 @@ async def _build_simulated(
 ) -> VenueWiring:
     credentials = _throwaway_credentials()
     symbols = tuple(sorted(configured_symbols(config.cells)))
-    # Refuses realm prod (SimAccount), a database not on the ledger epoch, an unstamped or
-    # prod-stamped one, or one without sim_venue_event (the store's own reads).
-    account = SimAccount(str(exchange_account_id), config.deployment_environment.value)
+    account = SimAccount(str(exchange_account_id))
+    # The store refuses a database not on the ledger epoch, an unstamped or prod-stamped
+    # one, or one without sim_venue_event (its own reads); load_config already refused
+    # the simulated venue outside the ci realm (require_simulated_realm).
     store = await SqlVenueEventStore.open(db_engine)
     venue = await build_simulated_venue(
         account=account,

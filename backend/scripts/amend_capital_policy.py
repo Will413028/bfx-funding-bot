@@ -7,7 +7,7 @@ offer-envelope guard refuses every offer for the symbol; the first envelope
 needs all five envelope options.
 
   python -m scripts.amend_capital_policy --exchange-account-id UUID \\
-    --environment prod --symbol fUST --max-offer-amount 200 \\
+    --symbol fUST --max-offer-amount 200 \\
     --min-period-days 2 --max-period-days 2 --max-open-offers 6 \\
     --rate-floor-ratio 0.5 --min-rate-apr 0.01
   # review the complete report, then repeat with --apply-digest DIGEST
@@ -46,14 +46,15 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         factory = make_session_factory(engine)
         async with factory() as session:
             # An unstamped or unknown realm refuses, and so does a database not on the ledger.
-            await read_database_realm(session)
+            # The script takes no environment setting: the report names the stamp it read.
+            realm = await read_database_realm(session)
             await require_ledger_authority(session)
-        policy = build_policy_ports(Scope(args.exchange_account_id, args.environment))
+        policy = build_policy_ports(Scope(args.exchange_account_id))
         async with factory() as session:
             report = await amend_capital_policy(
                 session, store=policy.store, scope_lock=policy.scope_lock, symbol=args.symbol,
                 changes=_changes(args), apply_digest=args.apply_digest,
-                origin=None if args.reason is None else {"reason": args.reason})
+                origin=None if args.reason is None else {"reason": args.reason}, realm=realm)
             if report["status"] == "applied":
                 await session.commit()
             else:
@@ -92,7 +93,6 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--exchange-account-id", type=UUID, required=True)
-    parser.add_argument("--environment", required=True)
     parser.add_argument("--symbol", required=True)
     parser.add_argument("--enabled", type=_enabled)
     parser.add_argument("--max-offer-amount", type=_amount)

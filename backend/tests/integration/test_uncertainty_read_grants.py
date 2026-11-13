@@ -45,7 +45,6 @@ async def test_migration_grants_allow_scoped_uncertainty_reads_without_ledger_wr
             yield session
 
     app = FastAPI()
-    app.state.deployment_environment = "ci"
     app.include_router(build_uncertainties_router())
     app.state.read_models = build_read_models()
     app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")

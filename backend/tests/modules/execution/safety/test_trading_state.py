@@ -34,8 +34,8 @@ async def scope(sqlite_engine):
     return factory, account
 
 
-def _repo(factory, account: UUID, env: str = "ci") -> TradingStateRepository:
-    return TradingStateRepository(factory, account_id=account, deployment_environment=env, scope_lock=build_scope_lock())
+def _repo(factory, account: UUID) -> TradingStateRepository:
+    return TradingStateRepository(factory, account_id=account, scope_lock=build_scope_lock())
 
 
 async def _rows(factory) -> int:
@@ -161,15 +161,14 @@ async def test_scopes_are_independent(scope) -> None:
     other = uuid4()
     async with factory.begin() as session:
         session.add(ExchangeAccount(id=other, venue="bitfinex", label="other"))
-    await _repo(factory, account, "ci").transition("HALTED", cause="operator", actor="t",
-                                                   reason="stop ci")
-    assert await _repo(factory, account, "prod").current() is None
-    assert await _repo(factory, other, "ci").current() is None
+    await _repo(factory, account).transition("HALTED", cause="operator", actor="t",
+                                             reason="stop one")
+    assert await _repo(factory, other).current() is None
     # A HALTED elsewhere does not constrain this scope's first decision.
-    await _repo(factory, account, "prod").transition("ACTIVE", cause="operator", actor="t",
-                                                     reason="start prod")
-    await _repo(factory, account, "prod").transition("HALTED", cause="auto", actor="t",
-                                                     reason="stop prod")
+    await _repo(factory, other).transition("ACTIVE", cause="operator", actor="t",
+                                           reason="start other")
+    await _repo(factory, other).transition("HALTED", cause="auto", actor="t",
+                                           reason="stop other")
 
 
 MIN_HALT = 15 * 60 * 1000

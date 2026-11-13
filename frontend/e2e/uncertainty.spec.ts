@@ -72,7 +72,6 @@ test.describe("symbol-scoped uncertainty console", () => {
 								},
 								blockedScope: {
 									exchangeAccountId: accountId,
-									environment: "ci",
 									symbol: "fUST",
 								},
 							},

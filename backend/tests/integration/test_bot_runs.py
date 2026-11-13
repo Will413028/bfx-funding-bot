@@ -57,7 +57,7 @@ async def _boot(url: str, *, then_stop: bool = True) -> list:  # type: ignore[ty
     engine = create_async_engine(url)
     try:
         record = BotRunRecord(async_sessionmaker(engine, expire_on_commit=False),
-                              exchange_account_id=ACCOUNT, deployment_environment="ci")
+                              exchange_account_id=ACCOUNT)
         closed = await record.start()
         if then_stop:
             await record.finish("clean_stop")
@@ -80,7 +80,7 @@ async def test_a_clean_finish_is_not_reported(runs_url: str, caplog) -> None:
     engine = create_async_engine(runs_url)
     try:
         first = BotRunRecord(async_sessionmaker(engine, expire_on_commit=False),
-                             exchange_account_id=ACCOUNT, deployment_environment="ci")
+                             exchange_account_id=ACCOUNT)
         assert await first.start() == []
         await first.finish("clean_stop")
     finally:
@@ -95,7 +95,7 @@ async def test_an_open_previous_run_alerts_once_and_is_closed(runs_url: str, cap
     engine = create_async_engine(runs_url)
     try:
         crashed = BotRunRecord(async_sessionmaker(engine, expire_on_commit=False),
-                               exchange_account_id=ACCOUNT, deployment_environment="ci")
+                               exchange_account_id=ACCOUNT)
         await crashed.start()  # and never finishes
     finally:
         await engine.dispose()
@@ -118,7 +118,7 @@ async def test_runs_of_another_scope_are_not_reported(runs_url: str) -> None:
     engine = create_async_engine(runs_url)
     try:
         foreign = BotRunRecord(async_sessionmaker(engine, expire_on_commit=False),
-                               exchange_account_id=other, deployment_environment="ci")
+                               exchange_account_id=other)
         await foreign.start()
     finally:
         await engine.dispose()
@@ -160,8 +160,7 @@ async def build_daemon(*, stop_event):
         config=SimpleNamespace(phase="live", cells=[], run_duration_hours=None),
         session_factory=async_sessionmaker(engine, expire_on_commit=False),
         account_bootstrap=SimpleNamespace(
-            exchange_account_id=UUID(os.environ["BOT_RUNS_ACCOUNT"]),
-            deployment_environment="ci"),
+            exchange_account_id=UUID(os.environ["BOT_RUNS_ACCOUNT"])),
     )
 
 
@@ -312,7 +311,7 @@ async def test_the_end_of_a_run_is_bounded_when_the_database_stops_answering(fro
     url, freeze = frozen_pg
     engine = create_async_engine(url)
     record = BotRunRecord(async_sessionmaker(engine, expire_on_commit=False),
-                          exchange_account_id=ACCOUNT, deployment_environment="ci")
+                          exchange_account_id=ACCOUNT)
     await record.start()
     freeze()
     started = time.monotonic()

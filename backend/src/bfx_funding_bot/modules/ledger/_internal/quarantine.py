@@ -31,16 +31,14 @@ async def open_quarantine(session: AsyncSession, scope: Scope, quarantine: Quara
         source = await session.get(SubmissionAttemptJournalRow, quarantine.source_attempt_id)
         if source is None or (
             source.exchange_account_id,
-            source.deployment_environment,
             source.symbol,
-        ) != (scope.exchange_account_id, scope.deployment_environment, quarantine.symbol):
+        ) != (scope.exchange_account_id, quarantine.symbol):
             raise ValueError("quarantine source attempt scope mismatch")
     revision = await bump_locked(session, scope)
     session.add(
         QuarantineOpeningRow(
             quarantine_id=quarantine.quarantine_id,
             exchange_account_id=scope.exchange_account_id,
-            deployment_environment=scope.deployment_environment,
             symbol=quarantine.symbol,
             intended_amount=quarantine.intended_amount,
             opened_at_ms=quarantine.opened_at_ms,
@@ -60,10 +58,7 @@ async def add_quarantine_member(
     opening = await session.get(QuarantineOpeningRow, member.quarantine_id)
     if opening is None:
         raise ValueError("quarantine does not exist")
-    if (opening.exchange_account_id, opening.deployment_environment) != (
-        scope.exchange_account_id,
-        scope.deployment_environment,
-    ):
+    if opening.exchange_account_id != scope.exchange_account_id:
         raise ValueError("quarantine scope mismatch")
     existing = await session.get(
         QuarantineMemberRow, (member.quarantine_id, member.source_kind, member.venue_object_id)

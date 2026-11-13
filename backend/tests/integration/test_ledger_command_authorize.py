@@ -90,10 +90,10 @@ async def _authorize(book, port, attempt, token, guard):  # noqa: F811
         await session.execute(
             text(
                 "INSERT INTO execution_decisions(decision_id, account_id, exchange_account_id, "
-                "deployment_environment, reconcile_id, cell_id, symbol, signal_correlation_id, "
+                "reconcile_id, cell_id, symbol, signal_correlation_id, "
                 "outcome, signal_rate, amount_usdt, duration_days, model_evidence, safety_result, "
                 "execution_policy, service_version, config_hash, occurred_at_ms, recorded_at_ms) "
-                "VALUES (:d, 'account', :a, 'ci', 'r', 'a30', 'fUST', :d, 'submitted', 0, :amount, "
+                "VALUES (:d, 'account', :a, 'r', 'a30', 'fUST', :d, 'submitted', 0, :amount, "
                 "2, '{}', '{}', 'policy', 'test', 'hash', 0, 0)"
             ),
             {"d": attempt.execution_decision_id, "a": str(SCOPE.exchange_account_id),

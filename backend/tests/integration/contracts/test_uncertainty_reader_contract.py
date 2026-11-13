@@ -33,8 +33,8 @@ async def test_unknown_and_quarantine_are_listed_with_the_authority_kind_codes(p
     assert {(item.symbol, item.kind) for item in found} == {
         ("fUST", UNKNOWN), ("fUSD", QUARANTINE),
     }
-    assert {(item.exchange_account_id, item.deployment_environment) for item in found} == {
-        (port_stack.scope.exchange_account_id, port_stack.scope.deployment_environment),
+    assert {item.exchange_account_id for item in found} == {
+        port_stack.scope.exchange_account_id,
     }
 
 

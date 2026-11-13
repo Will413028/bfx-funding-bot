@@ -53,7 +53,6 @@ async def accepted_positions(session: AsyncSession, scope: Scope) -> AcceptedPos
                 select(VenueOfferMirrorRow.symbol, func.count())
                 .where(
                     VenueOfferMirrorRow.exchange_account_id == scope.exchange_account_id,
-                    VenueOfferMirrorRow.deployment_environment == scope.deployment_environment,
                     VenueOfferMirrorRow.present_in_latest_accepted_snapshot,
                 )
                 .group_by(VenueOfferMirrorRow.symbol)

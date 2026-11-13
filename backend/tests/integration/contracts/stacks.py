@@ -50,7 +50,7 @@ from ..test_ledger_capital_reader import _ATTEMPT_POLICY, Book
 
 ACCOUNT = UUID("00000000-0000-0000-0000-00000000a001")
 ENVIRONMENT = "ci"
-SCOPE = Scope(ACCOUNT, ENVIRONMENT)
+SCOPE = Scope(ACCOUNT)
 NOW = 1100
 MAX_SNAPSHOT_AGE_MS = 10_000
 CELL = "a30"
@@ -87,7 +87,7 @@ class Stack:
         return CommandBoundary(SCOPE, self.factory, self.journal, effects)
 
     def capital_scope(self, symbol: str = "fUST", cell: str = CELL) -> CapitalScope:
-        return CapitalScope(ACCOUNT, ENVIRONMENT, symbol, cell)
+        return CapitalScope(ACCOUNT, symbol, cell)
 
     async def policy(
         self, symbol: str = "fUST", *, reserve: str = "100", enabled: bool = True
@@ -126,7 +126,7 @@ class Stack:
         decision_id, correlation = str(uuid4()), uuid4()
         session.add(ExecutionDecisionRow(
             decision_id=decision_id, account_id=str(ACCOUNT), exchange_account_id=ACCOUNT,
-            deployment_environment=ENVIRONMENT, reconcile_id="contract", cell_id=CELL,
+            reconcile_id="contract", cell_id=CELL,
             symbol=symbol, signal_correlation_id=str(correlation), outcome="submitted",
             signal_rate=Decimal("0.0001"), applied_rate=Decimal("0.0001"),
             amount_usdt=Decimal(amount), duration_days=2, model_evidence={}, safety_result={},
@@ -199,8 +199,8 @@ async def seed_account(sync_engine: Any) -> None:
         conn.execute(
             text(
                 "INSERT INTO capital_policy_revisions(id, exchange_account_id, "
-                "deployment_environment, symbol, revision, schema_version, policy, digest, "
-                "source) VALUES (:p, :a, 'ci', 'fATTEMPT', 1, 1, '{}', 'p', '{}')"
+                "symbol, revision, schema_version, policy, digest, "
+                "source) VALUES (:p, :a, 'fATTEMPT', 1, 1, '{}', 'p', '{}')"
             ),
             {"p": _ATTEMPT_POLICY, "a": str(ACCOUNT)},
         )

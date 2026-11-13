@@ -24,7 +24,6 @@ class ExecutionDecisionRow(Base):
     exchange_account_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), nullable=True
     )
-    deployment_environment: Mapped[str] = mapped_column(Text, nullable=False)
     reconcile_id: Mapped[str] = mapped_column(Text, nullable=False)
     cell_id: Mapped[str] = mapped_column(Text, nullable=False)
     strategy: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -53,7 +52,7 @@ class ExecutionDecisionRow(Base):
     recorded_at_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
 
     __table_args__ = (
-        Index("idx_execution_decisions_env_occurred", "deployment_environment", "occurred_at_ms"),
+        Index("idx_execution_decisions_env_occurred", "occurred_at_ms"),
         Index("idx_execution_decisions_symbol_occurred", "symbol", "occurred_at_ms"),
         Index("idx_execution_decisions_outcome_reason", "outcome", "reason_code"),
     )

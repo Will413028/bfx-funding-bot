@@ -43,7 +43,7 @@ class _RefusingCapital:
         return CapitalBlocked(self.reason)
 
 
-SCOPE = Scope(UUID(int=7), "test")
+SCOPE = Scope(UUID(int=7))
 
 
 class _NoUncertainty:

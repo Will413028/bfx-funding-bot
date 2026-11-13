@@ -18,7 +18,7 @@ from bfx_funding_bot.modules.ledger import (
 )
 from bfx_funding_bot.modules.ledger.wiring import build_venue_hint_sink
 
-SCOPE = Scope(UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"), "ci")
+SCOPE = Scope(UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"))
 OFFER = OfferCloseHint("42", "fUST", "EXECUTED", 0.0005, 8000, 17, 9000)
 CREDIT = CreditCloseHint(81, "fUST", Decimal("100.00"), 0.0005, 2, 1000, 8000, 17)
 KINDS = ("offer_closed", "credit_closed")

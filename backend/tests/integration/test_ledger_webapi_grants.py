@@ -19,6 +19,7 @@ from tests.pg_templates import alembic, upgrade_head_after_w3
 
 from .test_ledger_schema_roles import (  # noqa: F401 - fixtures
     _D,
+    _has_realm_column,
     _seed,
     ledger_db,
     reversible_ledger_db,
@@ -40,11 +41,11 @@ _OBSERVED_OFFER = {
 }
 ALLOWED: dict[str, set[str]] = {
     "ledger_observation_query": {
-        "query_id", "exchange_account_id", "deployment_environment", "query_revision",
+        "query_id", "exchange_account_id", "query_revision",
         "started_at_ms",
     },
     "ledger_observation": {
-        "id", "query_id", "exchange_account_id", "deployment_environment", "accepted",
+        "id", "query_id", "exchange_account_id", "accepted",
         "query_finished_at_ms", "first_digest", "confirmation_digest", *_FLAGS,
         # e1f2a3b4c5d7
         "history_requested_start_ms", "history_requested_end_ms", "history_oldest_mts_created",
@@ -60,7 +61,7 @@ ALLOWED: dict[str, set[str]] = {
         "terminal_kind", "occurred_at_ms",
     },
     "accepted_capital_basis": {
-        "id", "exchange_account_id", "deployment_environment", "observation_id",
+        "id", "exchange_account_id", "observation_id",
         "accept_revision", "attempt_seq_high_water", "accepted_at_ms",
     },
     "accepted_capital_basis_attempt": {"basis_id", "attempt_id", "symbol", "classification"},
@@ -70,7 +71,7 @@ ALLOWED: dict[str, set[str]] = {
     },
     "accepted_capital_basis_credit": {"basis_id", "symbol"},
     "submission_attempt_journal": {
-        "attempt_id", "execution_decision_id", "exchange_account_id", "deployment_environment",
+        "attempt_id", "execution_decision_id", "exchange_account_id",
         "symbol", "cell_id", "attempt_seq", "started_at_ms", "intended_amount",
         # e1f2a3b4c5d7
         "match_rate", "match_period_days", "match_offer_type", "match_flags",
@@ -79,16 +80,16 @@ ALLOWED: dict[str, set[str]] = {
         "attempt_id", "kind", "venue_offer_id", "reason", "completed_at_ms",
     },
     "quarantine_opening": {
-        "quarantine_id", "exchange_account_id", "deployment_environment", "symbol",
+        "quarantine_id", "exchange_account_id", "symbol",
         "intended_amount", "opened_at_ms", "opened_revision", "source_attempt_id",
     },
     "execution_resolution_journal": {
-        "id", "attempt_id", "quarantine_id", "exchange_account_id", "deployment_environment",
+        "id", "attempt_id", "quarantine_id", "exchange_account_id",
         "symbol", "action", "venue_offer_id", "actor_kind", "actor_id", "operator_request_id",
         "resolved_at_ms", "reason",
     },
     "venue_offer_mirror": {
-        "exchange_account_id", "deployment_environment", "venue_offer_id", "symbol",
+        "exchange_account_id", "venue_offer_id", "symbol",
         "amount_original", "amount_remaining", "mts_updated",
         "present_in_latest_accepted_snapshot",
     },
@@ -194,12 +195,14 @@ def test_allowlisted_columns_read_and_denied_columns_refuse_a_real_select(ledger
 def _attempt_with_payload(conn, label: str, payload: str, *, sequence: int) -> None:
     """One more attempt of the seeded scope whose ``normalized_payload`` is ``payload``."""
     decision = f"amount-{label}"
+    # A database stopped before 545b2877e9bd still carries the realm column, and requires it.
+    realm = "deployment_environment, " if _has_realm_column(conn) else ""
     conn.exec_driver_sql(
         f"""INSERT INTO execution_decisions(decision_id, account_id, exchange_account_id,
-      deployment_environment, reconcile_id, cell_id, symbol, signal_correlation_id, outcome,
+      {realm}reconcile_id, cell_id, symbol, signal_correlation_id, outcome,
       signal_rate, amount_usdt, duration_days, model_evidence, safety_result,
       execution_policy, service_version, config_hash, occurred_at_ms, recorded_at_ms)
-      SELECT '{decision}', account_id, exchange_account_id, deployment_environment,
+      SELECT '{decision}', account_id, exchange_account_id, {realm}
       reconcile_id, cell_id, symbol, 'signal-{label}', outcome, signal_rate, amount_usdt,
       duration_days, model_evidence, safety_result, execution_policy, service_version,
       config_hash, occurred_at_ms, recorded_at_ms
@@ -207,10 +210,10 @@ def _attempt_with_payload(conn, label: str, payload: str, *, sequence: int) -> N
     )
     conn.exec_driver_sql(
         f"""INSERT INTO submission_attempt_journal(attempt_id, execution_decision_id,
-      exchange_account_id, deployment_environment, symbol, cell_id, attempt_seq,
+      exchange_account_id, {realm}symbol, cell_id, attempt_seq,
       normalized_payload, payload_sha256, basis_id, policy_revision_id,
       authorization_evidence, started_at_ms)
-      SELECT gen_random_uuid(), '{decision}', exchange_account_id, deployment_environment,
+      SELECT gen_random_uuid(), '{decision}', exchange_account_id, {realm}
       symbol, cell_id, {sequence}, '{payload}'::jsonb, 'hash', basis_id,
       policy_revision_id, '{{}}', 4
       FROM submission_attempt_journal WHERE execution_decision_id = '{_D}'"""

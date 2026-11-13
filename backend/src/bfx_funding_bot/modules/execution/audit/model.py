@@ -18,7 +18,6 @@ class AuditContext:
     """Stable execution identity supplied by the gate for every audit row."""
 
     account_id: str
-    deployment_environment: str
     reconcile_id: str
     cell_id: str
     symbol: str
@@ -34,7 +33,6 @@ class ExecutionDecision:
 
     decision_id: str
     account_id: str
-    deployment_environment: str
     reconcile_id: str
     cell_id: str
     symbol: str
@@ -68,7 +66,6 @@ class ExecutionDecision:
             "decision_id": self.decision_id,
             "account_id": self.account_id,
             "exchange_account_id": account_id_uuid_or_none(self.account_id),
-            "deployment_environment": self.deployment_environment,
             "reconcile_id": self.reconcile_id,
             "cell_id": self.cell_id,
             "strategy": self.strategy,

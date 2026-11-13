@@ -200,7 +200,7 @@ async def test_detail_returns_none_for_everything_that_is_not_an_uncertainty(
     in_flight = await book.attempt("50", outcome=None)
     for subject in (in_flight, scenario.acked, uuid4()):
         assert await _get(book, subject) is None
-    other = Scope(uuid4(), "ci")
+    other = Scope(uuid4())
     for subject in (scenario.open_unknown, scenario.orphan, scenario.resolved_quarantine):
         assert await _get(book, subject, other) is None
         assert await _get(book, subject) is not None
@@ -308,7 +308,6 @@ async def test_the_router_serves_the_ledger_read_model_as_the_web_api_role(
             yield session
 
     app = FastAPI()
-    app.state.deployment_environment = "ci"
     app.include_router(build_uncertainties_router())
     app.state.read_models = build_read_models()
     app.dependency_overrides[require_operator] = lambda: Principal("operator-1", None, "admin")

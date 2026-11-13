@@ -36,7 +36,6 @@ async def has_unresolved_quarantine(
         select(QuarantineOpeningRow.quarantine_id)
         .where(
             QuarantineOpeningRow.exchange_account_id == scope.exchange_account_id,
-            QuarantineOpeningRow.deployment_environment == scope.deployment_environment,
             QuarantineOpeningRow.symbol == symbol,
             candidate,
             ~exists().where(
@@ -75,7 +74,6 @@ async def unresolved_quarantines(
     )
     since = select(QuarantineOpeningRow).options(columns).where(
         QuarantineOpeningRow.exchange_account_id == scope.exchange_account_id,
-        QuarantineOpeningRow.deployment_environment == scope.deployment_environment,
         QuarantineOpeningRow.opened_revision > accept_revision,
     )
     if symbol is not None:

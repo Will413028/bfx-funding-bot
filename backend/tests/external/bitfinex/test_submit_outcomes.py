@@ -237,7 +237,6 @@ def test_submission_attempt_payload_freezes_normalized_identity_and_digest() -> 
     attempt = SubmissionAttemptPayload(
         execution_decision_id="decision-1",
         account_id=account_id,
-        environment="ci",
         symbol="fUST",
         normalized_payload=normalized,
         payload_sha256=fingerprint_submit_payload(normalized),
@@ -260,7 +259,6 @@ def test_submission_attempt_payload_rejects_fingerprint_mismatch() -> None:
         SubmissionAttemptPayload(
             execution_decision_id="decision-1",
             account_id=uuid4(),
-            environment="ci",
             symbol="fUST",
             normalized_payload={"amount": "100.0"},
             payload_sha256="0" * 64,
@@ -276,7 +274,6 @@ def test_submission_attempt_payload_enforces_outcome_identity_invariants() -> No
     common = {
         "execution_decision_id": "decision-1",
         "account_id": uuid4(),
-        "environment": "ci",
         "symbol": "fUST",
         "normalized_payload": {"amount": "100.0"},
         "started_at_ms": 100,
@@ -301,7 +298,6 @@ def test_submission_attempt_payload_exposes_json_safe_storage_shape() -> None:
     attempt = SubmissionAttemptPayload(
         execution_decision_id="decision-1",
         account_id=uuid4(),
-        environment="ci",
         symbol="fUST",
         normalized_payload={"amount": Decimal("100.0"), "levels": [Decimal("1.2")]},
         started_at_ms=100,
@@ -321,7 +317,6 @@ def test_submission_attempt_missing_identity_uses_deterministic_legacy_fallback(
     common = {
         "execution_decision_id": "decision-legacy",
         "account_id": UUID("5f598835-95c6-446e-8252-df3caeef5b9b"),
-        "environment": "ci",
         "symbol": "fUST",
         "normalized_payload": {"amount": "100.0", "type": "LIMIT"},
         "started_at_ms": 100,
