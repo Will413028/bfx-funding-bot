@@ -40,8 +40,9 @@ In order, all in the revision's transaction:
     table's digest equal to step 2.
 
 squawk: ``DROP COLUMN``, ``ADD PRIMARY KEY``/``UNIQUE``/``FOREIGN KEY``/``CHECK`` without
-``NOT VALID`` and non-``CONCURRENTLY`` indexes are each marked ``squawk-ignore``. Those rules
-guard against blocking writers on a live table; bfx-deploy stops the webapi and every writer
+``NOT VALID``, non-``CONCURRENTLY`` indexes and the ``DROP FUNCTION`` are each marked
+``squawk-ignore``. Those rules guard against blocking writers on a live table or breaking a
+client that still calls the function (its 43 triggers are dropped first); bfx-deploy stops the webapi and every writer
 while migrations run, ``CONCURRENTLY`` cannot run inside the revision's transaction, and
 ``NOT VALID`` plus ``VALIDATE`` in one transaction would not shorten the lock either
 (precedents: a9d2c4e6f813, 96535191e443).
@@ -605,10 +606,11 @@ def upgrade() -> None:
                    f"ALTER TABLE {table} DROP COLUMN {COLUMN}")
 
     for table, name, columns in PRIMARY_KEYS:
-        op.execute("-- squawk-ignore adding-serial-primary-key-field,disallowed-unique-constraint\n"
+        op.execute("-- squawk-ignore adding-serial-primary-key-field,disallowed-unique-constraint,"
+                   "constraint-missing-not-valid\n"
                    f"ALTER TABLE public.{table} ADD CONSTRAINT {name} PRIMARY KEY ({columns})")
     for table, name, columns in UNIQUE_CONSTRAINTS:
-        op.execute("-- squawk-ignore disallowed-unique-constraint\n"
+        op.execute("-- squawk-ignore disallowed-unique-constraint,constraint-missing-not-valid\n"
                    f"ALTER TABLE public.{table} ADD CONSTRAINT {name} UNIQUE ({columns})")
     for table, name, unique, columns, predicate in INDEXES:
         op.execute(
@@ -622,12 +624,13 @@ def upgrade() -> None:
 
     for table, name, columns, target, target_columns in FOREIGN_KEYS:
         op.execute(
-            "-- squawk-ignore constraint-missing-not-valid\n"
+            "-- squawk-ignore constraint-missing-not-valid,adding-foreign-key-constraint\n"
             f"ALTER TABLE public.{table} ADD CONSTRAINT {name} FOREIGN KEY ({columns}) "
             f"REFERENCES public.{target} ({target_columns}) ON DELETE RESTRICT"
         )
 
-    op.execute("DROP FUNCTION public.guard_database_realm()")
+    op.execute("-- squawk-ignore ban-drop-function\n"
+               "DROP FUNCTION public.guard_database_realm()")
     _assert_end_state(before)
 
 
