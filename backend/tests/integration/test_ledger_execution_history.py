@@ -65,7 +65,8 @@ OTHER_ACCOUNT = UUID("aaaaaaaa-bbbb-4ccc-8ddd-0000000000ff")
 
 
 async def _plant_archive(
-    book: Book, *events: tuple[str, int], account: UUID | None = None
+    book: Book, *events: tuple[str, int], account: UUID | None = None,
+    environment: str = ENVIRONMENT,
 ) -> None:
     """Pre-switch ``event_log`` rows ``(event_type, occurred_at_ms)`` of SCOPE's account (or
     ``account``'s), planted in the frozen archive opened on this clone. The archive keeps its
@@ -78,7 +79,7 @@ async def _plant_archive(
                 "deployment_environment, event_type, venue_offer_id, cid, payload, occurred_at_ms) "
                 "VALUES ('account', :account, :environment, :etype, 'legacy-1', 7, :payload, :at)"
             ), {
-                "account": account or SCOPE.exchange_account_id, "environment": ENVIRONMENT,
+                "account": account or SCOPE.exchange_account_id, "environment": environment,
                 "etype": etype,
                 "payload": json.dumps({"symbol": "fUST", "amount": "50", "fill_rate": 0.0002}),
                 "at": at,
@@ -331,7 +332,10 @@ async def test_the_web_api_cannot_read_the_credit_history_payload(book) -> None:
 async def _archive_client(book: Book, monkeypatch: pytest.MonkeyPatch) -> httpx.AsyncClient:
     """SCOPE's four archived events and another account's fill, served by the archive alone."""
     await _plant_archive(book, ("RESERVATION_INTENT", 10_000), ("RESERVATION_CLAIMED", 10_001),
-                         ("ORDER_FILL", 10_002), ("CREDIT_CLOSED", 10_003))
+                         ("ORDER_FILL", 10_002))
+    # The read does not filter on the archive's realm column: a row carrying another value
+    # (the migration refuses a database that holds one) is served like the rest.
+    await _plant_archive(book, ("CREDIT_CLOSED", 10_003), environment="prod")
     async with book.factory.begin() as session:
         session.add(ExchangeAccount(id=OTHER_ACCOUNT, venue="bitfinex", label="other"))
     await _plant_archive(book, ("ORDER_FILL", 99_999), account=OTHER_ACCOUNT)

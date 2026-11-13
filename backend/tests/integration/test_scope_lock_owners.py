@@ -104,7 +104,7 @@ async def test_an_owner_amendment_waits_for_the_account_writer(migrated_db) -> N
         async with factory.begin() as session:
             return await amend_capital_policy(
                 session, store=policy.store, scope_lock=policy.scope_lock, symbol="fUST",
-                changes=PolicyChanges(enabled=False), apply_digest=None)
+                changes=PolicyChanges(enabled=False), apply_digest=None, realm=None)
 
     report = await _waits_behind_the_scope_lock(factory, scope, amend)
     assert report["status"] == "dry_run"

@@ -1,7 +1,7 @@
 """The deployment environment is read by assembly points only (plan 2026-11-08, D4).
 
-``core/settings.py`` owns the two readers; ``apps`` and each script's ``main`` call them
-once and pass the value down. ``modules`` and the rest of ``core`` neither name the
+``core/settings.py`` owns the two readers; the bot's and the web API's assembly call them
+once and pass the value down (D7: the stamp check and telemetry labels are its only uses). ``modules`` and the rest of ``core`` neither name the
 variable nor call a reader, so no code path can pick up a second, different value.
 
 Mutation check: call ``require_deployment_environment()`` again in

@@ -94,7 +94,8 @@ async def _amend(stack: Stack, changes: PolicyChanges, *,
     async with stack.factory() as session:
         report = await amend_capital_policy(session, store=build_policy_store(SCOPE),
                                             scope_lock=stack.lock,
-                                            symbol="fUST", changes=changes, apply_digest=digest)
+                                            symbol="fUST", changes=changes, apply_digest=digest,
+                                            realm=None)
         if report["status"] == "applied":
             await session.commit()
         else:

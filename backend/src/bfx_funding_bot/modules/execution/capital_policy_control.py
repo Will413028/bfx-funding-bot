@@ -89,13 +89,13 @@ class CapitalPolicyRequestWorker(OperatorRequestWorker[CapitalPolicyRequestRow, 
         try:
             report = await amend_capital_policy(session, store=self.policy_store,
                                                 scope_lock=self.scope_lock, symbol=row.symbol,
-                                                changes=changes, apply_digest=None)
+                                                changes=changes, apply_digest=None, realm=None)
             if report["status"] == "unchanged":
                 return Outcome(APPLIED, f"unchanged: already {'enabled' if enabled else 'disabled'}")
             written = await amend_capital_policy(
                 session, store=self.policy_store, scope_lock=self.scope_lock, symbol=row.symbol,
                 changes=changes,
-                apply_digest=report["amendment_digest"],
+                apply_digest=report["amendment_digest"], realm=None,
                 operator_request_id=row.request_id)
         except PolicyRefused as exc:
             code = str(exc)

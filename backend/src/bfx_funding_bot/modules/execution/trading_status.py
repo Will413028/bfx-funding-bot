@@ -158,7 +158,7 @@ class TradingStatusService:
 
     # ---------------------------------------------------------------- status
 
-    def _authority_scope(self) -> dict[str, str | None]:
+    def _authority_scope(self) -> dict[str, str]:
         # The account is the one actually supplying capital, not a phase label.
         return {"account_id": str(self._exposure.scope.exchange_account_id)}
 
