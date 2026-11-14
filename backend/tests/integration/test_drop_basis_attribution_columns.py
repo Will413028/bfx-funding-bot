@@ -7,9 +7,11 @@ CHECK under its name, and leaves the web API reading the same columns less the d
 
 Mutations (each in a copy of the migration; the named test fails):
 
-* do not rebuild ``ck_accepted_basis_symbol_amount``:
-  ``test_the_amount_check_still_refuses_a_negative_amount`` (and the migration's own end
-  assertion);
+* rebuild ``ck_accepted_basis_symbol_amount`` without one of its four terms:
+  ``test_the_amount_check_still_refuses_a_negative_amount`` for that column;
+* do not rebuild it at all: the same test, at setup (the migration's own end assertion);
+* drop the function-body assertion:
+  ``test_a_function_that_reads_a_dropped_column_refuses_the_upgrade``;
 * skip one ``DROP COLUMN``: ``test_the_upgrade_keeps_the_rows_and_drops_both_columns`` (and the
   migration's own end assertion).
 """
@@ -102,7 +104,26 @@ def test_the_upgrade_keeps_the_rows_and_drops_both_columns(before: tuple[str, En
             "WHERE conname = 'ck_accepted_basis_symbol_amount'")) == (
             "CHECK (((available >= (0)::numeric) AND (offered >= (0)::numeric) AND "
             "(credits >= (0)::numeric) AND (foreign_offers >= (0)::numeric)))")
+    # ``check`` compares against head, whatever revision comes after this one.
+    alembic(url, "upgrade", "head")
     alembic(url, "check")
+
+
+def test_a_function_that_reads_a_dropped_column_refuses_the_upgrade(
+        before: tuple[str, Engine]) -> None:
+    url, engine = before
+    with engine.begin() as conn:
+        conn.exec_driver_sql(
+            "CREATE FUNCTION public.reads_attribution() RETURNS numeric LANGUAGE plpgsql AS "
+            f"$$ BEGIN RETURN (SELECT sum(unattributed_credits) FROM {_SYMBOL}); END $$")
+
+    with pytest.raises(RuntimeError, match=r"functions still read a dropped column: "
+                                           r"public\.reads_attribution"):
+        alembic(url, "upgrade", _REVISION)
+
+    with engine.connect() as conn:
+        assert conn.scalar(text("SELECT version_num FROM alembic_version")) == _BEFORE
+        assert _DROPPED[_SYMBOL] in _columns(conn, _SYMBOL)
 
 
 @pytest.mark.parametrize("column", ["available", "offered", "credits", "foreign_offers"])

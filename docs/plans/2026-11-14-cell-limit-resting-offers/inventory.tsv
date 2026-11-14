@@ -12,14 +12,14 @@ B10	backend/src/bfx_funding_bot/modules/ledger/_internal/basis.py:428-450	trade�
 B11	backend/src/bfx_funding_bot/modules/ledger/_internal/basis.py:465-471	credit 金額加進 values.credits；沒有 owner 的加進 values.unattributed；有 owner 的加進每個 owner cell 的 cells	改寫：只加進 values.credits；cells 只由 368-369 行（掛著的受管 offer 的剩餘金額）累計	2
 B12	backend/src/bfx_funding_bot/modules/ledger/_internal/basis.py:84-103	_Symbol.unattributed、_Credit.attribution、_Credit.cells	刪除：_Symbol.unattributed 與 _Credit 的兩個欄位；資料表欄位的寫入值見 B14、B15	2
 B13	backend/src/bfx_funding_bot/modules/ledger/_internal/basis.py:580-622	canonical payload（digest 的輸入）：symbols 列含 unattributed，credits 列含 attribution 與 cell 集合	改寫：v2 payload 的 symbols 列不含 unattributed、credits 列不含 attribution 與 cell 集合。digest 沒有驗證者（P9），保留是因為欄位在 insert-once 表上且 NOT NULL；補不補重算檢查列在計畫的延後	2
-B14	backend/src/bfx_funding_bot/modules/ledger/_internal/basis.py:510	寫 accepted_capital_basis_symbol.unattributed_credits（步驟 2 起是過渡值）	改寫：步驟 2 寫過渡值（等於 credits）；步驟 3 連欄位一起刪掉這個寫入（D1）	2,3
-B15	backend/src/bfx_funding_bot/modules/ledger/_internal/basis.py:530	寫 accepted_capital_basis_credit.attribution_basis（步驟 2 起是過渡值）	改寫：步驟 2 寫過渡值（固定 'unattributed'）；步驟 3 連欄位一起刪掉這個寫入（D1）	2,3
+B14	backend/src/bfx_funding_bot/modules/ledger/_internal/basis.py:517	寫 accepted_capital_basis_symbol.unattributed_credits（步驟 2 起是過渡值）	改寫：步驟 2 寫過渡值（等於 credits）；步驟 3 連欄位一起刪掉這個寫入（D1）	2,3
+B15	backend/src/bfx_funding_bot/modules/ledger/_internal/basis.py:541	寫 accepted_capital_basis_credit.attribution_basis（步驟 2 起是過渡值）	改寫：步驟 2 寫過渡值（固定 'unattributed'）；步驟 3 連欄位一起刪掉這個寫入（D1）	2,3
 B16	backend/src/bfx_funding_bot/modules/ledger/_internal/basis.py:684-693	寫 accepted_capital_basis_credit_cell 列	刪除：新 basis 不再寫入；表與既有列保留（ADR Decision 3）	2
 B17	backend/src/bfx_funding_bot/modules/ledger/_internal/basis.py:718-727	_trades_cover	保留：_can_quarantine（745 行）仍使用	2
 B18	backend/src/bfx_funding_bot/modules/ledger/_internal/basis.py:1-18	module docstring 寫「Ports legacy _classify / _attribute_credits」	改寫：拿掉歸屬的敘述	2
 O01	backend/src/bfx_funding_bot/modules/execution/venue_observation.py:317-325	還沒有任何已接受的觀測時，trades 的查詢起點往回推到每一筆 active credit 的 opening	刪除：只為了讓第一份 basis 能用 trades 歸屬既有 credit；第一份 basis 的 conservation 是 baseline，不看 trades（conservation_facts.py:117-118）	2
-T01	backend/src/bfx_funding_bot/modules/ledger/tables.py:884,905-908	accepted_capital_basis_symbol.unattributed_credits 欄與 CHECK（<= credits）	刪除：欄位以 migration 刪掉；CHECK 由 migration 先以名稱刪除，再以原名重建成不含該欄的式子（D1）	3
-T02	backend/src/bfx_funding_bot/modules/ledger/tables.py:935	accepted_capital_basis_credit.attribution_basis 欄與 CHECK（四個值）	刪除：欄位以 migration 刪掉；CHECK 由 migration 先以名稱刪除，不重建（D1）	3
+T01	backend/src/bfx_funding_bot/modules/ledger/tables.py:895,906-909	accepted_capital_basis_symbol.unattributed_credits 欄與 CHECK（<= credits）	刪除：欄位以 migration 刪掉；CHECK 由 migration 先以名稱刪除，再以原名重建成不含該欄的式子（D1）	3
+T02	backend/src/bfx_funding_bot/modules/ledger/tables.py:950,954-957	accepted_capital_basis_credit.attribution_basis 欄與 CHECK（四個值）	刪除：欄位以 migration 刪掉；CHECK 由 migration 先以名稱刪除，不重建（D1）	3
 T03	backend/src/bfx_funding_bot/modules/ledger/tables.py:924-934	accepted_capital_basis_cell 表	保留：內容變成只有掛單中的金額	2
 T04	backend/src/bfx_funding_bot/modules/ledger/tables.py:968-985,1045	accepted_capital_basis_credit_cell 表與 ORM class	保留：留表與歷史列，不再寫入；ORM class 留著（LEDGER_TABLES、ledger_digest 與既有 migration 的清單仍列這張表）	2
 R01	backend/src/bfx_funding_bot/modules/ledger/_internal/capital_reader.py:276,288-294,383	讀 symbol 列的 unattributed_credits 與 accepted_capital_basis_cell 列，組成 SymbolCapital	改寫：不再讀 unattributed_credits；cell 列的讀法不變	1

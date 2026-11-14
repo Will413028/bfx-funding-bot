@@ -351,8 +351,11 @@ def test_round_trip_drops_and_restores_the_objects(reversible_ledger_db) -> None
         alembic(url, "downgrade", _PREVIOUS)
         with engine.connect() as conn:
             assert _objects(conn) == dict.fromkeys(("column", "check", "index", "grant"), False)
-            # Every granted column is revoked, not just the first table's.
-            for table, columns in ALLOWED.items():
+            # Every granted column is revoked, not just the first table's. This revision still
+            # has the column dc9d9290c2c0 dropped, and c9d0e1f2a3b5 granted it.
+            granted_before = {**ALLOWED, "accepted_capital_basis_symbol":
+                              ALLOWED["accepted_capital_basis_symbol"] | {"unattributed_credits"}}
+            for table, columns in granted_before.items():
                 for column in columns & set(_columns(conn, table)):
                     assert not conn.scalar(
                         text("SELECT has_column_privilege('bfx_webapi', :t, :c, 'SELECT')"),
