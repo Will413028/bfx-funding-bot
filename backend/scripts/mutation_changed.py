@@ -163,14 +163,14 @@ def judge(source: Path, functions: Sequence[str], out_dir: Path, jobs: int,
         return Judged(source, tuple(functions), tests, skipped=reason)
     not_run = set(report["not_reached"])     # the matrix counts these as survived
     survived = tuple(mutant for mutant in report["survived"] if mutant not in not_run)
-    if not_run and len(not_run) == int(report["mutants"]):
+    unjudged = len(report["timed_out"]) + len(report["crashed"])    # not counted in "mutants"
+    if not_run and len(not_run) == int(report["mutants"]) and not unjudged:
         return Judged(source, tuple(report["functions"]), tests, not_run=len(not_run),
                       skipped=f"the unit tests under {tests} run none of these functions "
                               "(an integration test may)")
     return Judged(source, tuple(report["functions"]), tests, survived,
                   int(report["killed"]), int(report["mutants"]) - len(not_run),
-                  diffs=dict(report["survivor_diffs"]), not_run=len(not_run),
-                  unjudged=len(report["timed_out"]) + len(report["crashed"]))
+                  diffs=dict(report["survivor_diffs"]), not_run=len(not_run), unjudged=unjudged)
 
 
 def _cell(text: str) -> str:
@@ -228,7 +228,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--budget-seconds", type=float, default=900.0,
                         help="start no further file once this much time has passed (default 900)")
     parser.add_argument("--max-mutants", type=int, default=400,
-                        help="do not judge a file whose changed functions have more mutants (default 400)")
+                        help="do not judge a file with more mutants to run than this (default 400)")
     args = parser.parse_args(argv)
     out_dir = args.out_dir or args.summary.parent
     out_dir.mkdir(parents=True, exist_ok=True)

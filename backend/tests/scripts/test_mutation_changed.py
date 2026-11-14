@@ -253,3 +253,7 @@ def test_a_mutant_no_unit_test_runs_is_not_a_survivor(tmp_path: Path, monkeypatc
     assert none.survived == () and none.not_run == 2
     assert none.skipped == ("the unit tests under backend/tests/modules/trading run none of these functions "
                             "(an integration test may)")
+    # A reached mutant that timed out was run: the source is judged, with nothing killed.
+    report.update(timed_out=["m.x_f__mutmut_9"])
+    hung = changed.judge(source, ["f", "g"], tmp_path, 2)
+    assert (hung.skipped, hung.mutants, hung.unjudged, hung.not_run) == ("", 0, 1, 2)
