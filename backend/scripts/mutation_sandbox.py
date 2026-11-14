@@ -41,13 +41,21 @@ def copy_repository(copy: Path) -> None:
 
 
 def pytest(copy: Path, args: Sequence[str], *, env: Mapping[str, str] | None = None,
-           timeout: float) -> subprocess.CompletedProcess[str] | None:
-    """Run pytest from the copy's ``backend/`` (no cache, no bytecode); None on timeout."""
+           timeout: float, bytecode: bool = False) -> subprocess.CompletedProcess[str] | None:
+    """Run pytest from the copy's ``backend/`` (no pytest cache); None on timeout.
+
+    No bytecode unless ``bytecode``: a tool that rewrites a source between runs (the capital
+    gate) must not meet the ``.pyc`` of the text it replaced, which Python keeps when the size
+    and the second of the modification time are the same. A tool whose sources stay as they
+    are for every run (the kill matrix: mutmut switches mutants by an environment variable)
+    passes ``bytecode=True`` and compiles the copy once instead of once per run.
+    """
     command = [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", *args]
+    cache = {"PYTHONDONTWRITEBYTECODE": ""} if bytecode else {"PYTHONDONTWRITEBYTECODE": "1"}
     try:
         return subprocess.run(
             command, cwd=copy / "backend",
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", **(env or {})},
+            env={**os.environ, **cache, **(env or {})},
             capture_output=True, text=True, timeout=timeout, check=False,
         )
     except subprocess.TimeoutExpired:

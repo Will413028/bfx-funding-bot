@@ -121,7 +121,7 @@ class Credit:
     flags: JsonObject | int | None
     mts_created: int | None
     mts_updated: int | None
-    mts_opening: int  # the venue's trade instant; required (carry key)
+    mts_opening: int  # the venue's trade instant; required
     raw: JsonObject
 
 
@@ -363,7 +363,6 @@ class ObservationWindow:
     """
 
     earliest_attempt_started_at_ms: int | None
-    previous_query_started_at_ms: int | None
     history_start_ms: int | None
     # Symbols of the anchor attempts: the port must fetch their history even
     # when no wallet or credit names them.
@@ -922,9 +921,6 @@ class CapitalAvailable:
     applied: AppliedPolicy
     snapshot: CapitalSnapshot
     budget: CapitalBudget
-    # Diagnostic: credits with no cell provenance. Part of total_capital, never
-    # of snapshot.cell_exposure.
-    unattributed_credit_exposure: Decimal
     basis_token: str
     attribution: Mapping[str, object] | None = None
 
@@ -1011,16 +1007,13 @@ class UncertaintyView:
 class PositionView:
     """One symbol's capital split into disjoint components, in the symbol's own units.
 
-    ``available + offered + lent`` is the symbol's total. ``unattributed_lent`` is a
-    SUBSET of ``lent`` (credits no managed attempt owns), never an addend; None when
-    the authority has no such fact.
+    ``available + offered + lent`` is the symbol's total.
     """
 
     symbol: str
     available: Decimal
     offered: Decimal
     lent: Decimal
-    unattributed_lent: Decimal | None
     n_credits: int | None
     last_updated_ms: int
     last_reconciled_at_ms: int | None

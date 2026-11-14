@@ -1,0 +1,61 @@
+name: Mutation report
+
+# Which mutants of the functions a pull request touched survive its unit tests
+# (backend/scripts/mutation_changed.py). A report in the job summary, not a gate: this
+# workflow is not in the required checks, and the script exits 0 whatever survives.
+# A separate workflow on purpose: release.yml publishes only after the workflow named "CI".
+
+on:
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - backend/src/bfx_funding_bot/**/*.py
+      - backend/scripts/mutation_changed.py
+      - backend/scripts/mutation_kill_matrix.py
+      - backend/scripts/mutation_kill_matrix_stats.py
+      - backend/scripts/mutation_sandbox.py
+      - .github/workflows/mutation-changed.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  report:
+    name: Mutation report (changed functions)
+    # A dev→main release PR carries changes already reported on their own pull requests.
+    if: github.head_ref != 'dev'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      BFX_DEPLOYMENT_ENV: ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2  # the PR merge commit and its base parent
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.12.23"
+          # sha256 of uv-x86_64-unknown-linux-gnu.tar.gz (all these jobs run on x64).
+          checksum: "9167d72b3319674b6303c4cbe071854bba13ebdf3d76b1a7cbdc175471fb66d6"
+          enable-cache: true
+      - run: uv sync --all-groups
+      # The checkout is the merge commit; its first parent is the base.
+      - name: Mutation report
+        run: >-
+          uv run python -m scripts.mutation_changed --base HEAD^1
+          --summary "$GITHUB_STEP_SUMMARY" --out-dir "$RUNNER_TEMP/mutation"
+          --jobs "$(nproc)" --budget-seconds 900
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: mutation-changed
+          path: ${{ runner.temp }}/mutation
+          if-no-files-found: ignore

@@ -26,7 +26,6 @@ async def test_budget_of_a_simple_snapshot(port_stack) -> None:
     assert read.snapshot.total_capital == Decimal("1000")
     assert read.budget.spendable == Decimal("900")  # 1000 less the 100 reserve
     assert read.applied.revision == 1 and read.applied.symbol == "fUST"
-    assert read.unattributed_credit_exposure == 0
     assert read.basis_token  # opaque (its prefix: below)
 
 

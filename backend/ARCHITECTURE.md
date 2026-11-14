@@ -264,7 +264,7 @@ ledger 是唯一的 capital authority（S1-8）。`capital_authority_epoch` 仍�
 `CapitalPolicy`、完整且 fresh 的 canonical venue snapshot 與未反映 commitments；
 `CapitalBudget`（`modules/trading`）共用 Decimal authority，planner、guard、command
 boundary、status 不各自重算 cap。帳戶 spendable 扣除 reserve 與 commitments；
-cell_limit 為 `max(0, total_capital - reserve) ×0.70`，cell_headroom 扣除該 cell 的歸屬曝險（offers、未反映 commitments 與歸屬該 cell 的 active credits）；無法歸屬的 credits 只計入 total_capital，不計入任何 cell，單筆上限取
+cell_limit 為 `max(0, total_capital - reserve) ×0.70`，cell_headroom 扣除該 cell 的曝險（掛著的受管 offers 的剩餘金額與未反映 commitments）；已借出的 credits 只計入 total_capital，不計入任何 cell（`docs/adr/2026-11-14-cell-limit-bounds-resting-offers-not-lent-stock.md`），單筆上限取
 spendable/headroom 的最小值。只有一個 active cell 也不放寬為100%。USD 明確
 disabled，但所有 USD wallet/offers/credits 仍納入 full-account reconciliation。
 未知/過期 snapshot、pending query、缺少 policy 全部 block，無 env/YAML fallback。
@@ -278,7 +278,7 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 全部在一個 REPEATABLE READ READ ONLY transaction 內讀。
 
 讀取能只看尾端，是因為歷史判斷在 **acceptance** 就做完並存在 basis：每筆被考慮的 attempt 的分類
-（`reflected`／`settled`／`quarantined`／`unresolved`，`accepted_capital_basis_attempt`）、credit 的 cell 歸屬、
+（`reflected`／`settled`／`quarantined`／`unresolved`，`accepted_capital_basis_attempt`）、
 每 symbol 的 conservation verdict，以及無法歸屬的事實（每 symbol 的 `block`，綁不到 symbol 的進
 `scope_block`）。acceptance 遇到這類事實時**記錄 block 而非拒絕觀測**，讀取以同一個原因 fail closed；
 拒絕記錄觀測會連帶擋掉「解開該狀態所需的觀測」，會死鎖自己的復原。
@@ -337,7 +337,7 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 
 - **rate 慢、idle cost 連續**：策略 rate（EMA / percentile window）算起來「慢」且對 1h 尺度才有意義，但閒置資金每秒都在損失機會成本。把 rate 凍結成 ~65min TTL 的 standing quote，讓資金分配能以 90s 高頻運作而不必每次重算訊號。TTL 確保 rate regime 變動後過期的 quote 不會繼續部署。
 - **greedy emptiest-first**：固定70% cell limit，不因只有一個 active cell 而放寬。各 cell 共用 account spendable，不能把各自 max_new_offer 加總當成帳戶權限。
-- **cell exposure 只算可歸屬的部分**：funding credit 不帶 client id，venue 的 credit 不一定能歸屬到 cell。`CapitalSnapshot.cell_exposure` 取自已接受 basis 的 per-cell 總量（`SymbolCapital.cells`，含已歸屬的 credit），再加上該 cell 尚未被 basis 反映的 attempt；無法歸屬的 credit（`unattributed_credits`）只計入 C 與 total capital，不算進任何 cell，因此不會吃掉某個 cell 的 headroom；但它計入 total capital，所以會按固定比例放大每個 cell 的 limit 金額（`cell_limit=max(0,T-R)*0.70`）（`modules/trading/capital.py`、`evaluate_capital`）。
+- **cell exposure 只算掛單中的金額**：funding credit 不帶 client id，venue 沒有 credit 到 offer 的直接連結，所以 credit 不歸屬到 cell（ADR `docs/adr/2026-11-14-cell-limit-bounds-resting-offers-not-lent-stock.md`）。`CapitalSnapshot.cell_exposure` 取自已接受 basis 的 per-cell 總量（`SymbolCapital.cells`＝該 cell 掛著的受管 offers 的剩餘金額，加總等於 O），再加上該 cell 尚未被 basis 反映的 attempt；已借出的 credit 只計入 C 與 total capital，不吃任何 cell 的 headroom，但會按固定比例放大每個 cell 的 limit 金額（`cell_limit=max(0,T-R)*0.70`），所以 cell limit 的意思是「一個 cell 同一時間最多能掛多少」（`modules/trading/capital.py`、`modules/trading/policy.py` 的 `evaluate_capital`）。各 cell 的 `cell_exposure` 同值時（例如錢全借出、沒有任何掛單），`allocate_capital` 依 cell id 排序分配，名稱在前的 cell 先拿到 `min(spendable, cell_headroom)`（`modules/execution/deployment/sizing.py`；已接受的固定偏向）。
 
 **參數總覽**
 
@@ -498,7 +498,9 @@ quarantine_opening / quarantine_member
 accepted_capital_basis (每個 accepted observation 一列，同 txn 寫入)
   PK id; observation_id UNIQUE; accept_revision, attempt_seq_high_water, scope_block, digest
   + accepted_capital_basis_symbol（含 block 與 conservation verdict）/ _cell / _credit /
-    _credit_cell / _attempt（classification）/ _quarantine
+    _credit_cell（歷史表：新 basis 不寫入、授權讀取不讀，只有還原驗證的 digest 涵蓋）/ _attempt（classification）/ _quarantine
+  _symbol.unattributed_credits 與 _credit.attribution_basis：欄位仍在、授權讀取／API 不讀，新 basis 寫過渡值
+  （等於 credits、固定 'unattributed'），下一次發版以 migration 刪除
 
 uncertainty_resolution_requests (CLI→daemon 裁決請求；bfx_operator 只 INSERT 請求欄位，webapi 只讀)
   request_id, scope, uncertainty_id, action, observation_id, venue_offer_id, decision,
@@ -869,7 +871,7 @@ credential vault 解密。公開站（I-PUB）不經 webapi：`bfx-public-site` 
 
 - **I-SW 單一寫入者曝險**：`DeploymentReconciler` 是 venue 提交的唯一寫入者；訊號層只寫 StandingQuote。每個 scope 的 ledger 寫入都持有 scope 的 transaction advisory lock；attempt、outcome、resolution、cancel 與 quarantine 的寫入推進同一個 command clock，query 只記下起始 revision、acceptance 只在 clock 未前進時成立（兩者都不推進 clock）；送單授權以 basis token 對 clock 做 CAS，不靠 in-memory 狀態。
 - **I-VTA venue 即真相**：venue 事實只來自被接受的觀測：不帶 symbol filter 的 wallets、offers、credits／loans、history 與 trades，加上一次時間上不重疊、digest 相同的 active confirmation，且這期間 scope 的 query 與 command clock 都沒動。WS 只產生 venue hint；90s cycle 保證收斂。
-- **I-CAP canonical capital authority**：每 account/symbol 獨立計算。A=venue available，L=尚未證明反映於 snapshot 的 durable commitments，R=applied reserve，T=canonical available+offers+lent（去重），E_cell=該 cell 的 offers + unreflected commitments + 歸屬該 cell 的 active credits。credit 的歸屬在觀測接受時決定並寫進 basis（`accepted_capital_basis_credit_cell`），authorization read 只查表、不問 venue（`ledger/_internal/basis.py`）：以 (symbol, period, MTS_OPENING) 分組 active credits/loans（rate 精度與 trade 不同，loan 會轉成新 id／拆分金額的 credits，但 MTS_OPENING 不變）：(1) **trade**——該觀測自己的 funding trades 中 MTS_CREATE 等於該 opening（同 symbol/period）者，OFFER_ID → provenance → attempt 的 cell，組內每筆都計入所有這些 cell；(2) **carry**——上一個 accepted basis 已歸屬的同一組沿用（按組而非 id）；(3) **recent fill**——尚無 trade 也無 carry 的新 credit，歸給本觀測可見、可能產生它的我方成交（同 symbol、金額 ≤ 成交量、offer 建立不晚於 opening），候選有多個 cell 就每個都計入。新 opening 沒有 trades 涵蓋時該 symbol 以 `trades_range_uncovered` block。都不成立的是 unattributed credits（U）：只在 T 算一次、不計入任何 cell；外來 offer（D2）不進 T 也不進 E_cell；未知 attribution 不捏造 ownership。
+- **I-CAP canonical capital authority**：每 account/symbol 獨立計算。A=venue available，L=尚未證明反映於 snapshot 的 durable commitments，R=applied reserve，T=canonical available+offers+lent（去重），E_cell=該 cell 掛著的受管 offers 的剩餘金額 + unreflected commitments。active credits/loans 只計入該 symbol 的 C 與 T，不歸屬到任何 cell（ADR `docs/adr/2026-11-14-cell-limit-bounds-resting-offers-not-lent-stock.md`）；per-cell 金額在觀測接受時寫進 basis（`accepted_capital_basis_cell`），authorization read 只查表、不問 venue（`ledger/_internal/basis.py`）。`accepted_capital_basis_credit_cell` 是留著的歷史表，新 basis 不寫入；symbol 表的 `unattributed_credits` 與 credit 表的 `attribution_basis` 仍在、寫過渡值、授權讀取與 API 不讀，下一次發版刪除。外來 offer（D2）不進 T 也不進 E_cell；未知 ownership 不捏造。
 - **I-SP spendable**：`spendable=max(0,A-L-R)`；每 tick 多 cells 共用此 pool。planner、command admission、status 共用 evaluator；command gate 在 scope lock 與同一 transaction 內以 CAS 重驗 query、clock、basis 與 policy head、重算預算並跑 guard，才 insert attempt；授權不讀任何 in-memory 狀態。
 - **I-CC concentration**：`cell_limit=max(0,T-R)*0.70`，`cell_headroom=max(0,cell_limit-E_cell)`，`new_offer_amount≤min(spendable,cell_headroom)`；單一 active cell 也固定70%。reserve 增加或資金下降不召回貸款，只阻擋超限新單。金額向下量化並通過 adapter minimum/precision；不足 minimum 就 block，不增加金額跨越 headroom。
 - **歷史／simulation 說明**：舊 `allocate_gap`（已刪除）、reserved-only tracker rescale、固定 cap 與153 dust threshold 不是 live authority；`0d29fc8` 的單 active cell100% relaxation 已移除。相關歷史及 G3 未通過結果保留，不作新命令授權。

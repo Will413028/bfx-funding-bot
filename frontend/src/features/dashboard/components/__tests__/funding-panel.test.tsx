@@ -31,7 +31,6 @@ const status = {
       unreflected_commitments: "20.000000001",
       total_capital: "9007199254741000",
       spendable: "9007199254740973.123456787",
-      unattributed_credit_exposure: "0",
       cells: {
         fUST_a30: {
           spendable: "9007199254740973.123456787",

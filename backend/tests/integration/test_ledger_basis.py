@@ -1,27 +1,27 @@
 """S1-2b-2 capital basis classification on a clone PostgreSQL database.
 
-Parity with ``test_capital_repository.py`` (legacy ``_classify`` /
-``_attribute_credits``), rebuilt on the journals and observation store.
+Parity with ``test_capital_repository.py`` (legacy ``_classify``), rebuilt on the
+journals and observation store. A cell holds the remaining amount of its resting
+managed offers only; lent credits count in the symbol, in no cell
+(docs/adr/2026-11-14-cell-limit-bounds-resting-offers-not-lent-stock.md).
 
-Mutations (apply one at a time in ``modules/ledger/_internal/basis.py``, run
-this file, revert):
+Mutations, each applied alone to a copy of ``modules/ledger/_internal/basis.py`` with
+this file run from the copy (the working tree is never edited). The first is automated as
+M19 of ``scripts/capital_mutation_gate.py``; the others are listed by what they break:
 
-M1. Attribute a foreign trade's credit by amount to a same-amount fill:
-    ``test_funding_trade_naming_a_foreign_offer_leaves_the_credit_unattributed``.
-M2. Charge the original instead of the remaining offer amount:
-    ``test_partial_fill_charges_remaining_offer_plus_lent_amount``.
-M3. Drop the (symbol, period, opening) carry:
-    ``test_loan_turning_into_split_credits_stays_in_its_cell``.
-M4. Load every historical attempt: ``test_basis_work_does_not_grow_with_history``.
-M5. Count unattributed credits into a cell: ``test_u_counts_once_in_total_and_in_no_cell``.
-M6. Treat an offer without provenance as managed:
-    ``test_foreign_offer_is_counted_out_of_managed_exposure``.
-M7. Remove the high-water bound: ``test_basis_work_does_not_grow_with_history``.
-M8. Remove the offer amount-conflict check: ``test_amount_mismatch_and_unaccounted_ack_block``.
-R2. Read ``funding_trades`` instead of the observation's trades:
-    ``test_only_observed_trades_attribute_credits``.
-R7. Block the whole scope for a symbol-level fact:
-    ``test_provenance_conflict_blocks_only_its_symbol``.
+* count a lent credit into a cell:
+  ``test_lent_credit_counts_in_the_symbol_and_in_no_cell``.
+* charge the original instead of the remaining offer amount:
+  ``test_partial_fill_leaves_only_the_resting_remainder_in_the_cell``.
+* load every historical attempt, or remove the high-water bound:
+  ``test_basis_work_does_not_grow_with_history``.
+* treat an offer without provenance as managed:
+  ``test_foreign_offer_is_counted_out_of_managed_exposure``.
+* remove the offer amount-conflict check: ``test_amount_mismatch_and_unaccounted_ack_block``.
+* drop the provenance check of ended offers:
+  ``test_an_ended_offer_with_contradictory_provenance_blocks_its_symbol``.
+* block the whole scope for a symbol-level fact (R7):
+  ``test_provenance_conflict_blocks_only_its_symbol``.
 """
 
 from __future__ import annotations
@@ -181,7 +181,8 @@ class Basis:
     row: AcceptedCapitalBasisRow
     symbols: dict[str, AcceptedCapitalBasisSymbolRow]
     cells: dict[str, Decimal]
-    credits: dict[str, tuple[str, list[str]]]
+    credits: dict[str, Decimal]
+    credit_cells: int
     attempts: dict[UUID, tuple[str, str]]
 
     def reasons(self, symbol: str = "fUST") -> list[str]:
@@ -248,21 +249,19 @@ class Ledger:
                     )
                 )
             }
-            owners: dict[str, list[str]] = {}
-            for cell in await session.scalars(
-                select(AcceptedCapitalBasisCreditCellRow).where(
-                    AcceptedCapitalBasisCreditCellRow.basis_id == row.id
-                )
-            ):
-                owners.setdefault(cell.venue_credit_id, []).append(cell.cell_id)
             credits = {
-                c.venue_credit_id: (c.attribution_basis, sorted(owners.get(c.venue_credit_id, [])))
+                c.venue_credit_id: c.amount
                 for c in await session.scalars(
                     select(AcceptedCapitalBasisCreditRow).where(
                         AcceptedCapitalBasisCreditRow.basis_id == row.id
                     )
                 )
             }
+            credit_cells = await session.scalar(
+                select(func.count())
+                .select_from(AcceptedCapitalBasisCreditCellRow)
+                .where(AcceptedCapitalBasisCreditCellRow.basis_id == row.id)
+            )
             attempts = {
                 a.attempt_id: (a.symbol, a.classification)
                 for a in await session.scalars(
@@ -271,7 +270,7 @@ class Ledger:
                     )
                 )
             }
-        return Basis(row, symbols, cells, credits, attempts)
+        return Basis(row, symbols, cells, credits, credit_cells, attempts)
 
     async def attempt(
         self,
@@ -387,14 +386,15 @@ async def test_no_policy_head_does_not_stop_acceptance(ledger) -> None:
     assert heads == 0
     basis = await ledger.accept(_observation("700"))
     assert not basis.blocked
-    assert basis.row.schema_version == 1
+    assert basis.row.schema_version == 2
     assert basis.symbols["fUST"].available == Decimal("700")
     assert basis.row.attempt_seq_high_water == 0
     assert len(basis.row.digest) == 64
 
 
 @pytest.mark.asyncio
-async def test_u_counts_once_in_total_and_in_no_cell(ledger) -> None:
+async def test_lent_credit_counts_in_the_symbol_and_in_no_cell(ledger) -> None:
+    """A cell with an offer resting and money lent holds the offer's remainder only."""
     await ledger.accept(_observation())
     await ledger.attempt(amount="100", venue_offer_id="101")
     basis = await ledger.accept(
@@ -405,14 +405,15 @@ async def test_u_counts_once_in_total_and_in_no_cell(ledger) -> None:
         )
     )
     fust = basis.symbols["fUST"]
-    assert (fust.credits, fust.unattributed_credits) == (Decimal("300"), Decimal("300"))
-    assert basis.credits == {"c1": ("unattributed", [])}
-    assert basis.cells == {"a30": Decimal("100")}  # the offer only, never U
+    assert (fust.offered, fust.credits) == (Decimal("100"), Decimal("300"))
+    assert basis.credits == {"c1": Decimal("300")}
+    assert basis.cells == {"a30": Decimal("100")}
     assert not basis.blocked
 
 
 @pytest.mark.asyncio
-async def test_credit_attributed_by_funding_trade_counts_in_its_cell_only(ledger) -> None:
+async def test_a_fully_lent_offer_leaves_its_cell_empty_and_writes_no_credit_cell(ledger) -> None:
+    """The trade names our offer exactly; the credit still belongs to no cell."""
     await ledger.accept(_observation())
     await ledger.attempt(amount="200", venue_offer_id="101")
     await ledger.accept(_observation("800", offers=(_offer("101", "200"),)))
@@ -423,135 +424,61 @@ async def test_credit_attributed_by_funding_trade_counts_in_its_cell_only(ledger
             trades=(_trade("101", "200"),),
         )
     )
-    assert basis.credits == {"c1": ("trade", ["a30"])}
-    assert basis.cells == {"a30": Decimal("200")}
-    assert basis.symbols["fUST"].unattributed_credits == 0
-
-
-@pytest.mark.asyncio
-async def test_funding_trade_naming_a_foreign_offer_leaves_the_credit_unattributed(ledger) -> None:
-    """The trade is exact evidence: it outranks a resembling recent fill of ours."""
-    await ledger.accept(_observation())
-    await ledger.attempt(amount="200", venue_offer_id="101")
-    await ledger.accept(_observation("800", offers=(_offer("101", "200"),)))
-    basis = await ledger.accept(
-        _observation(
-            "800",
-            credits=(_credit("c1", "200", opening=101_150),),
-            trades=(_trade("999", "200"),),
-        )
-    )
-    assert basis.credits == {"c1": ("trade", [])}
+    assert basis.symbols["fUST"].credits == Decimal("200")
     assert basis.cells == {}
-    assert basis.symbols["fUST"].unattributed_credits == Decimal("200")
+    assert basis.credit_cells == 0
+    assert not basis.blocked
 
 
 @pytest.mark.asyncio
-async def test_only_observed_trades_attribute_credits(ledger) -> None:
-    """R2: a ``funding_trades`` row outside the observation is not evidence."""
-    await ledger.accept(_observation())
-    await ledger.attempt(amount="200", venue_offer_id="101")
-    await ledger.accept(_observation("800", offers=(_offer("101", "200"),)))
-    await ledger.accept(_observation("800"))  # filled offer gone, no loan yet
-    async with ledger.factory.begin() as session:
-        await session.execute(
-            text(
-                "INSERT INTO funding_trades(exchange_account_id, trade_id, "
-                "symbol, mts_create, offer_id, amount, rate, period) "
-                "VALUES (:a, 1, 'fUST', 101150, 101, 200, 0.0001, 2)"
-            ),
-            {"a": _A},
-        )
-    lent = (_credit("c1", "200", opening=101_150),)
-    basis = await ledger.accept(_observation("800", credits=lent))
-    assert basis.credits == {"c1": ("unattributed", [])}
-    basis = await ledger.accept(_observation("800", credits=lent, trades=(_trade("101", "200"),)))
-    assert basis.credits == {"c1": ("trade", ["a30"])}
-
-
-@pytest.mark.asyncio
-async def test_credits_outnumbering_their_trades_keep_every_candidate_cell(ledger) -> None:
+async def test_two_cells_filling_at_one_opening_each_hold_only_what_still_rests(ledger) -> None:
     await ledger.accept(_observation())
     await ledger.attempt(amount="100", venue_offer_id="101")
     await ledger.attempt(amount="300", cell="p2", venue_offer_id="102")
-    p2 = _offer("102", "300")
-    await ledger.accept(_observation("600", offers=(_offer("101", "100"), p2)))
+    await ledger.accept(_observation("600", offers=(_offer("101", "100"), _offer("102", "300"))))
     twins = (_credit("c1", "100", opening=101_150), _credit("c2", "100", opening=101_150))
-    partial = _observation(
-        "600", offers=(_offer("102", "300", "200"),), credits=twins, trades=(_trade("101", "100"),)
-    )
-    basis = await ledger.accept(partial)
-    assert basis.credits == {"c1": ("trade", ["a30", "p2"]), "c2": ("trade", ["a30", "p2"])}
-    assert basis.cells == {"a30": Decimal("200"), "p2": Decimal("400")}
-    both = replace(partial, trades=(_trade("101", "100"), _trade("102", "100")))
-    basis = await ledger.accept(both)
-    assert basis.credits["c1"] == ("trade", ["a30", "p2"])
-    assert basis.cells == {"a30": Decimal("200"), "p2": Decimal("400")}
-    assert basis.symbols["fUST"].unattributed_credits == 0
-
-
-@pytest.mark.asyncio
-async def test_loan_turning_into_split_credits_stays_in_its_cell(ledger) -> None:
-    """Live 2026-08-09 shape: a loan becomes credits with new ids and amounts,
-    keeping the trade's instant as MTS_OPENING. Carry is by (symbol, period,
-    opening), since neither id nor amount survives the conversion."""
-    trade = Decimal("391.4117332")
-    cash = str(Decimal("1000") - trade)
-    opened = 101_150
-    await ledger.accept(_observation())
-    await ledger.attempt(amount=str(trade), venue_offer_id="101")
-    await ledger.accept(_observation(cash, offers=(_offer("101", str(trade)),)))
-    one = Decimal("161.24782943")
-
-    def lent(venue_id: str, amount: Decimal | str, created: int, kind: str = "credit") -> Credit:
-        return _credit(venue_id, str(amount), kind=kind, created=created, opening=opened)
-
-    stages = [
-        (lent("60709535", trade, opened, "loan"),),
-        (lent("463464628", one, 101_160), lent("60709642", trade - one, 101_160, "loan")),
-        (
-            lent("463464628", one, 101_160),
-            lent("463464629", one, 101_170),
-            lent("463464632", "68.91607434", 101_180),
-        ),
-    ]
-    expected = ["recent_fill", "carry", "carry"]
-    for credits, attribution in zip(stages, expected, strict=True):
-        basis = await ledger.accept(_observation(cash, credits=credits))
-        assert {cells[0] for _, cells in basis.credits.values()} == {"a30"}
-        assert {a for a, _ in basis.credits.values()} == {attribution}
-        assert basis.cells == {"a30": trade}
-        assert basis.symbols["fUST"].unattributed_credits == 0
     basis = await ledger.accept(
         _observation(
-            cash, credits=stages[-1], trades=(_trade("101", str(trade), mts_create=opened),)
+            "600",
+            offers=(_offer("102", "300", "200"),),
+            credits=twins,
+            trades=(_trade("101", "100"), _trade("102", "100")),
         )
     )
-    assert basis.credits["463464632"] == ("trade", ["a30"])
-    assert basis.cells == {"a30": trade}
+    assert basis.cells == {"p2": Decimal("200")}
+    assert basis.symbols["fUST"].credits == Decimal("200")
+    assert basis.credit_cells == 0
+    assert not basis.blocked
 
 
 @pytest.mark.asyncio
-async def test_credit_older_than_our_offer_is_not_attributed_to_its_fill(ledger) -> None:
+async def test_each_symbols_cells_sum_to_its_offered(ledger) -> None:
+    """Both are accumulated from the resting managed offers alone: foreign offers and
+    credits move neither."""
     await ledger.accept(_observation())
-    await ledger.attempt(amount="200", venue_offer_id="101")
+    await ledger.attempt(amount="100", venue_offer_id="101")
+    await ledger.attempt(amount="300", cell="p2", venue_offer_id="102")
+    await ledger.attempt(amount="50", cell="p2", venue_offer_id="103")
     basis = await ledger.accept(
         _observation(
-            "650",
-            offers=(_offer("101", "200", "50", created=101_000),),
-            credits=(
-                _credit("old", "150", opening=100_900),
-                _credit("new", "150", opening=101_100),
+            "300",
+            offers=(
+                _offer("101", "100"),
+                _offer("102", "300", "120"),
+                _offer("103", "50"),
+                _offer("manual-1", "40"),
             ),
+            credits=(_credit("c1", "180", opening=101_100), _credit("c2", "70", opening=100_000)),
         )
     )
-    assert basis.credits == {"old": ("unattributed", []), "new": ("recent_fill", ["a30"])}
-    assert basis.cells == {"a30": Decimal("200")}  # 50 offered + 150 new
-    assert basis.symbols["fUST"].unattributed_credits == Decimal("150")
+    fust = basis.symbols["fUST"]
+    assert basis.cells == {"a30": Decimal("100"), "p2": Decimal("170")}
+    assert sum(basis.cells.values()) == fust.offered == Decimal("270")
+    assert (fust.credits, fust.foreign_offers) == (Decimal("250"), Decimal("40"))
 
 
 @pytest.mark.asyncio
-async def test_partial_fill_charges_remaining_offer_plus_lent_amount(ledger) -> None:
+async def test_partial_fill_leaves_only_the_resting_remainder_in_the_cell(ledger) -> None:
     await ledger.accept(_observation())
     attempt_id = await ledger.attempt(amount="200", venue_offer_id="offer-1")
     basis = await ledger.accept(
@@ -562,13 +489,8 @@ async def test_partial_fill_charges_remaining_offer_plus_lent_amount(ledger) -> 
         )
     )
     fust = basis.symbols["fUST"]
-    assert (fust.offered, fust.credits, fust.unattributed_credits) == (
-        Decimal("50"),
-        Decimal("150"),
-        Decimal("0"),
-    )
-    assert basis.cells == {"a30": Decimal("200")}  # never the original 200 again
-    assert basis.credits == {"c1": ("recent_fill", ["a30"])}
+    assert (fust.offered, fust.credits) == (Decimal("50"), Decimal("150"))
+    assert basis.cells == {"a30": Decimal("50")}  # never the original 200, never the lent 150
     assert basis.attempts == {attempt_id: ("fUST", "reflected")}
 
 
@@ -587,9 +509,39 @@ async def test_an_offer_that_fills_between_snapshots_is_accounted_for(ledger) ->
     )
     assert not basis.blocked
     assert basis.attempts == {attempt_id: ("fUST", "reflected")}
-    assert basis.credits == {"61621685": ("recent_fill", ["a30"])}
-    assert basis.cells == {"a30": Decimal("200")}
-    assert basis.symbols["fUST"].unattributed_credits == 0
+    assert basis.symbols["fUST"].credits == Decimal("200")
+    assert basis.cells == {}
+
+
+@pytest.mark.parametrize("seen_as", ["history", "canceled", "gone", "trade"])
+@pytest.mark.asyncio
+async def test_an_ended_offer_with_contradictory_provenance_blocks_its_symbol(
+    ledger, seen_as: str
+) -> None:
+    """Two attempts naming one venue offer is a ledger contradiction wherever the offer's
+    end shows up: its terminal history row (executed, or canceled with nothing filled),
+    its absence after a basis that held it, or a trade (the only place an offer that lent
+    and was repaid in between is seen)."""
+    await ledger.accept(_observation(usd=True))
+    await ledger.attempt(amount="200", venue_offer_id="X")
+    bound = await ledger.attempt(amount="200", outcome="unknown")
+    await ledger.resolve(bound, "bound_to_venue", "X")
+    ended = _observation(
+        "800",
+        usd=True,
+        history={
+            "history": (OfferHistory(_offer("X", "200", "0"), "executed", 1150),),
+            "canceled": (OfferHistory(_offer("X", "200"), "canceled", 1150),),
+        }.get(seen_as, ()),
+        trades=(_trade("X", "200"),) if seen_as == "trade" else (),
+    )
+    if seen_as == "gone":
+        held = await ledger.accept(_observation("800", offers=(_offer("X", "200"),), usd=True))
+        assert "credit_provenance_conflict" not in held.reasons("fUST")
+    basis = await ledger.accept(ended)
+    assert "credit_provenance_conflict" in basis.reasons("fUST")
+    assert basis.symbols["fUSD"].block is None
+    assert basis.row.scope_block is None
 
 
 @pytest.mark.asyncio

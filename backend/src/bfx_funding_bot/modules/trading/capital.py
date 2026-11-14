@@ -63,30 +63,27 @@ class AppliedPolicy:
 class SymbolCapital:
     """Accepted A/O/C and cell totals, not venue payloads to classify again.
 
-    O is managed *remaining* amount. C is deduplicated credits/loans; each
-    candidate cell carries the full ambiguous credit, while U is in C only.
-    Foreign offers are diagnostic and excluded from O, C and cells. ``cells`` already includes attributed
-    credits; these totals must never be summed to reconstruct C or T. ``block``
-    is an acceptance-time fact that makes this symbol, and only it, unusable.
+    O is managed *remaining* amount. C is deduplicated credits/loans and belongs
+    to the symbol only: no cell holds lent stock. Foreign offers are diagnostic and
+    excluded from O, C and cells. ``cells`` is each cell's resting managed offers
+    (remaining amount), so in a basis written under this definition they sum to O.
+    ``block`` is an acceptance-time fact that makes this symbol, and only it, unusable.
     """
 
     symbol: str
     available: Decimal
     offered: Decimal
     credits: Decimal
-    unattributed_credits: Decimal
     foreign_offers: Decimal
     cells: tuple[tuple[str, Decimal], ...]
     block: Blocked | None
 
     def __post_init__(self) -> None:
         for amount in (
-            self.available, self.offered, self.credits, self.unattributed_credits,
-            self.foreign_offers, *(amount for _, amount in self.cells),
+            self.available, self.offered, self.credits, self.foreign_offers,
+            *(amount for _, amount in self.cells),
         ):
             _validate_amount(amount)
-        if self.unattributed_credits > self.credits:
-            raise ValueError("unattributed credits must be included in credits")
         if len({cell for cell, _ in self.cells}) != len(self.cells):
             raise ValueError("duplicate capital cell")
 
@@ -180,7 +177,6 @@ class CapitalView:
     observation_id: UUID
     snapshot: CapitalSnapshot
     budget: CapitalBudget
-    unattributed_credit_exposure: Decimal
     attribution: AcceptedCapitalBasis
 
 
@@ -292,6 +288,5 @@ def derive_capital(
     )
     budget = evaluate_capital(policy.policy, snapshot)
     return Available(CapitalView(
-        policy, accepted.query_id, accepted.observation_id, snapshot, budget,
-        values.unattributed_credits, accepted,
+        policy, accepted.query_id, accepted.observation_id, snapshot, budget, accepted,
     ))

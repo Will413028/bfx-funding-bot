@@ -42,7 +42,7 @@ def _views(
         snapshot = CapitalSnapshot(D(available), D(commitments),
                                    D(available if total is None else total), D(exposure))
         views[cell] = CapitalAvailable(applied, snapshot, evaluate_capital(policy, snapshot),
-                                       D("0"), token)
+                                       token)
     return views
 
 

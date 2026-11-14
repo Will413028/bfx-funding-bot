@@ -70,7 +70,6 @@ class CapitalAvailable(_Forwarded):
     unreflected_commitments: str
     total_capital: str
     spendable: str
-    unattributed_credit_exposure: str
     cells: dict[str, CapitalBudgetStatus]
 
 

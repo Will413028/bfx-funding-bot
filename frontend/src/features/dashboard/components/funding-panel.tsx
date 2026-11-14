@@ -56,7 +56,6 @@ export function FundingPanel({
                     ["reserve", capital.policy.reserve_amount],
                     ["spendable", capital.spendable],
                     ["total", capital.total_capital],
-                    ["unattributed", capital.unattributed_credit_exposure],
                   ] as const
                 ).map(([label, value]) => (
                   <div key={label}>

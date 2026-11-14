@@ -42,11 +42,6 @@ def build_projections_router() -> APIRouter:
                     available=_dec_str(view.available),
                     offered=_dec_str(view.offered),
                     lent=_dec_str(view.lent),
-                    unattributed_lent=(
-                        _dec_str(view.unattributed_lent)
-                        if view.unattributed_lent is not None
-                        else None
-                    ),
                     n_credits=view.n_credits,
                     last_updated_ms=view.last_updated_ms,
                     last_reconciled_at=view.last_reconciled_at_ms,

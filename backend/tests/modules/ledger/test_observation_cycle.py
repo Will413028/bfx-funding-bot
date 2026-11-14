@@ -48,7 +48,7 @@ class Factory:
 def cycle(monkeypatch, *, decision="accepted", refuse=False, grace=120_000, resolved=(), settle=120_000):
     factory = Factory()
     handle = QueryHandle(uuid4(), 1, 0, 300_000)
-    window = ObservationWindow(100_000, 200_000, 40_000)
+    window = ObservationWindow(100_000, 40_000)
     observation_id = uuid4() if decision == "accepted" else None
 
     async def lock(session, scope):

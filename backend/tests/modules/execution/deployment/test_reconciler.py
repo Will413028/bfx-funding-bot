@@ -130,7 +130,7 @@ def _simulated_capital(ledger, *, cell_exposure=None, totals=None, reserves=None
                                        cell_exposure.get(cell_id, D("0")))
             applied = AppliedPolicy(scope.account_id, symbol, 1,
                                     "explicit-test-policy", UUID(int=1), policy)
-            return CapitalAvailable(applied, snapshot, evaluate_capital(policy, snapshot), D("0"),
+            return CapitalAvailable(applied, snapshot, evaluate_capital(policy, snapshot),
                                     "1", {})
 
         async def read_policy(self, session, scope, symbol):
@@ -1188,7 +1188,7 @@ class _RecordingCapital:
         applied = AppliedPolicy(scope.account_id, scope.symbol, 1, "digest",
                                 UUID(int=1), policy)
         snapshot = CapitalSnapshot(D("1000"), D("0"), D("1000"), self._exposures[scope.cell_id])
-        view = CapitalAvailable(applied, snapshot, evaluate_capital(policy, snapshot), D("0"), "1")
+        view = CapitalAvailable(applied, snapshot, evaluate_capital(policy, snapshot), "1")
         self.returned[scope.cell_id] = view
         return view
 

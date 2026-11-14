@@ -6,7 +6,7 @@ reader is the bot).
 
 Mutation checks (one at a time; revert after each):
 
-* ``lent`` = credits + unattributed_credits: ``test_positions_*``.
+* ``lent`` = credits + offered: ``test_positions_*``.
 * positions from an older basis: ``test_positions_*``.
 * ``nCredits`` counted across bases: ``test_positions_*``.
 * a foreign or conflicted mirror row listed: ``test_offers_*_set``.
@@ -109,8 +109,6 @@ async def test_positions_use_only_the_latest_basis(book) -> None:
     assert (fust.available, fust.offered, fust.lent) == (
         Decimal("600"), Decimal("100"), Decimal("300"),
     )
-    # The 300 credit is unattributed: a SUBSET of lent, never an addend.
-    assert fust.unattributed_lent == Decimal("300")
     assert fust.n_credits == 1
     assert fust.last_updated_ms == fust.last_reconciled_at_ms
     assert fust.last_updated_ms is not None and fust.last_updated_ms > 0
@@ -309,7 +307,7 @@ async def test_the_router_serves_the_ledger_wire_as_the_web_api_role(
         assert positions.status_code == 200, positions.text
         fust = positions.json()["data"][0]
         assert set(fust) == {
-            "symbol", "available", "offered", "lent", "unattributedLent",
+            "symbol", "available", "offered", "lent",
             "nCredits", "lastUpdatedMs", "lastReconciledAtMs",
         }
         assert fust["symbol"] == "fUST"

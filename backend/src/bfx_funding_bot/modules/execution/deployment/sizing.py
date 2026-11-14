@@ -20,7 +20,8 @@ def venue_amount(amount: Decimal) -> Decimal:
 
 
 def allocate_capital(*, views: dict[str, CapitalAvailable], min_fill: Decimal) -> dict[str, Decimal]:
-    """Allocate one consistent canonical budget, emptiest cell first."""
+    """Allocate one consistent canonical budget, emptiest cell first (emptiest: the
+    least resting in offers and unreflected commitments; lent credits do not count)."""
     if not views:
         return {}
     first = next(iter(views.values()))

@@ -445,8 +445,6 @@ export interface components {
             total_capital: string;
             /** Spendable */
             spendable: string;
-            /** Unattributed Credit Exposure */
-            unattributed_credit_exposure: string;
             /** Cells */
             cells: {
                 [key: string]: components["schemas"]["CapitalBudgetStatus"];
@@ -844,8 +842,7 @@ export interface components {
          * PositionResponse
          * @description One symbol's capital as disjoint components, in the symbol's own units.
          *
-         *     ``available + offered + lent`` is the symbol's total. ``unattributedLent`` is a
-         *     subset of ``lent`` (never an addend); null when the authority has no such fact.
+         *     ``available + offered + lent`` is the symbol's total.
          */
         PositionResponse: {
             /** Symbol */
@@ -856,8 +853,6 @@ export interface components {
             offered: string;
             /** Lent */
             lent: string;
-            /** Unattributedlent */
-            unattributedLent: string | null;
             /** Ncredits */
             nCredits: number | null;
             /** Lastupdatedms */
