@@ -3,8 +3,8 @@
 ``mutation_kill_matrix.py`` answers the question for a whole file in hours. A review needs it
 for the code in front of it, in minutes, so this script
 
-1. reads the change (``git diff <base> HEAD``) and keeps the added or modified lines of the
-   Python files under ``backend/src/bfx_funding_bot``;
+1. reads the change (``git diff <base> HEAD``) and keeps the lines it adds, modifies or removes
+   lines beside, in the Python files under ``backend/src/bfx_funding_bot``;
 2. names the functions those lines are in: top-level functions, and methods of top-level
    classes as ``Class.method`` (what mutmut mutates; a nested function counts as its outer
    one, and a line outside any function, such as a constant or a class attribute, names none);
@@ -85,7 +85,8 @@ def changed_lines(diff: str) -> dict[Path, list[tuple[int, int]]]:
         if hunk and current is not None:
             count = int(hunk["count"]) if hunk["count"] is not None else 1
             start = int(hunk["start"])              # for a removal, the line it comes after
-            ranges.setdefault(current, []).append((start, start + count - 1) if count else (start, start + 1))
+            last = start + count - 1 if count else start + 1
+            ranges.setdefault(current, []).append((start, last))
     return ranges
 
 

@@ -65,7 +65,7 @@ class Box:
 '''
 
 
-def test_a_diff_gives_the_added_and_changed_lines_of_each_file() -> None:
+def test_a_diff_gives_the_touched_lines_of_each_file() -> None:
     ranges = changed.changed_lines(DIFF)
     # A hunk that only removes lines touches the lines it sat between; a deleted file has none.
     assert ranges == {Path("backend/src/bfx_funding_bot/modules/ledger/x.py"): [(3, 4), (10, 11), (20, 20)]}
