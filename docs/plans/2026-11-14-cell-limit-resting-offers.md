@@ -15,7 +15,7 @@
 - 放貸維持全自動：任何一步都不得把手動掛單、手動 kill 寫成正常流程（`AGENTS.md`「營運原則」）。
 - `accepted_capital_basis*` 表 insert-once：不改、不刪既有列（刪欄是 DDL，不是改列）；`accepted_capital_basis_credit_cell` 留表（ADR Decision 3）。
 - 週報的歸屬（`modules/live_validation/`）不動（ADR Decision 5）。
-- 步驟 1、2、3、4 都進 `dev`，四者同一次 `dev`→`main` 發版（步驟 5）；步驟 2 併入後、步驟 4 併入前不發版。理由有二：`backend/ARCHITECTURE.md` 是架構的 source of truth，不能與程式不一致地上線；步驟 2 對兩個待刪欄位寫的是過渡值，只存在於 `dev`，到步驟 3 就連欄位一起消失，不進正式環境。
+- 步驟 1、2、3、4 都進 `dev`，四者同一次 `dev`→`main` 發版（步驟 5；步驟 3 要不要晚一版是 D8，未決）；步驟 2 併入後、步驟 4 併入前不發版。理由有二：`backend/ARCHITECTURE.md` 是架構的 source of truth，不能與程式不一致地上線；步驟 2 對兩個待刪欄位寫的是過渡值，只存在於 `dev`，到步驟 3 就連欄位一起消失，不進正式環境。
 - 本機不跑 e2e 與 docker 測試；完整 integration、Playwright 與標 `docker` 的測試由 PR 的 CI 跑，CI 綠之前回報為待驗。
 - 完成定義（每一步）：單元測試全過（`cd backend && uv run pytest -m "not integration" -n auto`）、受影響的 integration 檔本機通過且 PR 的 CI 全綠、`uv run mypy src/ && uv run ruff check`、import-linter 乾淨、`uv run alembic check` 無 drift、`uv run python scripts/quality_ratchet.py` 通過（測試數變少要有帶 `Ratchet-Reason:` 與 `Removed-Test:` trailer 的 commit）、改行為處附 mutation（在 repo 的複本裡跑，不在工作區改了再還原）、`/code-review` 跑過。
 
@@ -26,7 +26,7 @@
 - P3 ADR 的盤點取自 `1b3b33b5`，之後 #394、#396 改過 execution 模組。2026-11-14 在 `9209abb1` 重跑 ADR 的搜尋，仍命中同樣 13 個檔；`git diff --stat 1b3b33b5 9209abb1 -- backend/src backend/scripts deploy frontend/src` 改到的 7 個檔（`command_gate.py`、`deployment/reconciler.py`、`managed_cancel.py`、`reservation_emitting.py`、`protocols.py`、`reconcile_monitors.py`、`observability/alerts.py`）都不在這 13 個裡。已確認（指令輸出）。
 - P4 conservation 不依賴 `trades_range_uncovered`。`symbol_verdicts`（`ledger/_internal/conservation_facts.py` 第 99–251 行）的輸入沒有 block 清單與 cell 歸屬；它對 trades 範圍的要求是自己算的 `covers_lower`／`covers_upper`（第 142–144 行）。`rg -n trades_range_uncovered backend/src` 只命中 `basis.py` 第 418 行。已接受的 venue 觀測必有 `trades_complete`（`ledger/tables.py` 的 `ck_ledger_observation_acceptance`）。已確認（讀程式；步驟 2 的驗收再以 conservation 的整個測試檔確認）。
 - P5 部分成交的證據（`basis.py` 的 `fills` 與 `_Fill`）只有 recent fill 規則一個讀者：`fills` 是 `write_basis` 的區域變數，只在第 435–445 行被讀。`conservation_facts.py` 裡同名的 `fills` 是它自己從 offer 列算的，不相干。已確認（讀程式）。
-- P6 刪欄在這個 schema 上做得到的依據：(a) basis 表的不可變 trigger 是 `BEFORE UPDATE OR DELETE` 與 `BEFORE TRUNCATE`（`backend/alembic/versions/b1e2d3a4c5f6_add_ledger_s1_schema.py` 第 1314–1318 行），不擋 DDL；(b) PostgreSQL 刪欄時會一併刪掉提到該欄的 CHECK，所以 `ck_accepted_basis_symbol_amount`（它同時管 `available`、`offered`、`credits`、`foreign_offers`）要以原名重建成不含該欄的版本，`ck_accepted_basis_credit_attribution` 隨欄消失；(c) `bfx_webapi` 對 `unattributed_credits` 的欄位 SELECT 授權隨欄消失；(d) 還原演練的逐列雜湊用 `SELECT t.*`（`deploy/vm/pgbackrest/ledger_digest.py` 第 407 行），比對的兩邊在同一個 schema 上，不需要為刪欄改它，`rg -n 'unattributed|attribution' deploy/vm/pgbackrest` 0 行。(a)(d) 讀程式確認；(b)(c) 是 PostgreSQL 的既定行為，**未在本機實測**，由步驟 3 的 migration 測試與部署前的演練證明。
+- P6 刪欄在這個 schema 上做得到的依據：(a) basis 表的不可變 trigger 是 `BEFORE UPDATE OR DELETE` 與 `BEFORE TRUNCATE`（`backend/alembic/versions/b1e2d3a4c5f6_add_ledger_s1_schema.py` 第 1314–1318 行），不擋 DDL；(b) PostgreSQL 刪欄時會一併刪掉提到該欄的 CHECK，所以 `ck_accepted_basis_symbol_amount`（它同時管 `available`、`offered`、`credits`、`foreign_offers`）要以原名重建成不含該欄的版本，`ck_accepted_basis_credit_attribution` 隨欄消失；(c) `bfx_webapi` 對 `unattributed_credits` 的欄位 SELECT 授權隨欄消失；(d) 還原演練的逐列雜湊用 `SELECT t.*`（`deploy/vm/pgbackrest/ledger_digest.py` 第 407 行），比對的兩邊在同一個 schema 上，不需要為刪欄改它，`rg -n 'unattributed|attribution' deploy/vm/pgbackrest` 0 行。(a)(d) 讀程式確認。(b) 不再依賴：步驟 3 的 migration 先以名稱刪掉兩個 CHECK 再刪欄（與 `545b2877e9bd` 的寫法一致），不靠 PostgreSQL 連帶刪除。(c) 已確認（2026-11-14，步驟 3 的 migration 測試：刪欄後 `bfx_webapi` 可讀的欄位恰好少掉被刪的那一欄）。
 - P14 刪欄之後，v1 basis 的 `digest` 無法再由資料列重算（它的輸入含這兩欄的值）。沒有任何程式重算它（P9）。這是 D1 選 C 接受的後果。
 - P7 「同一個 venue offer 有互相矛盾的 provenance 就擋住該幣別」這個檢查，現行由 `cell_of`（`basis.py` 第 163–170 行）順帶執行，reason 是 `credit_provenance_conflict`；對象是有成交的 terminal history 列、上一份 basis 有而現在不見的 offer、以及落在 active credit 組的 trade。ADR Decision 3 的刪除清單沒有提到它。現行沒有測試涵蓋這個 reason（`rg -n credit_provenance_conflict backend/tests` 0 行）。它在歸屬刪掉之後的去向是 D3。已確認（讀程式）。
 - P8 還原演練的開機檢查（`apps/restore_boot_check.py` 第 89–93 行）依最新 basis 的 cell 列決定做哪些資金讀取。改動後錢全借出去、沒有掛單時 basis 沒有 cell 列，開機檢查就一次資金讀取都不做（drill 接受空的 `reads`：`deploy/vm/pgbackrest/ledger_digest.py` 第 600–601 行；既有測試 `tests/integration/test_ledger_restore_verification.py` 第 373–379 行釘住「沒有 cell 列就沒有讀取」）。要不要補上讀取是 D4。已確認（讀程式）。
@@ -63,6 +63,7 @@
   - 處理模擬環境的舊歸屬列（P12）。
 - 延後：
   - 以 credit 自己的 `period` 計的天期上限（ADR Decision 6）。觸發條件：出現天期不同的 cell。
+  - `test_ledger_schema_roles.py` 的 `_seed` 同時用在 head 與 `LAST_REVERSIBLE_REVISION`，每刪一次欄就多一個「看資料庫有沒有這欄」的分支（現在兩個：realm、歸屬欄）。觸發條件：下一支 migration 再改 `_seed` 寫到的表的形狀時，把較早 revision 用的 seed 拆出去凍結，不再加第三個探測（步驟 3 開工時設計審查的發現）。
   - basis 的 `digest` 沒有任何程式重算它（P9）。要不要補「由觀測列重算並比對」的檢查，或之後刪掉欄位。觸發條件：需要稽核某份 basis 是否可由它的觀測重算，或下一次改 basis payload 的形狀。
 
 ## 步驟
@@ -103,21 +104,21 @@
   - 停止條件：conservation 的任何測試在不改它的情況下失敗（P4 不成立）；發現 `fills`、`trades_range_uncovered` 或 credit_cell 列有 inventory 沒列到的讀者；這一步需要改資料表才能完成（資料表的改動屬於步驟 3）。
   - PR 大小：這一步的 diff 可能超過 `backend/scripts/pr_size.py` 的 1000 行上限。超過時先把開機檢查（V01、V02、X07）拆成獨立的 PR；仍超過才在 PR body 加 `Size-Justification:`。
   - 完成後的狀態：`backend/ARCHITECTURE.md` 的 I-CAP、I-CC 與程式不一致，直到步驟 4 併入；兩個待刪欄位寫的是過渡值，直到步驟 3 併入。步驟 4 併入前不發版。
-- [ ] **3. 刪掉 `unattributed_credits` 與 `attribution_basis` 兩欄**（被擋於：步驟 1、步驟 2）
-  - 範圍：inventory M01、T01、T02、B14、B15、X11。
-    - 新 migration（`backend/alembic/versions/` 新檔，`down_revision` 接當時的 head；2026-11-14 的 head 是 `545b2877e9bd`）：刪 `accepted_capital_basis_symbol.unattributed_credits` 與 `accepted_capital_basis_credit.attribution_basis`；以原名重建 `ck_accepted_basis_symbol_amount`（`available >= 0 AND offered >= 0 AND credits >= 0 AND foreign_offers >= 0`）。
-    - migration 自己斷言資料：刪欄前後兩張表的列數相同；刪欄後兩欄在 `information_schema.columns` 不存在；`bfx_webapi` 對 `accepted_capital_basis_symbol` 的欄位 SELECT 授權恰好剩 `basis_id`、`symbol`、`available`、`offered`、`credits`。`downgrade` 照 forward-only 的 ADR 直接 raise。`ledger_contract` 照 `core/schema_head.py` 的說明宣告（預期是 `preserved`：不動 projector cursor 與 projection archive；執行時讀該檔確認，`tests/test_schema_head.py` 會擋沒宣告的 migration）。
+- [ ] **3. 刪掉 `unattributed_credits` 與 `attribution_basis` 兩欄**（被擋於：步驟 1、步驟 2；合併進 `dev` 另被擋於 D8）
+  - 範圍：inventory M01、T01、T02、B14、B15、X04、X11。
+    - 新 migration `backend/alembic/versions/dc9d9290c2c0_drop_basis_attribution_columns.py`（`down_revision` 是 `545b2877e9bd`，2026-11-14 開工時重查仍是 head）：先以名稱刪掉 `ck_accepted_basis_symbol_amount` 與 `ck_accepted_basis_credit_attribution`，再刪 `accepted_capital_basis_symbol.unattributed_credits` 與 `accepted_capital_basis_credit.attribution_basis`，最後以原名重建 `ck_accepted_basis_symbol_amount`（`available >= 0 AND offered >= 0 AND credits >= 0 AND foreign_offers >= 0`）。`DROP COLUMN` 與不帶 `NOT VALID` 的 `ADD CONSTRAINT` 各帶 `squawk-ignore`（CI 的 `Migration lint (squawk)` job 會標記這兩種語句；豁免的理由與 `545b2877e9bd` 相同：部署時全停 writer）。
+    - migration 自己斷言終態：兩欄在 `information_schema.columns` 不存在；`ck_accepted_basis_symbol_amount` 存在、`ck_accepted_basis_credit_attribution` 不存在；`bfx_webapi` 對兩張表可讀的欄位等於刪欄前的集合減去被刪的欄（正式環境就是 symbol 表剩 `basis_id`、`symbol`、`available`、`offered`、`credits`）。授權的斷言寫成前後比對、不寫死五欄，因為角色是整個 cluster 共用的：先 migrate 到上一版、之後才建角色的資料庫，寫死的清單會讓 migration 無故拒絕。不斷言列數：刪欄是 DDL，列數不會變，這條斷言不可能失敗（開工時設計審查的發現）；列與其餘欄位的值不變由 migration 測試證明。`downgrade` 照 forward-only 的 ADR 直接 raise。`ledger_contract = "preserved"`：這支 migration 只動兩張 basis 表，不碰 projector cursor 與 projection archive（`core/schema_head.py` 的定義）。
     - `ledger/tables.py` 拿掉兩個欄位與 `ck_accepted_basis_credit_attribution`，`ck_accepted_basis_symbol_amount` 改成新的式子；`basis.py` 拿掉步驟 2 的兩個過渡寫入。
-    - 測試：`tests/integration/test_ledger_schema_roles.py` 第 407、425、1004、1202 行的原生 SQL、`test_ledger_webapi_grants.py` 第 70 行與 `test_webapi_privilege_allowlist.py` 第 117、208 行的欄位清單、`test_ledger_basis.py` 裡讀這兩欄的斷言與 helper，都改成沒有這兩欄。`test_ledger_conservation_migration.py` 第 48 行的 SQL 跑在較早的 revision 上，不動。新增一條 migration 測試：在上一個 revision 的庫裡放有值的列，升到 head 後列數不變、兩欄不存在、CHECK 仍擋負數、webapi 的授權如上。
+    - 測試（inventory X04、X11）：head 上的原生 SQL 拿掉這兩欄（`test_ledger_schema_roles.py` 的 `bfx_bot` 寫入測試、`test_ledger_restore_verification.py` 的 v2 basis seed、`test_ledger_webapi_grants.py` 的欄位清單）。`test_ledger_schema_roles.py` 的 `_seed` 與 `test_ledger_conservation_migration.py` 的 `_insert` 同時跑在 head 與較早的 revision，依資料庫有沒有 `unattributed_credits` 欄決定寫不寫（與既有的 `_has_realm_column` 同一種寫法）。`test_webapi_privilege_allowlist.py` 只改 head 的 `EXPECTED_COLUMNS`；`REVERSIBLE_COLUMNS` 與 `PREVIOUS_COLUMNS` 是歷史 revision 的清單，不動（該檔第 178–179 行與 forward-only ADR 的 Amendment）。`test_basis_credit_constraints_and_foreign_key` 原本測 attribution CHECK 的案例換成 `ck_accepted_basis_credit_kind`。新增 migration 測試檔 `test_drop_basis_attribution_columns.py`：以正式環境的授權建到上一個 revision、放一份有值的 basis，升級後列與其餘欄位的值不變、兩欄不存在、CHECK 仍擋負數、webapi 可讀的欄位如上、downgrade 被拒絕。
   - 消費端：`git grep -nE 'unattributed_credits|attribution_basis' -- backend/src backend/scripts backend/tests deploy`（既有 migration 檔裡的欄位清單是歷史，不改；`modules/live_validation/` 的同名計數不相干）。
   - 不能動：既有 migration 檔；`accepted_capital_basis_credit_cell` 表；其他欄位與 CHECK；`ledger_digest.py`；任何既有列的內容。
   - 驗收：
-    - `cd backend && uv run alembic upgrade head && uv run alembic check` 無 drift；`tests/test_schema_head.py` 通過。
+    - `tests/test_schema_head.py` 通過；`alembic check` 無 drift 由 migration 測試在升級後的庫上跑（`alembic(url, "check")`），另有既有的 `test_alembic_check_is_clean_at_head`。
     - 消費端的搜尋在 `backend/src` 只剩 `modules/live_validation/`；在 `backend/alembic/versions` 只多出新 migration。
-    - 單元全過；本機跑新的 migration 測試、`test_ledger_schema_roles.py`、`test_ledger_webapi_grants.py`、`test_webapi_privilege_allowlist.py`、`test_ledger_basis.py`、`test_ledger_capital_reader.py`、`test_ledger_restore_verification.py`。
-    - mutation（在 repo 的複本裡做，輸出貼進進度表）：migration 裡不重建 `ck_accepted_basis_symbol_amount` → migration 測試的「CHECK 仍擋負數」失敗；migration 少刪一欄 → 「兩欄不存在」失敗。
-    - `quality_ratchet.py` 通過。
-  - 停止條件：刪欄被 PostgreSQL 以「other objects depend on it」拒絕（有 inventory 沒列到的依賴：view、trigger function、index）；`ledger_contract` 判斷不出來；還原演練的測試在不改 `ledger_digest.py` 的情況下失敗（P6(d) 不成立）。
+    - 單元全過；本機跑新的 migration 測試、`test_ledger_schema_roles.py`、`test_ledger_webapi_grants.py`、`test_webapi_privilege_allowlist.py`、`test_ledger_conservation_migration.py`、`test_ledger_basis.py`、`test_ledger_capital_reader.py`、`test_ledger_restore_verification.py`。
+    - mutation（在 repo 的複本裡做，輸出貼進進度表）：重建的 CHECK 少一個條件 → 「CHECK 仍擋負數」失敗；完全不重建 → 同一條在 setup 就失敗（migration 自己的終態斷言先擋下）；少刪一欄 → 「列不變、兩欄不存在」失敗。
+    - `quality_ratchet.py` 通過；CI 的 `Migration lint (squawk)` 通過。
+  - 停止條件：刪欄被 PostgreSQL 以「other objects depend on it」拒絕（有 inventory 沒列到的依賴：view、index、generated column）；還原演練的測試在 seed 的 SQL 改完之後、不改 `ledger_digest.py` 的情況下仍失敗（P6(d) 不成立）。PL/pgSQL 的函式本體不在 PostgreSQL 的依賴追蹤內，刪欄不會被擋；沒有函式讀這兩欄的依據是搜尋：`rg -n 'unattributed_credits|attribution_basis' backend/alembic/versions` 的命中只有欄位清單、欄位定義與 CHECK 字串（2026-11-14）。
   - 完成後的狀態：`dev` 帶著未發版的 migration；之後進 `dev` 的其他 migration 要接在它後面。
 - [ ] **4. 架構文件改寫**（被擋於：步驟 3）
   - 範圍：inventory D01、D03，加上 D7 的結論（資金預算段寫明各 cell 曝險同值時依 cell id 排序分配）。`backend/ARCHITECTURE.md` 第 267 行（資金預算段的「歸屬該 cell 的 active credits」）、第 281 行（acceptance 存進 basis 的「credit 的 cell 歸屬」）、第 340 行（「cell exposure 只算可歸屬的部分」）、第 501 行（basis 表清單）、第 872 行（I-CAP 的 `E_cell` 定義與歸屬規則）、第 874 行（I-CC）改成 ADR Decision 1–3 的定義；寫明 `accepted_capital_basis_credit_cell` 是留著的歷史表、新 basis 不寫入，以及 `unattributed_credits`／`attribution_basis` 兩欄已刪除（D1）。純文件，不加測試。
@@ -134,7 +135,9 @@
     - 部署後 30 分鐘的 bot log 沒有錯誤：`docker logs --since <部署完成時間> bfx-bot 2>&1 | grep -ciE '"level": "(error|critical)"|Traceback'` 為 0。執行前先用 `docker logs --tail 5 bfx-bot` 確認 log 仍是這個 JSON 格式；格式不同就改用對應的寫法並記在進度表。
     - API 不再有「未歸屬」欄位：由發版 commit 的 CI 契約檢查證明（image 由同一個 commit 建），不另外在正式環境打 API。
     - 還原演練通過（新舊 basis 並存時逐列雜湊相等；開機檢查對每個 symbol 有讀取）：排程是每月 1 日 09:17 UTC（`docs/runbooks/operations.md` §8 的 `bfx-restore-test.timer`），不等它；部署後、至少有一份 `schema_version = 2` 的 basis 進了備份之後，在 VM 手動啟動一次 `sudo systemctl start bfx-restore-test@current`，以 `journalctl -u 'bfx-restore-test@current'` 與演練的 receipt 讀結果，並確認 receipt 的 bounds（`observation_query_revision`）不小於第一份 v2 basis 的 observation 的 query revision；不滿足就等下一次備份再跑。這和部署前那一次不同：部署前還原的資料只有 v1 basis、舊 schema。目標標籤早於這次 migration 的演練會先被開機檢查以 `boot_schema_head_mismatch` 拒絕，任何帶 migration 的發版都一樣。沒跑之前回報為待驗。
-  - 回滾：不能部署上一版 digest（上一版 image 在新 schema head 上拒絕開機），也不 downgrade。migration 之前失敗（還原測試、演練）：正式庫沒動，修好再發。migration 之後出問題：先以 `sudo bfx-op` 的既有控制停掉放貸（緊急控制，不是正常流程），再發修正 release 往前修。觸發條件：部署後最新 basis 出現新的 fact block、`conservation` 轉為 `unexplained_lending`、或 bot 開機失敗。
+  - 回滾：不能部署上一版 digest（上一版 image 在新 schema head 上拒絕開機），也不 downgrade。migration 之前失敗（還原測試、演練）：正式庫沒動，舊的 bot 與 webapi 由 `bfx-deploy` 重新啟動，修好再發。migration 之後出問題，往前修（新 commit → CI → GHCR → `bfx-deploy`；耗時沒有量過，部署前以這次發版 PR 的 CI 與 release 實際耗時估計並回報），依 bot 的狀態分兩種：
+    - bot 在跑（觸發條件：部署後最新 basis 出現新的 fact block，或 `conservation` 轉為 `unexplained_lending`）：先以 `sudo bfx-op halt` 停掉放貸並撤單（緊急控制，不是正常流程），再發修正 release。
+    - bot 起不來（觸發條件：bot 開機失敗；此時 `bfx-deploy` 已停掉 bot 與 webapi）：`bfx-op` 與營運 UI 都不可用（`docs/runbooks/deploy.md` 第 5 節末）。停機前已掛在 venue 上的 offer 留在原處，金額與利率仍在發版前的包絡內，但沒有人管；要不要在 Bitfinex 網頁手動撤單由 owner 當場決定（`deploy.md` 的既有緊急程序），修正 release 部署後 bot 自己接手。
   - 停止條件：上面任何一條驗收不成立。先停放貸並回報，再決定修正 release 的內容。
   - 需要人做的事：owner 核准並合併發版 PR；VM 的唯讀查詢與手動啟動還原演練需要 owner 通過 Tailscale SSH 的瀏覽器驗證。
 - [ ] **6. 收尾**（被擋於：步驟 5）
@@ -194,7 +197,14 @@
   - B：同值時改用別的規則（例如輪流，或依上一次成交時間），需要另外的設計。
   - 結論：A，接受。同值時的順序已有測試釘住（`tests/modules/execution/deployment/test_sizing.py` 的 `test_equal_exposure_breaks_ties_by_cell_id`；審查說沒有測試是錯的），不必再補；步驟 4 的架構文件寫明這個順序，ADR 的 Result 在步驟 6 一併記下。
 
-拍板順序：D1–D4 在 2026-11-14 由 Will 一次拍板（D1：C；D2：A；D3：A；D4：A）。D5–D7 是步驟 2 的審查冒出來的，2026-11-14 由 Will 一次拍板（都選 A）；D5 的程式在步驟 2 之後的小 PR，D7 只改文件（步驟 4）；D6 退回未決（見該題）。
+- **D8 刪欄的 migration 跟步驟 1、2、4 同一次發版，還是晚一版**（狀態：未決，2026-11-14 步驟 3 開工時設計審查提出；擋住步驟：3 的 PR 合併進 `dev`、5）
+  - 背景：D1 選 C 時列的做法只有「同一次發版」。同一次發版帶 migration，所以步驟 2 的行為變更（cell 上限的算法）出問題時不能自動退回上一版 image，只能往前修；步驟 5 列的三個回滾觸發條件都是行為變更的風險，不是刪欄的。全域約束寫的理由（過渡值不進正式環境）不成立為必要條件：過渡值滿足既有 CHECK，步驟 2 的程式現在就跑在舊 schema 上。
+  - A：維持同一次發版——少一次帶停機的部署；行為變更出問題只能往前修（D1 選 C 時已接受「回滾只能往前修」）。
+  - B：分兩次。先發步驟 1、2、4（沒有 migration，新版不健康時 `bfx-deploy` 自動退回上一版 digest），在正式環境確認穩定後再發步驟 3——業界對刪欄的一般做法（先停用、下一版才刪）；代價是多一次帶 migration 的部署，步驟 3 的 PR 要等第一次發版後才合併，步驟 4 的文件要分兩次寫（第一次寫「欄位仍在、寫過渡值」）。
+  - 選 B 之前要先確認的事實（未查）：上一版 image 讀到沒有 credit_cell 列的 v2 basis 能不能正常運作；不能的話，自動退回只是換一種壞法，B 的好處不存在。
+  - 建議：B，前提是上面那個事實查過成立；不成立就 A。
+
+拍板順序：D1–D4 在 2026-11-14 由 Will 一次拍板（D1：C；D2：A；D3：A；D4：A）。D5–D7 是步驟 2 的審查冒出來的，2026-11-14 由 Will 一次拍板（都選 A）；D5 的程式在步驟 2 之後的小 PR，D7 只改文件（步驟 4）；D6 退回未決（見該題）。D8 是步驟 3 開工時的設計審查冒出來的，未決。
 
 ## 進度
 
