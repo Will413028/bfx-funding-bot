@@ -4,10 +4,13 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.core.telemetry import EventType, Phase
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+from bfx_funding_bot.external.bitfinex.order_port import CancelOutcome, CancelResult
 from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmitAcknowledged,
     SubmitOutcomeUnknown,
@@ -36,12 +39,15 @@ from bfx_funding_bot.modules.execution.deployment.standing_quote import (
     StandingQuote,
     StandingQuoteStore,
 )
+from bfx_funding_bot.modules.execution.managed_cancel import SweepResult
 from bfx_funding_bot.modules.execution.protocols import (
     AccountContext,
     Credentials,
     GuardResult,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.reconcile_monitors import StoppedOffersMonitor
+from bfx_funding_bot.modules.ledger import CapitalBlocked
 from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
     FillModelUnavailable,
@@ -51,6 +57,18 @@ from bfx_funding_bot.modules.strategy import CellConfig, DecisionOutcome, Strate
 from tests.external.bitfinex.test_funding_rules import FixedRules
 
 D = Decimal
+
+
+@pytest.fixture(autouse=True)
+def no_recorded_trading_state(monkeypatch):
+    """The planner's stop check reads the trading state with SQL; these tests have no
+    database, so it answers what an account with no recorded decision answers."""
+    async def read_current(session, *, account_id):
+        return None
+
+    monkeypatch.setattr(
+        "bfx_funding_bot.modules.execution.deployment.reconciler.read_current", read_current,
+    )
 
 
 @pytest.mark.asyncio
@@ -114,6 +132,13 @@ def _simulated_capital(ledger, *, cell_exposure=None, totals=None, reserves=None
                                     "explicit-test-policy", UUID(int=1), policy)
             return CapitalAvailable(applied, snapshot, evaluate_capital(policy, snapshot), D("0"),
                                     "1", {})
+
+        async def read_policy(self, session, scope, symbol):
+            total = totals[symbol]
+            policy = CapitalPolicy(enabled=total > 0, reserve_amount=reserves.get(symbol, D("0")),
+                                   max_cell_fraction=D("0.70"))
+            return AppliedPolicy(scope.exchange_account_id, symbol, 1,
+                                 "explicit-test-policy", UUID(int=1), policy)
 
         async def fingerprints_in_use(self, session, scope, symbol):
             return frozenset()
@@ -1143,6 +1168,12 @@ class _RecordingCapital:
     async def session_factory():
         yield None
 
+    async def read_policy(self, session, scope, symbol):
+        from bfx_funding_bot.modules.trading import AppliedPolicy, CapitalPolicy
+        policy = CapitalPolicy(enabled=True, max_cell_fraction=D("0.5"),
+                               max_offer_amount=self._ceilings.get(symbol))
+        return AppliedPolicy(scope.exchange_account_id, symbol, 1, "digest", UUID(int=1), policy)
+
     async def read(self, scope, *, now_ms, session=None):
         from bfx_funding_bot.modules.ledger import CapitalAvailable
         from bfx_funding_bot.modules.trading import (
@@ -1339,8 +1370,9 @@ class _FakeCanceller:
     def __init__(self) -> None:
         self.cancelled: list[str] = []
 
-    async def cancel(self, *, venue_offer_id, signal_correlation_id, account_id, ctx) -> None:
+    async def cancel(self, *, venue_offer_id, signal_correlation_id, account_id, ctx):
         self.cancelled.append(venue_offer_id)
+        return CancelResult(CancelOutcome.SUCCESS)
 
 
 def _venue_offer(
@@ -1685,3 +1717,264 @@ def test_the_neutral_reconciler_keeps_no_authority_cache() -> None:
     source = inspect.getsource(reconciler)
     assert "uncertain_exposure" not in source and "clear_uncertainty" not in source
     assert "getattr(self._ledger" not in source
+
+
+class _StopStateCapital:
+    def __init__(self, answer) -> None:
+        self._answer = answer
+
+    async def read_policy(self, session, scope, symbol):
+        if isinstance(self._answer, Exception):
+            raise self._answer
+        return self._answer
+
+
+class _RecordingSweep:
+    def __init__(self) -> None:
+        self.cancelled: list = []
+
+    async def cancel(self, symbols, *, reason):
+        self.cancelled.append((list(symbols), reason))
+        return SweepResult((), ())
+
+
+def _stop_state_planner(answer) -> DeploymentReconciler:
+    from bfx_funding_bot.modules.ledger import Scope
+
+    @asynccontextmanager
+    async def session_factory():
+        yield object()
+
+    planner = object.__new__(DeploymentReconciler)
+    planner._scope = Scope(UUID(int=7))
+    planner._session_factory = session_factory
+    planner._capital = _StopStateCapital(answer)
+    planner._managed_sweep = _RecordingSweep()
+    planner._conflict_alerted = set()
+    planner._stopped_offers, planner._clock = StoppedOffersMonitor(), lambda: 0
+    return planner
+
+
+def _stop_read_records(caplog) -> list[int]:
+    return [r.levelno for r in caplog.records
+            if r.getMessage() == "deployment_stop_state_unreadable symbol=fUST"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [
+    TypeError("read_policy() got an unexpected keyword argument"),
+    ProgrammingError("select x", {}, Exception("column x does not exist")),
+    PermissionError("secret file unreadable"),
+])
+async def test_a_bug_in_the_stop_state_read_places_nothing_and_is_an_error(error, caplog) -> None:
+    """A failed stop read is not "this currency is not stopped": that answer once left a
+    halted currency's offers standing behind a warning. The currency places nothing, and
+    nothing is cancelled on a state nobody could read."""
+    planner = _stop_state_planner(error)
+    with caplog.at_level(logging.WARNING):
+        assert await planner._pull_if_stopped("fUST") is True
+    assert planner._managed_sweep.cancelled == []
+    assert _stop_read_records(caplog) == [logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_a_bug_in_the_trading_state_read_places_nothing(monkeypatch, caplog) -> None:
+    async def read_current(session, *, account_id, environment):
+        return None
+
+    monkeypatch.setattr(
+        "bfx_funding_bot.modules.execution.deployment.reconciler.read_current", read_current,
+    )
+    planner = _stop_state_planner(CapitalBlocked("policy_missing"))
+    with caplog.at_level(logging.WARNING):
+        assert await planner._pull_if_stopped("fUST") is True
+    assert _stop_read_records(caplog) == [logging.ERROR]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [
+    OperationalError("select 1", {}, ConnectionRefusedError("db down")),
+    PoolTimeoutError("QueuePool limit reached"),
+    ConnectionResetError("connection reset by peer"),
+])
+async def test_an_unreachable_database_reading_the_stop_state_places_nothing_as_a_warning(
+    error, caplog,
+) -> None:
+    planner = _stop_state_planner(error)
+    with caplog.at_level(logging.WARNING):
+        assert await planner._pull_if_stopped("fUST") is True
+    assert planner._managed_sweep.cancelled == []
+    assert _stop_read_records(caplog) == [logging.WARNING]
+
+
+@pytest.mark.asyncio
+async def test_a_halted_account_pulls_its_offers_even_when_the_policy_is_refused(
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    async def read_current(session, *, account_id):
+        return SimpleNamespace(state="HALTED")
+
+    monkeypatch.setattr(
+        "bfx_funding_bot.modules.execution.deployment.reconciler.read_current", read_current,
+    )
+    planner = _stop_state_planner(CapitalBlocked("policy_rejected"))
+    assert await planner._pull_if_stopped("fUST") is True
+    assert planner._managed_sweep.cancelled == [(["fUST"], "fUST account HALTED")]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_policy_on_an_account_that_is_not_halted_is_left_to_the_capital_read(
+) -> None:
+    planner = _stop_state_planner(CapitalBlocked("policy_missing"))
+    assert await planner._pull_if_stopped("fUST") is False
+    assert planner._managed_sweep.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_stop_read_submits_nothing_for_that_currency(monkeypatch) -> None:
+    async def broken(self, session, scope, symbol):
+        raise TypeError("bug")
+
+    rec, executor, *_ = _build(exposure=D("0"), quotes=[_post_quote("fUST_a30")])
+    monkeypatch.setattr(type(rec._capital), "read_policy", broken)
+    await rec.deploy()
+    assert executor.ready_submissions == []
+
+
+class _OutcomeCanceller:
+    """Answers each cancel with the venue outcome the test names (acknowledged by default)."""
+
+    def __init__(self, outcomes: dict[str, CancelOutcome] | None = None) -> None:
+        self._outcomes = outcomes or {}
+        self.attempted: list[str] = []
+
+    async def cancel(self, *, venue_offer_id, signal_correlation_id, account_id, ctx):
+        self.attempted.append(venue_offer_id)
+        return CancelResult(self._outcomes.get(venue_offer_id, CancelOutcome.SUCCESS), "text")
+
+
+class _LiveOffers:
+    def __init__(self, *ids: str) -> None:
+        self._ids = ids
+
+    async def live(self, session, scope, symbols):
+        from bfx_funding_bot.modules.ledger import LiveManagedOffer
+        return tuple(LiveManagedOffer(i, "fUST", None) for i in self._ids)
+
+
+def _sweep(canceller, *ids: str):
+    from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
+
+    @asynccontextmanager
+    async def session_factory():
+        yield object()
+
+    return ManagedOfferSweep(session_factory=session_factory, account_id=UUID(int=7),
+                             canceller=canceller, ctx=_ctx(), offers=_LiveOffers(*ids))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", [
+    CancelOutcome.TRANSIENT_EXHAUSTED, CancelOutcome.OTHER_ERROR, CancelOutcome.FATAL,
+])
+async def test_a_cancel_the_venue_did_not_acknowledge_is_a_failed_cancel(outcome) -> None:
+    result = await _sweep(_OutcomeCanceller({"102": outcome}), "101", "102").cancel(reason="x")
+    assert result.acknowledged == ("101",)
+    assert result.failed == (("102", f"{outcome.value}: text"),)
+
+
+@pytest.mark.asyncio
+async def test_a_reprice_cancel_the_venue_did_not_acknowledge_is_not_logged_as_cancelled(
+    caplog,
+) -> None:
+    canc = _OutcomeCanceller({"4": CancelOutcome.TRANSIENT_EXHAUSTED})
+    rec, _, _ = _build(
+        exposure=D("570"), quotes=[_post_quote("fUST_a30")], canceller=canc,
+        reprice=RepricePolicy(enabled=True, tolerance_pct=0.10, min_age_ms=1_800_000,
+                              max_cancels_per_tick=2),
+    )
+    offers = tuple(_venue_offer(str(i), 0.001 + i * 0.0001) for i in range(5))
+    with caplog.at_level(logging.INFO):
+        await rec.deploy(venue_offers=offers)
+    # The failed attempt still spends the tick's budget: it reached the venue.
+    assert canc.attempted == ["4", "3"]
+    assert "reprice_cancelled voi=3" in caplog.text
+    assert "reprice_cancelled voi=4" not in caplog.text
+    assert "reprice_cancel_unacknowledged voi=4 outcome=transient_exhausted" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_refused_key_ends_the_stop_sweep_instead_of_counting_as_a_failed_cancel() -> None:
+    class _AuthBoom:
+        async def cancel(self, **kwargs):
+            raise ExecutorAuthError("apikey: invalid")
+
+    with pytest.raises(ExecutorAuthError):
+        await _sweep(_AuthBoom(), "101").cancel(reason="x")
+
+
+@pytest.mark.asyncio
+async def test_a_stop_sweep_that_cannot_list_the_offers_reports_them_as_unknown(
+    monkeypatch, caplog,
+) -> None:
+    from types import SimpleNamespace
+
+    async def read_current(session, *, account_id):
+        return SimpleNamespace(state="HALTED")
+
+    monkeypatch.setattr(
+        "bfx_funding_bot.modules.execution.deployment.reconciler.read_current", read_current,
+    )
+
+    class _BrokenOffers:
+        async def live(self, session, scope, symbols):
+            raise AttributeError("schema drift")
+
+    seen: list[tuple] = []
+    planner = _stop_state_planner(CapitalBlocked("policy_rejected"))
+    planner._managed_sweep = _sweep(_OutcomeCanceller(), "101")
+    planner._managed_sweep._offers = _BrokenOffers()
+    planner._stopped_offers = SimpleNamespace(
+        observe=lambda symbol, **kw: seen.append((kw["reason"], kw["venue_offer_ids"])))
+    with caplog.at_level(logging.ERROR):
+        assert await planner._pull_if_stopped("fUST") is True
+    assert seen == [("halted", None)]
+    assert "deployment_stop_sweep_failed symbol=fUST" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_currency_reports_the_cancels_that_did_not_go_through(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    async def read_current(session, *, account_id):
+        return SimpleNamespace(state="HALTED")
+
+    monkeypatch.setattr(
+        "bfx_funding_bot.modules.execution.deployment.reconciler.read_current", read_current,
+    )
+    seen: list[tuple] = []
+    planner = _stop_state_planner(CapitalBlocked("policy_rejected"))
+    planner._managed_sweep = _sweep(
+        _OutcomeCanceller({"102": CancelOutcome.OTHER_ERROR}), "101", "102")
+    planner._clock = lambda: 5_000
+    planner._stopped_offers = SimpleNamespace(
+        observe=lambda symbol, **kw: seen.append((symbol, kw)))
+    assert await planner._pull_if_stopped("fUST") is True
+    assert seen == [("fUST", {"reason": "halted", "venue_offer_ids": ("102",),
+                              "now_ms": 5_000})]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_stop_state_and_a_running_currency_are_reported_as_such() -> None:
+    from types import SimpleNamespace
+
+    seen: list[tuple] = []
+    for answer in (TypeError("bug"), ConnectionResetError("db"), CapitalBlocked("policy_missing")):
+        planner = _stop_state_planner(answer)
+        planner._clock = lambda: 5_000
+        planner._stopped_offers = SimpleNamespace(
+            observe=lambda symbol, **kw: seen.append(kw["reason"]))
+        await planner._pull_if_stopped("fUST")
+    assert seen == ["stop_state_failed", "stop_state_unreachable", None]

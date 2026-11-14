@@ -15,6 +15,8 @@ from math import isfinite
 from typing import Any, Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
 
+from sqlalchemy.exc import DisconnectionError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
@@ -75,6 +77,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardResult,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.execution.reconcile_monitors import StoppedOffersMonitor
 from bfx_funding_bot.modules.execution.safety.protection import (
     ProtectionPort,
     capital_block_trigger,
@@ -106,6 +109,13 @@ from bfx_funding_bot.modules.strategy import (
 from bfx_funding_bot.modules.trading import CapitalScope, fingerprint_of
 
 log = logging.getLogger(__name__)
+
+# "The database did not answer" (connection, pool, timeout), as opposed to an answer about
+# this process's own statements or setup. It only picks the log level of a failed stop read.
+_DATABASE_UNREACHABLE = (
+    OperationalError, InterfaceError, DisconnectionError, PoolTimeoutError,
+    ConnectionError, TimeoutError,
+)
 
 # A book that never qualified and a book that went stale are different faults
 # with different operator responses; the event must say which.
@@ -193,6 +203,7 @@ class DeploymentReconciler:
         # disabled, the managed offers there converge to none (lending envelope
         # D3/D4); None only in tests that build the reconciler directly.
         self._managed_sweep = managed_sweep
+        self._stopped_offers = StoppedOffersMonitor()
         self._safety = safety_chain
         self._executor = executor
         self._ctx = account_ctx
@@ -248,7 +259,7 @@ class DeploymentReconciler:
         }
 
     async def _pull_if_stopped(self, symbol: str) -> bool:
-        """Whether ``symbol`` must place nothing; if so, cancel its managed offers.
+        """Whether ``symbol`` must place nothing; if stopped, cancel its managed offers.
 
         The one place where the offers this bot placed are pulled when trading
         stops (D3 level 3, D4): the account is HALTED (an automatic protection
@@ -256,34 +267,57 @@ class DeploymentReconciler:
         or the currency's applied policy is disabled. Level-triggered: every
         tick re-reads the state and cancels what is still open, so a cancel
         refused or failed on one tick is retried on the next. Foreign offers
-        and taken loans are never touched. An unreadable state or policy is not
-        "stopped": the capital read below fails closed on it instead.
+        and taken loans are never touched. HALTED pulls whatever the policy
+        read says; a refused policy on an account that is not halted is not
+        "stopped" (the capital read below fails closed on it instead).
+
+        A read that fails answers neither "stopped" nor "not stopped": this
+        symbol places nothing and cancels nothing this tick, and the other
+        currencies go on. Answering "not stopped" for a bug in this read once
+        left a halted currency's offers standing behind a warning.
         """
+        scope = self._scope
         try:
-            scope = self._scope
             async with self._session_factory() as session:
-                applied = await self._capital.read_policy(session, scope, symbol)
-                if isinstance(applied, CapitalBlocked):
-                    return False
                 state = await read_current(session, account_id=scope.exchange_account_id)
-        except Exception:
-            # Not "stopped" (see above), but never silent: a programming error here once
-            # left a halted currency's offers standing without a trace.
-            log.warning("deployment_stop_state_unreadable symbol=%s", symbol, exc_info=True)
-            return False
+                applied = await self._capital.read_policy(session, scope, symbol)
+        except Exception as exc:
+            # The database not answering is expected now and then; anything else is a bug.
+            level = logging.WARNING if isinstance(exc, _DATABASE_UNREACHABLE) else logging.ERROR
+            log.log(level, "deployment_stop_state_unreadable symbol=%s", symbol, exc_info=True)
+            self._stopped_offers.observe(
+                symbol, venue_offer_ids=None, now_ms=self._clock(),
+                reason=(alerts.STOP_STATE_UNREACHABLE if level == logging.WARNING
+                        else alerts.STOP_STATE_FAILED))
+            return True
         halted = state is not None and state.state == HALTED
-        if applied.policy.enabled and not halted:
+        if not halted and (isinstance(applied, CapitalBlocked) or applied.policy.enabled):
+            self._stopped_offers.observe(symbol, reason=None, venue_offer_ids=(),
+                                         now_ms=self._clock())
             return False
         if self._managed_sweep is not None:
             why = "account HALTED" if halted else "disabled by policy"
+            stop = alerts.STOP_HALTED if halted else alerts.STOP_DISABLED
+            # What the monitor hears: the cancels that did not go through, or None
+            # when this symbol's managed offers could not even be listed.
+            not_pulled: tuple[str, ...] | None = None
             try:
-                await self._managed_sweep.cancel([symbol], reason=f"{symbol} {why}")
+                swept = await self._managed_sweep.cancel([symbol], reason=f"{symbol} {why}")
             except ProvenanceConflict as exc:
                 # One contradictory offer must not stop the other currencies: the
                 # sweep cannot tell which offers of this symbol are ours, so this
                 # symbol places nothing and the next tick reads it again.
                 self._report_provenance_conflict(symbol, exc.venue_offer_id)
+            except ExecutorAuthError:
+                raise  # the venue refused the key: the daemon's exit, not a stuck cancel
+            except Exception:
+                # Same isolation for any other failure of the sweep itself.
+                log.exception("deployment_stop_sweep_failed symbol=%s", symbol)
             else:
+                not_pulled = tuple(voi for voi, _ in swept.failed)
+            self._stopped_offers.observe(symbol, reason=stop, venue_offer_ids=not_pulled,
+                                         now_ms=self._clock())
+            if not_pulled is not None:
                 self._conflict_alerted.difference_update(
                     {key for key in self._conflict_alerted if key[0] == symbol}
                 )
@@ -841,8 +875,10 @@ class DeploymentReconciler:
     ) -> int:
         """砍掉 rate 已 stale-high 的 resting offers（policy 見 reprice.py）。
 
-        回傳實際發出的 cancel 數（observe mode 恆 0）。任何非 auth 錯誤只
-        log 不擋部署（sweep 是 best-effort 最佳化，deploy 才是主線）。
+        回傳送到 venue 的 cancel 數（observe mode 恆 0），venue 沒確認的也算：
+        額度限制的是對 venue 的呼叫次數。沒確認的不記成 cancelled，offer 仍在，
+        下一輪再判斷。任何非 auth 錯誤只 log 不擋部署（sweep 是 best-effort
+        最佳化，deploy 才是主線）。
         """
         assert self._reprice is not None
         quotes = [
@@ -893,7 +929,7 @@ class DeploymentReconciler:
                 )
                 break
             try:
-                await self._canceller.cancel(
+                result = await self._canceller.cancel(
                     venue_offer_id=offer.venue_offer_id,
                     signal_correlation_id=ref.signal_correlation_id,
                     account_id=self._ctx.account_id,
@@ -905,6 +941,10 @@ class DeploymentReconciler:
                 log.exception("reprice_cancel_error voi=%s", offer.venue_offer_id)
                 continue
             issued += 1
+            if not result.outcome.acknowledged:
+                log.warning("reprice_cancel_unacknowledged voi=%s outcome=%s",
+                            offer.venue_offer_id, result.outcome.value)
+                continue
             log.info(
                 "reprice_cancelled voi=%s symbol=%s offer_rate=%s ref_rate=%s "
                 "age_min=%.0f",

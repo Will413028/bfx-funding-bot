@@ -84,6 +84,15 @@ OFFER_END_JUDGED: Final = "offer_end_judged"
 # One live offer's provenance contradicts itself: its currency places nothing
 # (the other currencies continue) until the contradiction is resolved.
 PROVENANCE_CONFLICT: Final = "provenance_conflict"
+# A halted or disabled currency still has managed offers at the venue after the alert age,
+# or its stop state has been unreadable that long (execution/reconcile_monitors.py).
+STOPPED_OFFERS_STANDING: Final = "stopped_offers_standing"
+# Its ``reason`` values. The two "unreadable" ones carry no offers: the database did not
+# answer (it usually comes back), or the read itself failed (a bug: nobody is pulling).
+STOP_HALTED: Final = "halted"
+STOP_DISABLED: Final = "disabled"
+STOP_STATE_UNREACHABLE: Final = "stop_state_unreachable"
+STOP_STATE_FAILED: Final = "stop_state_failed"
 # Level 4 alerts (execution/safety/protection.py): alerts, never stops.
 NAV_DROP: Final = "nav_drop"
 FOREIGN_LENDING: Final = "foreign_lending"
@@ -142,6 +151,7 @@ ALERT_EVENTS: Final[Mapping[str, str]] = {
     OFFER_END_UNCONFIRMED: WARNING,
     OFFER_END_JUDGED: WARNING,             # the caller sends INFO when outcome=explained
     PROVENANCE_CONFLICT: WARNING,
+    STOPPED_OFFERS_STANDING: CRITICAL,     # WARNING when only the database is unreachable
     NAV_DROP: WARNING,
     FOREIGN_LENDING: WARNING,
     VENUE_OFFERS_MAY_REMAIN: CRITICAL,
@@ -176,6 +186,7 @@ DEDUP_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
     FOREIGN_EXPOSURE: ("venue_offer_id",),
     UNKNOWN_QUARANTINE_AGED: ("attempt_id", "minutes"),
     PROVENANCE_CONFLICT: ("symbol", "venue_offer_id"),
+    STOPPED_OFFERS_STANDING: ("symbol", "reason", "minutes"),
     OFFER_END_UNCONFIRMED: ("venue_offer_id",),
     OFFER_END_JUDGED: ("venue_offer_id", "outcome"),
     CREDENTIAL_RECOVERY_MODE: ("account",),        # one per account, whatever the error text
@@ -455,6 +466,8 @@ def default_level(event: str, fields: Mapping[str, object]) -> str:
         return WARNING if fields.get("complete") is True else CRITICAL
     if event == CREDENTIAL_RECHECK_FAILING and fields.get("recovered") is True:
         return INFO
+    if event == STOPPED_OFFERS_STANDING and fields.get("reason") == STOP_STATE_UNREACHABLE:
+        return WARNING
     return ALERT_EVENTS.get(event, WARNING)
 
 
@@ -484,6 +497,10 @@ def title(event: str, fields: Mapping[str, object]) -> str:
         return "venue reconcile not accepted: no deployment until it is"
     if event == PROVENANCE_CONFLICT:
         return f"{fields.get('symbol', '?')} paused: an offer's provenance is contradictory"
+    if event == STOPPED_OFFERS_STANDING:
+        if fields.get("reason") in (STOP_STATE_UNREACHABLE, STOP_STATE_FAILED):
+            return f"{fields.get('symbol', '?')} paused: its stop state cannot be read"
+        return f"{fields.get('symbol', '?')} is stopped but its offers are still at the venue"
     if event == NAV_DROP:
         return f"NAV drop on {fields.get('symbol', '?')} (alert only; lending continues)"
     if event == FOREIGN_LENDING:
@@ -575,6 +592,7 @@ __all__ = [
     "PROTECTION_TRIPPED",
     "PROVENANCE_CONFLICT",
     "RECONCILE_NOT_ACCEPTED",
+    "STOPPED_OFFERS_STANDING",
     "TRADING_CONTROL_APPLIED",
     "TRADING_CONTROL_FAILED",
     "TRADING_CONTROL_REJECTED",

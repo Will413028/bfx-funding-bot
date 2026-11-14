@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from uuid import UUID
 
-from bfx_funding_bot.external.bitfinex.order_port import VenueOrderPort
+from bfx_funding_bot.external.bitfinex.order_port import CancelResult, VenueOrderPort
 from bfx_funding_bot.modules.execution.bus import DomainEventBus
 from bfx_funding_bot.modules.execution.command_boundary import CommandBoundary
 from bfx_funding_bot.modules.execution.command_gate import (
@@ -53,8 +53,8 @@ class ReservationEmittingMiddleware:
         return self._command_gate
 
     async def cancel(self, *, venue_offer_id: str, signal_correlation_id: UUID,
-                     account_id: str, ctx: AccountContext) -> None:
-        await self._command_gate.cancel(venue_offer_id=venue_offer_id,
+                     account_id: str, ctx: AccountContext) -> CancelResult:
+        return await self._command_gate.cancel(venue_offer_id=venue_offer_id,
             signal_correlation_id=signal_correlation_id, account_id=account_id, ctx=ctx)
 
     async def submit(self, ready: ReadyToSubmit, ctx: AccountContext) -> SubmittedOrder:

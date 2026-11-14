@@ -2,7 +2,8 @@
 
 ``ForeignExposureMonitor`` reports venue offers no durable intent traces to;
 ``QuarantineAgeMonitor`` reports UNKNOWN submits that have quarantined their
-symbol for too long. Both keep their dedup state across reconcile cycles.
+symbol for too long; ``StoppedOffersMonitor`` reports a stopped currency whose
+managed offers are still at the venue. All keep their state across cycles.
 """
 from __future__ import annotations
 
@@ -85,3 +86,58 @@ class QuarantineAgeMonitor:
             alerts.emit(alerts.UNKNOWN_QUARANTINE_AGED, symbol=attempt.symbol,
                         attempt_id=str(attempt.attempt_id), minutes=age // 60_000,
                         amount=str(attempt.amount))
+
+
+STOPPED_OFFERS_ALERT_AFTER_MS = 30 * 60 * 1000
+STOPPED_OFFERS_REPEAT_MS = 6 * 60 * 60 * 1000
+_UNREADABLE = (alerts.STOP_STATE_UNREACHABLE, alerts.STOP_STATE_FAILED)
+
+
+class StoppedOffersMonitor:
+    """Alert when a currency that must hold no managed offer still does (D3 level 3, D4).
+
+    The planner pulls a halted or disabled currency's managed offers every tick
+    and normally they are gone within one or two. This reports the case where
+    they are not -- the venue keeps refusing, the gate refuses for an open
+    uncertainty, a provenance conflict, a bug -- whatever the cause, because it
+    looks only at the state: a stop reason and the cancels that did not go
+    through this tick (``venue_offer_ids``; None when the offers could not even
+    be listed). An unreadable stop state is a condition of its own, with its own
+    clock: the currency places nothing and nobody can tell whether it should be
+    pulling. After 30 minutes, then every 6 hours.
+    """
+
+    def __init__(self, *, alert_after_ms: int = STOPPED_OFFERS_ALERT_AFTER_MS,
+                 repeat_ms: int = STOPPED_OFFERS_REPEAT_MS) -> None:
+        self._after = alert_after_ms
+        self._repeat = repeat_ms
+        # (symbol, "standing" | "unreadable") -> (since_ms, last_alert_ms)
+        self._held: dict[tuple[str, str], tuple[int, int | None]] = {}
+
+    def observe(self, symbol: str, *, reason: str | None,
+                venue_offer_ids: Sequence[str] | None, now_ms: int) -> None:
+        if reason in _UNREADABLE:
+            # Whether offers stand is unknown this tick: the standing clock keeps running.
+            self._due_then_emit((symbol, "unreadable"), symbol, reason, None, now_ms)
+            return
+        self._held.pop((symbol, "unreadable"), None)
+        if reason is None or (venue_offer_ids is not None and not venue_offer_ids):
+            self._held.pop((symbol, "standing"), None)
+            return
+        self._due_then_emit((symbol, "standing"), symbol, reason, venue_offer_ids, now_ms)
+
+    def _due_then_emit(self, key: tuple[str, str], symbol: str, reason: str,
+                       venue_offer_ids: Sequence[str] | None, now_ms: int) -> None:
+        since, last = self._held.get(key, (now_ms, None))
+        due = now_ms - since >= self._after and (last is None or now_ms - last >= self._repeat)
+        self._held[key] = (since, now_ms if due else last)
+        if not due:
+            return
+        unreadable = key[1] == "unreadable"
+        alerts.emit(
+            alerts.STOPPED_OFFERS_STANDING, symbol=symbol, reason=reason,
+            minutes=(now_ms - since) // 60_000,
+            offers=("unknown" if venue_offer_ids is None or unreadable
+                    else len(venue_offer_ids)),
+            venue_offer_ids=",".join(venue_offer_ids or ()),
+        )
