@@ -153,7 +153,7 @@
     - bot 起不來（觸發條件：bot 開機失敗；此時 `bfx-deploy` 已停掉 bot 與 webapi）：`bfx-op` 與營運 UI 都不可用（`docs/runbooks/deploy.md` 第 5 節末）。停機前已掛在 venue 上的 offer 留在原處，金額與利率仍在發版前的包絡內，但沒有人管；要不要在 Bitfinex 網頁手動撤單由 owner 當場決定（`deploy.md` 的既有緊急程序），修正 release 部署後 bot 自己接手。
   - 停止條件：上面任何一條驗收不成立。
   - 需要人做的事：同步驟 5。
-- [ ] **6. 收尾**（被擋於：步驟 5b）
+- [x] **6. 收尾**（被擋於：步驟 5b）
   - 完成定義逐項核對（上面的清單，逐步驟）。
   - 獨立設計審查：對 `dev` 上步驟 1–4（含步驟 3）的累積 diff 跑 design-review，檢查有沒有沒重新評估就沿用的機制、繞著既有結構的補丁、留成 pending 的項目。
   - ADR 的 Result 段換成實際結果（inventory D02），包含：`schema_version` 升版本身不需要 migration（P9）、兩個欄位以 migration 刪除與 v1 digest 不能重算（D1、P14）、D2–D4 的結論、`venue_observation.py` 的 trades 起點（P13）。在 `docs/adr/2026-10-02-ledger-s1-port-and-wire-contracts.md` 第 83 行的 positions wire 契約標註 `unattributedLent` 由本 ADR 取代（inventory D04）。
@@ -193,7 +193,7 @@
   - A：對象改成每一筆 terminal history 列——與 D3 的理由一致；比 D3 再多擋一類。（建議）
   - B：維持只查有成交的列，在程式註解寫明零成交的列不查與原因。
   - 結論：A。`write_basis` 對每一筆 terminal history 列都查，不看成交量。
-- **D6 `credit_provenance_conflict` 要不要列為保護級的 block**（狀態：未決——Will 2026-11-14 選 A，實作後的 `/code-review` 查出下面「實作後才知道的事實」，A 達不到它的目的，退回重新拍板；擋住步驟：無）
+- **D6 `credit_provenance_conflict` 要不要列為保護級的 block**（狀態：已決 2026-11-14，Will：B；先前選 A，實作後的 `/code-review` 查出下面「實作後才知道的事實」，A 達不到它的目的而退回；擋住步驟：無）
   - 背景：同一類矛盾在 offer 還掛著時是 `offer_provenance_conflict`，列在 `execution/safety/protection.py` 的 `CAPITAL_BLOCK_TRIGGERS`（`IDENTITY_CONFLICT`：重試解不了，停下）。`credit_provenance_conflict` 不在表裡，改動前後都一樣：它只擋住該幣別的支出，terminal 列或 trade 滑出查詢範圍後 block 自己消失，兩個 attempt 仍被記成已反映（最後一句是兩位審查者讀程式的推論，未實測）。D3 把對象擴大到每一筆 trade，等於擴大這種會自己消失的暫停。
   - A：加進 `IDENTITY_CONFLICT`，與掛著的 offer 同一種處置——行為變更，要補測試與 runbook，並確認停下之後的自動恢復路徑。（建議；恢復路徑尚未查）
   - B：維持暫時性，在 D3 與程式註解寫明是刻意的。
@@ -205,6 +205,7 @@
   - C：不讓矛盾的 attempt 被記成已反映（留在 unresolved），讓它走既有的 `unclassifiable_commitment`：那個 trigger 在條件還在時每一輪都會再觸發，會一直停到矛盾被處理。這才擋得住 D3 擔心的「兩個都被判成已反映」；要改 `_reflected` 的呼叫處，並設計矛盾怎麼解除（不能靠人工步驟當正常流程），需要另一份設計。
   - 步驟 6 的設計審查另指出：D3、D5 擴大的檢查對象，在 D6 拍板前缺乏必要條件（擋不住 D3 擔心的事），拍板 B 或 C 時一併決定那些對象留不留。
   - 目前的行為是 B（暫時擋住該幣別、之後自己消失）。建議：不做 A；要不要做 C 取決於這種矛盾實際會不會發生——正式環境的 journal 有沒有任何一個 venue offer 被兩個 attempt 宣稱，一條唯讀查詢就能回答，查完再決定。
+  - 結論：B。2026-11-14 在正式庫的唯讀查詢（transport `ack` 與 `bound_to_venue` 兩種來源聯集）：被認領的 venue offer 38 個、被兩個以上 attempt 認領的 0、跨 symbol 或帳戶的 0；歷來 36228 列 basis symbol 列裡 `credit_provenance_conflict` 0、`offer_provenance_conflict` 0（總 attempt 數 40，樣本小）。依事先定的規則「0 筆→B」，維持暫時阻擋，`basis.py` 的 `require_one_story` docstring 寫明是刻意的；D3、D5 擴大的檢查對象照留（多擋只會是暫時的，不停機）。A 的本機分支刪除。重新評估的觸發條件：任何一份 basis 出現 `credit_provenance_conflict`，就做 C 的設計。
 - **D7 同幣別的 cell 都沒有掛單時，分配固定先給名稱排序在前的 cell**（狀態：已決 2026-11-14，Will；擋住步驟：無）
   - 背景：`allocate_capital` 依 `cell_exposure` 由小到大分配，同值時依名稱。credit 不再計入 cell 之後，錢全借出去再還款時每個 cell 的 `cell_exposure` 都是 0，名稱在前的 cell 每次先拿到 `min(spendable, cell_limit)`（最多 70%），其餘才給下一個。以前借出的存量會把較重的 cell 排到後面。ADR 的 Rationale 接受「資金全照其中一個訊號的利率借出」，但沒有寫到這個固定偏向。
   - A：接受，補一條 sizing 測試釘住同值時的順序，寫進步驟 4 的架構文件。（建議）
@@ -218,7 +219,7 @@
   - B 成立的前提：上一版 image 退回後讀到 v2 basis（沒有 credit_cell 列、`unattributed_credits = credits`）仍能運作。2026-11-14 讀 `origin/main` 的程式，推論可以（未實測）：`capital.py` 只要求 `unattributed_credits <= credits`；`basis.py` 的 carry 規則以上一份 basis 的 credit 列判斷「已帶過」，不看有沒有 credit_cell 列，所以舊的 credit 不會觸發 `trades_range_uncovered`，只是不歸屬到任何 cell。
   - 結論：B。全域約束、步驟 3 的合併條件、步驟 4、步驟 5 已照此改寫，新增步驟 5b。
 
-拍板順序：D1–D4 在 2026-11-14 由 Will 一次拍板（D1：C；D2：A；D3：A；D4：A）。D5–D7 是步驟 2 的審查冒出來的，2026-11-14 由 Will 一次拍板（都選 A）；D5 的程式在步驟 2 之後的小 PR，D7 只改文件（步驟 4）；D6 退回未決（見該題）。D8 是步驟 3 開工時的設計審查冒出來的，2026-11-14 由 Will 拍板（B）。
+拍板順序：D1–D4 在 2026-11-14 由 Will 一次拍板（D1：C；D2：A；D3：A；D4：A）。D5–D7 是步驟 2 的審查冒出來的，2026-11-14 由 Will 一次拍板（都選 A）；D5 的程式在步驟 2 之後的小 PR，D7 只改文件（步驟 4）；D6 先選 A 後退回，同日在正式庫查詢後拍板 B（見該題）。D8 是步驟 3 開工時的設計審查冒出來的，2026-11-14 由 Will 拍板（B）。
 
 ## 進度
 
@@ -232,4 +233,4 @@
 | 4 架構文件改寫 | 完成（PR 待合併） | 2026-11-14，分支 `docs/architecture-cell-limit-resting-offers`：計畫的行號已漂移，改以符號重新定位（資金預算段、acceptance 段、cell exposure 段、basis 表清單、I-CAP、I-CC）；消費端搜尋在 `backend/ARCHITECTURE.md` 的每個命中行逐行列在 PR 說明；`trades_range_uncovered`、`recent fill`、「歸屬該 cell」在 `backend/ARCHITECTURE.md`、`docs/runbooks`、`docs/slo.md` 0 行；引用的符號與路徑以 `rg` 核對（`evaluate_capital` 在 `modules/trading/policy.py`，舊文寫 `capital.py`，順手改正；`accepted_capital_basis_credit_cell` 仍被 `deploy/vm/pgbackrest/ledger_digest.py` 的還原 digest 涵蓋，所以寫成「授權讀取不讀」而非「沒有讀者」） | `/code-review`：純文件改動，未跑 | `1f540d18` |
 | 5 第一次發版（步驟 1、2、4）與正式環境驗證 | 完成 | 2026-11-14：發版前 `git diff origin/main origin/dev -- backend/alembic/versions` 無輸出；PR #411 的 CI 與 Security 全綠，Will 核准合併（同時取消觀察期）。部署：`bfx-deploy` 11:25:39Z `deployed: 80ebe7fb7c55 migrations=none; ok; ledger #526`，`current` 指向 `80ebe7fb`。basis（依 observation 的 `query_finished_at_ms` 排序；`accept_revision` 不是每份 basis 唯一，不能拿來挑最新）：第一份 `schema_version = 2` 在 11:24:33Z，到 13:53Z 共 98 份，最新一份是 v2；v2 basis 的 `credit_cell` 列 0；98 個 symbol 列裡 block 0、`unexplained_lending` 0、`unattributed_credits <> credits` 0、cell 加總 ≠ `offered` 0。bot log（確認是 JSON 格式）自部署起約 2.5 小時，error／critical／Traceback 0。還原演練：手動 `bfx-restore-test@current`，`restore test passed`，receipt `~/bfx/dr-evidence/restore-ledger.json` 的 `observation_query_revision` 37049 ≥ 第一份 v2 basis 的 query revision 36947（全量備份 `20261108-031722F_20261114-031723D` 加上 WAL 重播），`rehearsal.source_revision` 是 `80ebe7fb`，`verifier_exit_status` 0。API 契約由發版 commit 的 CI 證明 | 正式環境的 fUST funding wallet 自 2026-11-08 起只剩 0.005（掛單 0、借出 0），早於這次部署；「headroom 變大、bot 補掛單」在正式環境沒有可觀察的資金，cell 加總等於 `offered` 是 0 = 0，新行為只由 CI 的測試與 mutation 擔保 | PR #411，merge `80ebe7fb` |
 | 5b 第二次發版（步驟 3 的刪欄）與正式環境驗證 | 完成 | 2026-11-14：部署前列數 symbol 36177、credit 26029，`alembic_version` `545b2877e9bd`；PR #414 CI 與 Security 全綠，Will 核准合併。`bfx-deploy`：14:42:17Z 選定目標，14:49:11Z `deployed: 5f0fa45eb9bf migrations=applied; ok; ledger #528`（選定到完成約 7 分鐘）。schema：`alembic_version` `dc9d9290c2c0`；兩欄在 `information_schema.columns` 不存在；列數 symbol 36210、credit 26029（不少於部署前）。部署後 30 分鐘（到 15:19Z）的 20 份 basis：block 0、`unexplained_lending` 0、cell 加總 ≠ `offered` 0、`credit_cell` 列 0；bot log（JSON）error／critical／Traceback 0；bot、webapi 已運作 32 分鐘，webapi healthy。還原演練：手動 `bfx-restore-test@current` 通過，receipt 的 `observation_query_revision` 37099 ≥ 部署後第一份 basis 的 37078，`boot.schema_head` `dc9d9290c2c0`，`rehearsal.source_revision` `5f0fa45e`，`verifier_exit_status` 0 | 無 | PR #414，merge `5f0fa45e` |
-| 6 收尾 | 程式完成待驗收（PR 待合併；D6 未決） | 2026-11-14，分支 `docs/cell-limit-step6-closeout`：完成定義逐步驟核對（各步驟的進度列都有單元、integration、CI、mutation、`/code-review` 紀錄；本步驟只改文件）；`check_inventory.py`：`67 rows, 42 files named by the pattern, 0 errors`；ADR Result 換成實際結果，`rg -c '尚未實作'` 0；2026-10-02 ADR 加修訂註記（D04）。設計審查（全新 subagent，對 `e87b106d^..d8a6f14b` 的累積 diff）：發現 6（blocking 0）——修 3（延後清單補 O03 與 `boot-check` 的觸發條件、digest 那條刪掉已發生過的觸發條件）、記錄 1（`require_one_story` 擴大的對象缺乏必要條件，與 D6 同一件事，留在 D6）、交 Will 1（D6 仍未決）、駁回 1（`protection.py` 新增的兩個停機 trigger 是 PR #406，不屬於本計畫；兩個 reason 是持續存在的資料矛盾，重試不會消失，與 D6 會自己消失的矛盾不同類）。延後項搬到主清單 | PR 的 CI；D6 拍板與 worktree／分支清理要 Will | |
+| 6 收尾 | 完成 | 2026-11-14，分支 `docs/cell-limit-step6-closeout`：完成定義逐步驟核對（各步驟的進度列都有單元、integration、CI、mutation、`/code-review` 紀錄；本步驟只改文件）；`check_inventory.py`：`67 rows, 42 files named by the pattern, 0 errors`；ADR Result 換成實際結果，`rg -c '尚未實作'` 0；2026-10-02 ADR 加修訂註記（D04）。設計審查（全新 subagent，對 `e87b106d^..d8a6f14b` 的累積 diff）：發現 6（blocking 0）——修 3（延後清單補 O03 與 `boot-check` 的觸發條件、digest 那條刪掉已發生過的觸發條件）、記錄 1（`require_one_story` 擴大的對象缺乏必要條件，與 D6 同一件事，留在 D6）、交 Will 1（D6，同日拍板 B）、駁回 1（`protection.py` 新增的兩個停機 trigger 是 PR #406，不屬於本計畫；兩個 reason 是持續存在的資料矛盾，重試不會消失，與 D6 會自己消失的矛盾不同類）。延後項搬到主清單；PR #416 CI 全綠合併（`ce8bcb3e`）。Will 同日核准刪分支：worktree `bfx-funding-bot-attrib`、`fix/basis-cell-attribution`（本機與遠端）、遠端 `feat/drop-attribution-columns` 已刪（`git ls-remote` 0 行）；D6 拍板 B（見決定表） | 無 | PR #416，D6 收尾 PR |
