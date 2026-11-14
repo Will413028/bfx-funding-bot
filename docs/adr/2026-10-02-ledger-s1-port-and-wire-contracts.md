@@ -7,6 +7,8 @@ tags: [bfx-funding-bot, decision, ledger, architecture, api-contract, concurrenc
 
 # 帳本 S1 的 port 與 wire 契約
 
+> 2026-11-14 由 [2026-11-14-cell-limit-bounds-resting-offers-not-lent-stock](2026-11-14-cell-limit-bounds-resting-offers-not-lent-stock.md) 修訂：positions wire 的 `unattributedLent` 已刪除（credit 不再歸屬到 cell）；本檔其餘決定不變。
+
 ## Context
 
 [母 ADR](2026-09-28-ledger-journal-and-venue-mirror-replace-event-sourcing.md) 定了「bot 事實寫 journal、venue 事實取已接受觀測」，09-29b Amendment 定了單次 halt 切換、空表與休眠程式先上線。S1-2～S1-3（PR #61–#85，2026-09-30～10-02）把 21 組 consumer 改成依賴 port、由開機時選 legacy 或 ledger 實作；過程中出現幾個母 ADR 沒回答、且之後切換時會被問「為什麼」的選擇。本檔只記這些契約。

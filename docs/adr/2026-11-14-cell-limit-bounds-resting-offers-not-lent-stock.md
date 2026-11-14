@@ -7,7 +7,7 @@ tags: [bfx-funding-bot, decision, ledger, capital]
 
 # cell 上限只管掛單中的金額，不再把已借出的 credit 歸屬到 cell
 
-> owner 於 2026-11-14 核可。「Result」列的是核可當下的改動盤點，實作另依計畫進行，完成後把這段換成實際結果。
+> owner 於 2026-11-14 核可。實作依計畫 `docs/plans/2026-11-14-cell-limit-resting-offers.md` 完成，2026-11-14 兩次發版；「Result」是實際結果。
 
 ## Context
 
@@ -87,27 +87,33 @@ applied policy 的「既有 max_cell_fraction 0.70」，
 - 授權裡不再有推論出來的數字，「低估」與「重複計」都不會發生；`trades_range_uncovered` 造成的暫停也消失。
 - 掛單中的金額是 bot 自己的 offer，provenance 精確，不需要 venue 沒給的資料。
 
-## Result（核可當下的改動盤點，`origin/dev` `1b3b33b5`；尚未實作）
+## Result（實際結果，2026-11-14；計畫 `docs/plans/2026-11-14-cell-limit-resting-offers.md`）
 
-`git grep -lE 'cell_exposure|max_cell_fraction|cell_limit|cell_headroom|accepted_capital_basis_(credit_)?cell|AcceptedCapitalBasis(Credit)?Cell'`
-在 `backend/src`、`backend/scripts`、`deploy`、`frontend/src` 命中 13 個檔：
-
-| 位置 | 預計 |
-|---|---|
-| `modules/ledger/_internal/basis.py`（783 行） | 刪歸屬規則與 credit_cell 寫入；`cells` 只累計 offers |
-| `modules/ledger/tables.py`、`modules/ledger/__init__.py` | `accepted_capital_basis_credit_cell` 留表與歷史、不再寫入；`unattributed_credits` 的去向另定 |
-| `modules/ledger/_internal/capital_reader.py` | 讀法不變（仍讀 `accepted_capital_basis_cell`），內容少了 credit |
-| `modules/trading/policy.py`、`modules/trading/capital.py` | 公式不變；docstring 與 `unattributed_credits` 的驗證調整 |
-| `modules/execution/deployment/sizing.py` | 不變（emptiest-first 改以掛單中的金額排序，行為隨 `E_cell` 定義改變） |
-| `apps/restore_boot_check.py`、`deploy/vm/pgbackrest/ledger_digest.py` | 仍讀 `accepted_capital_basis_cell`；確認 digest 與 restore gate 新舊方向都過 |
-| `modules/api/funding_status.py`、`frontend/src`（3 檔＋`api.gen.ts`） | `cell_limit`／`cell_headroom` 的說明文字；`unattributed` 的顯示 |
-| `backend/scripts/capital_mutation_gate.py` | 對應的 mutant 調整 |
-| `backend/ARCHITECTURE.md` | I-CAP、I-CC 與「cell exposure 只算可歸屬的部分」一段改寫 |
-| migration | basis `schema_version` 升版（canonical payload 不再帶 credit 的 cell 集合）；不刪表 |
-| 測試 | `cell_exposure` 35 行／9 檔、`accepted_capital_basis_*cell` 19 行／約 8 檔等，逐一改寫或刪除（刪測試要 `Removed-Test:`） |
-
-未盤點：`fills`（部分成交的證據）除了 recent fill 歸屬之外有沒有其他讀者；模擬環境既有 basis 裡的舊歸屬要不要處理
-（正式環境 0 筆）。
+- **basis**：`modules/ledger/_internal/basis.py` 刪掉 trade／carry／recent fill 三條歸屬規則與 `trades_range_uncovered`；
+  `accepted_capital_basis_cell` 只累計該 cell 掛著的受管 offer 的剩餘金額；新 basis 不寫
+  `accepted_capital_basis_credit_cell`（表與歷史列保留）。`SCHEMA_VERSION` 升為 2。升版本身不需要 migration：
+  `schema_version` 與 basis 的 `digest` 都只有寫入者、沒有讀者（計畫 P9）；核可時盤點表的「migration：basis
+  `schema_version` 升版」一列不成立。
+- **trades 查詢起點**：`execution/venue_observation.py` 在「還沒有已接受的觀測」時把 trades 起點推回每筆 active credit
+  opening 的那段，是 trade 歸屬規則的輸入，一併刪除；`ObservationWindow.previous_query_started_at_ms` 因此沒有讀者而刪除
+  （計畫 P13）。
+- **兩個欄位（D1：刪）**：`accepted_capital_basis_symbol.unattributed_credits` 與
+  `accepted_capital_basis_credit.attribution_basis` 由 migration `dc9d9290c2c0` 刪除，在第一次發版之後晚一版上線（D8）。
+  後果：v1 basis 的 `digest` 無法再由資料列重算（它的輸入含這兩欄，計畫 P14）；沒有程式重算它。
+- **API 與營運 UI（D2：刪）**：funding status 的 `unattributed_credit_exposure`、positions 的 `unattributedLent`、前端兩處
+  顯示與文案刪除。後者修訂 [2026-10-02-ledger-s1-port-and-wire-contracts](2026-10-02-ledger-s1-port-and-wire-contracts.md)
+  的 positions wire 契約（那裡已加註）。
+- **已結束 offer 的 provenance 矛盾（D3、D5）**：保留 `credit_provenance_conflict`，對象改為每一筆 terminal history 列
+  （不看成交量）、上一份 basis 有而現在不見的 offer、本次觀測的每一筆 trade。這個 block 是否升為停機級（D6）未決，
+  現行行為是暫時擋住該幣別。
+- **還原演練開機檢查（D4）**：每個 symbol 列至少做一次資金讀取，沒有 cell 列時用探測 cell id `boot-check`。
+- **分配順序（D7）**：同幣別的 cell 都沒有掛單時，`allocate_capital` 依 cell id 排序先分配，已由
+  `test_equal_exposure_breaks_ties_by_cell_id` 釘住並寫進 `backend/ARCHITECTURE.md`。
+- **不變的部分**：`cell_limit` 公式、conservation 判定、週報（`modules/live_validation/`）的歸屬。
+- **上線**：第一次發版 PR #411（2026-11-14，無 migration），第二次 PR #414（套用 `dc9d9290c2c0`）。兩次部署後的
+  basis 都是 block 0、cell 加總 ≠ `offered` 0、`credit_cell` 列 0，還原演練通過。正式環境 fUST 自 2026-11-08 起
+  幾乎沒有資金（掛單 0、借出 0），「headroom 隨借出不再縮小」在正式環境沒有可觀察的資金，由 CI 的測試與
+  capital mutation gate 擔保。
 
 ## Revocation Triggers
 
