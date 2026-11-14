@@ -197,7 +197,7 @@ def funding_snapshot() -> dict[str, Any]:
                      "basis_token": "b5", "policy": policy,
                      "available_balance": "9007199254740993.123456789",
                      "unreflected_commitments": "0.000000001", "total_capital": "1200.5",
-                     "spendable": "1100.5", "unattributed_credit_exposure": "0",
+                     "spendable": "1100.5",
                      "cells": {"fUST_a30": {"spendable": "1100.5", "cell_limit": "840.35",
                                             "cell_headroom": "840.35",
                                             "max_new_offer": "840.35", "reason": None}}},
@@ -225,9 +225,9 @@ def funding_dry_run() -> dict[str, Any]:
 class _Reads:
     async def list_positions(self, session: Any, scope: Any) -> tuple[PositionView, ...]:
         return (
-            PositionView("fUSD", Decimal("0"), Decimal("0"), Decimal("0"), None, None, 1000, None),
+            PositionView("fUSD", Decimal("0"), Decimal("0"), Decimal("0"), None, 1000, None),
             PositionView("fUST", Decimal("11.50"), Decimal("22.25"), Decimal("2314.03"),
-                         Decimal("4"), 3, 1000, 2000),
+                         3, 1000, 2000),
         )
 
     async def list_offers(self, session: Any, scope: Any, *, states: Any) -> tuple[OfferView, ...]:

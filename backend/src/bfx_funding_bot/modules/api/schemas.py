@@ -204,15 +204,13 @@ class WeeklyAttributionResponse(ResponseModel):
 class PositionResponse(ResponseModel):
     """One symbol's capital as disjoint components, in the symbol's own units.
 
-    ``available + offered + lent`` is the symbol's total. ``unattributedLent`` is a
-    subset of ``lent`` (never an addend); null when the authority has no such fact.
+    ``available + offered + lent`` is the symbol's total.
     """
 
     symbol: str
     available: str
     offered: str
     lent: str
-    unattributed_lent: str | None = Field(default=None, serialization_alias="unattributedLent")
     n_credits: int | None = Field(default=None, serialization_alias="nCredits")
     last_updated_ms: int = Field(serialization_alias="lastUpdatedMs")
     last_reconciled_at: int | None = Field(

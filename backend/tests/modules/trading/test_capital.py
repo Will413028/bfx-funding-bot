@@ -33,7 +33,7 @@ from bfx_funding_bot.modules.trading import (
 D = Decimal
 ACCOUNT = UUID(int=1)
 SCOPE = CapitalScope(ACCOUNT, "fUSD", "alpha")
-VALUES = SymbolCapital("fUSD", D("1000"), D("200"), D("300"), D("50"), D("90"),
+VALUES = SymbolCapital("fUSD", D("1000"), D("200"), D("300"), D("90"),
                        (("alpha", D("350")), ("beta", D("150"))), None)
 BASIS = AcceptedCapitalBasis(
     ACCOUNT, UUID(int=20), UUID(int=2), 10, 1000, 1100, (VALUES,),
@@ -145,7 +145,7 @@ def test_basis_unresolved_quarantine_blocks_after_resolution_until_new_basis() -
     resolved = (uncertainty(is_open=False),)
     result = fold(basis=basis, uncertainties=resolved)
     assert result == Blocked("execution_unknown", (("basis_quarantine", str(quarantine)),))
-    other = SymbolCapital("fUST", D("10"), D("0"), D("0"), D("0"), D("0"), (), None)
+    other = SymbolCapital("fUST", D("10"), D("0"), D("0"), D("0"), (), None)
     fust = fold(scope=replace(SCOPE, symbol="fUST"), policy=replace(POLICY, symbol="fUST"),
                 basis=replace(basis, symbols=(VALUES, other)), uncertainties=resolved)
     assert isinstance(fust, Available)
@@ -177,7 +177,7 @@ def test_matched_unknown_retains_transport_outcome_and_counts_commitment() -> No
 
 def test_partial_fill_counts_remaining_and_credit_without_original_commitment() -> None:
     original = attempt(1, "500", "acknowledged", seq=5)
-    values = SymbolCapital("fUSD", D("500"), D("200"), D("300"), D("0"), D("0"),
+    values = SymbolCapital("fUSD", D("500"), D("200"), D("300"), D("0"),
                            (("alpha", D("500")),), None)
     basis = replace(BASIS, symbols=(values,), reflected_attempts=frozenset({original.attempt_id}))
     result = fold(basis=basis, attempts=(original,))
@@ -190,7 +190,7 @@ def test_partial_fill_counts_remaining_and_credit_without_original_commitment() 
 def test_reflected_terminal_offer_never_resurrects_original_amount() -> None:
     original = attempt(1, "500", "acknowledged", seq=5)
     values = replace(VALUES, available=D("1000"), offered=D("0"), credits=D("0"),
-                     unattributed_credits=D("0"), cells=())
+                     cells=())
     basis = replace(BASIS, symbols=(values,), reflected_attempts=frozenset({original.attempt_id}))
     result = fold(basis=basis, attempts=(original,))
     assert isinstance(result, Available)
@@ -210,18 +210,17 @@ def test_quarantined_attempt_is_accounted_after_quarantine_resolution() -> None:
     assert blocked == Blocked("execution_unknown", (("basis_quarantine", str(UUID(int=500))),))
 
 
-def test_foreign_offers_and_unattributed_credit_are_not_cell_exposure() -> None:
-    values = replace(VALUES, cells=(), credits=D("300"), unattributed_credits=D("300"),
+def test_foreign_offers_and_cell_less_credit_are_not_cell_exposure() -> None:
+    values = replace(VALUES, cells=(), credits=D("300"),
                      offered=D("0"), foreign_offers=D("9999"))
     result = fold(basis=replace(BASIS, symbols=(values,)))
     assert isinstance(result, Available)
     assert result.view.snapshot == CapitalSnapshot(D("1000"), D("0"), D("1300"), D("0"))
-    assert result.view.unattributed_credit_exposure == D("300")
     assert result.view.budget.cell_headroom == D("600")
 
 
 def test_ambiguous_credit_counts_once_in_total_and_fully_in_each_candidate_cell() -> None:
-    values = replace(VALUES, offered=D("0"), unattributed_credits=D("0"),
+    values = replace(VALUES, offered=D("0"),
                      cells=(("alpha", D("300")), ("beta", D("300"))))
     for cell in ("alpha", "beta"):
         result = fold(scope=replace(SCOPE, cell_id=cell), basis=replace(BASIS, symbols=(values,)))
@@ -313,7 +312,7 @@ def test_acceptance_block_is_not_overridden_by_valid_amounts() -> None:
 
 def test_scope_block_blocks_every_symbol() -> None:
     failure = Blocked("observation_inconsistent", ())
-    other = SymbolCapital("fUST", D("10"), D("0"), D("0"), D("0"), D("0"), (), None)
+    other = SymbolCapital("fUST", D("10"), D("0"), D("0"), D("0"), (), None)
     basis = replace(BASIS, symbols=(VALUES, other), scope_block=failure)
     assert fold(basis=basis) is failure
     assert fold(scope=replace(SCOPE, symbol="fUST"), policy=replace(POLICY, symbol="fUST"),
@@ -322,7 +321,7 @@ def test_scope_block_blocks_every_symbol() -> None:
 
 def test_symbol_block_blocks_only_its_symbol() -> None:
     failure = Blocked("unclassifiable_commitment", (("symbol", "fUSD"),))
-    other = SymbolCapital("fUST", D("10"), D("0"), D("0"), D("0"), D("0"), (), None)
+    other = SymbolCapital("fUST", D("10"), D("0"), D("0"), D("0"), (), None)
     basis = replace(BASIS, symbols=(replace(VALUES, block=failure), other))
     assert fold(basis=basis) is failure
     fust = fold(scope=replace(SCOPE, symbol="fUST"), policy=replace(POLICY, symbol="fUST"),
@@ -332,7 +331,7 @@ def test_symbol_block_blocks_only_its_symbol() -> None:
 
 
 def test_policy_block_for_one_symbol_leaves_another_available() -> None:
-    other = SymbolCapital("fUST", D("10"), D("0"), D("0"), D("0"), D("0"), (), None)
+    other = SymbolCapital("fUST", D("10"), D("0"), D("0"), D("0"), (), None)
     basis = replace(BASIS, symbols=(VALUES, other))
     failure = Blocked("policy_unavailable", (("symbol", "fUSD"),))
     assert fold(basis=basis, policy=failure) is failure
@@ -406,7 +405,7 @@ def test_policy_failure_precedes_open_uncertainty() -> None:
 
 def test_check_order() -> None:
     """Every check fails at once; fixing the reported one reveals the next."""
-    other = SymbolCapital("fUST", D("10"), D("0"), D("0"), D("0"), D("0"), (), None)
+    other = SymbolCapital("fUST", D("10"), D("0"), D("0"), D("0"), (), None)
     full = replace(BASIS, symbols=(replace(VALUES, block=Blocked("symbol_block", ())), other),
                    scope_block=Blocked("scope_block", ()),
                    unresolved_attempts=((UUID(int=102), "fUSD"),),

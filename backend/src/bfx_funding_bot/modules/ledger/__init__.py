@@ -922,9 +922,6 @@ class CapitalAvailable:
     applied: AppliedPolicy
     snapshot: CapitalSnapshot
     budget: CapitalBudget
-    # Diagnostic: credits with no cell provenance. Part of total_capital, never
-    # of snapshot.cell_exposure.
-    unattributed_credit_exposure: Decimal
     basis_token: str
     attribution: Mapping[str, object] | None = None
 
@@ -1011,16 +1008,13 @@ class UncertaintyView:
 class PositionView:
     """One symbol's capital split into disjoint components, in the symbol's own units.
 
-    ``available + offered + lent`` is the symbol's total. ``unattributed_lent`` is a
-    SUBSET of ``lent`` (credits no managed attempt owns), never an addend; None when
-    the authority has no such fact.
+    ``available + offered + lent`` is the symbol's total.
     """
 
     symbol: str
     available: Decimal
     offered: Decimal
     lent: Decimal
-    unattributed_lent: Decimal | None
     n_credits: int | None
     last_updated_ms: int
     last_reconciled_at_ms: int | None

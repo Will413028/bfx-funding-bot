@@ -106,16 +106,6 @@ export function PositionsCard({ positions }: PositionsCardProps) {
                         className="text-emerald-400"
                       />
                     </dd>
-                    {p.unattributedLent != null &&
-                      Number(p.unattributedLent) > 0 && (
-                        <dd
-                          className="mt-0.5 text-xs text-zinc-500"
-                          data-testid="unattributed-lent"
-                        >
-                          {t("unattributedLent")}{" "}
-                          <DecimalAmount value={p.unattributedLent} />
-                        </dd>
-                      )}
                   </div>
                   <div>
                     <dt className="text-xs text-zinc-500">{t("credits")}</dt>

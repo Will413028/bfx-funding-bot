@@ -48,9 +48,9 @@ class _Reads:
     async def list_positions(self, session, scope):
         self.calls.append(("positions", scope, None))
         return (
-            PositionView("fUSD", Decimal("0"), Decimal("0"), Decimal("0"), None, 0, 1000, None),
+            PositionView("fUSD", Decimal("0"), Decimal("0"), Decimal("0"), 0, 1000, None),
             PositionView("fUST", Decimal("11.5"), Decimal("22.25"), Decimal("2314.03"),
-                         Decimal("4"), 3, 1000, 2000),
+                         3, 1000, 2000),
         )
 
     async def list_offers(self, session, scope, *, states):
@@ -143,8 +143,8 @@ def test_positions_realm_scoped_camel_case(app_client, reads):
     fust = data[1]
     # Disjoint components straight from the view; no reserved/realized.
     assert (fust["available"], fust["offered"], fust["lent"]) == ("11.5", "22.25", "2314.03")
-    assert fust["unattributedLent"] == "4"
-    assert data[0]["unattributedLent"] is None and data[0]["lastReconciledAtMs"] is None
+    assert "unattributedLent" not in fust
+    assert data[0]["lastReconciledAtMs"] is None
     assert "reserved" not in fust and "realized" not in fust
     assert fust["nCredits"] == 3
     assert fust["lastReconciledAtMs"] == 2000  # *Ms suffix (contract v2 rename)

@@ -93,7 +93,6 @@ class LedgerCapitalAuthority:
             applied=view.applied,
             snapshot=view.snapshot,
             budget=view.budget,
-            unattributed_credit_exposure=view.unattributed_credit_exposure,
             basis_token=encode_basis_token(read.query_id, read.clock_revision),
         )
 

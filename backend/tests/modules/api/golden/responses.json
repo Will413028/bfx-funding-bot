@@ -208,7 +208,6 @@
             "unreflected_commitments": "0.000000001",
             "total_capital": "1200.5",
             "spendable": "1100.5",
-            "unattributed_credit_exposure": "0",
             "cells": {
               "fUST_a30": {
                 "spendable": "1100.5",
@@ -268,7 +267,6 @@
           "available": "0",
           "offered": "0",
           "lent": "0",
-          "unattributedLent": null,
           "nCredits": null,
           "lastUpdatedMs": 1000,
           "lastReconciledAtMs": null
@@ -278,7 +276,6 @@
           "available": "11.5",
           "offered": "22.25",
           "lent": "2314.03",
-          "unattributedLent": "4",
           "nCredits": 3,
           "lastUpdatedMs": 1000,
           "lastReconciledAtMs": 2000

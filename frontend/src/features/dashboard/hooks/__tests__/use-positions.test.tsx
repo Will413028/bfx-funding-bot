@@ -18,7 +18,6 @@ const POSITIONS: Position[] = [
     available: "50",
     offered: "100",
     lent: "1.5",
-    unattributedLent: null,
     nCredits: 2,
     lastUpdatedMs: 1_790_000_000_000,
     lastReconciledAtMs: 1_790_000_000_000,
