@@ -499,8 +499,7 @@ accepted_capital_basis (每個 accepted observation 一列，同 txn 寫入)
   PK id; observation_id UNIQUE; accept_revision, attempt_seq_high_water, scope_block, digest
   + accepted_capital_basis_symbol（含 block 與 conservation verdict）/ _cell / _credit /
     _credit_cell（歷史表：新 basis 不寫入、授權讀取不讀，只有還原驗證的 digest 涵蓋）/ _attempt（classification）/ _quarantine
-  _symbol.unattributed_credits 與 _credit.attribution_basis：欄位仍在、授權讀取／API 不讀，新 basis 寫過渡值
-  （等於 credits、固定 'unattributed'），下一次發版以 migration 刪除
+  _symbol.unattributed_credits 與 _credit.attribution_basis：已刪除（migration dc9d9290c2c0，D1）
 
 uncertainty_resolution_requests (CLI→daemon 裁決請求；bfx_operator 只 INSERT 請求欄位，webapi 只讀)
   request_id, scope, uncertainty_id, action, observation_id, venue_offer_id, decision,
@@ -871,7 +870,7 @@ credential vault 解密。公開站（I-PUB）不經 webapi：`bfx-public-site` 
 
 - **I-SW 單一寫入者曝險**：`DeploymentReconciler` 是 venue 提交的唯一寫入者；訊號層只寫 StandingQuote。每個 scope 的 ledger 寫入都持有 scope 的 transaction advisory lock；attempt、outcome、resolution、cancel 與 quarantine 的寫入推進同一個 command clock，query 只記下起始 revision、acceptance 只在 clock 未前進時成立（兩者都不推進 clock）；送單授權以 basis token 對 clock 做 CAS，不靠 in-memory 狀態。
 - **I-VTA venue 即真相**：venue 事實只來自被接受的觀測：不帶 symbol filter 的 wallets、offers、credits／loans、history 與 trades，加上一次時間上不重疊、digest 相同的 active confirmation，且這期間 scope 的 query 與 command clock 都沒動。WS 只產生 venue hint；90s cycle 保證收斂。
-- **I-CAP canonical capital authority**：每 account/symbol 獨立計算。A=venue available，L=尚未證明反映於 snapshot 的 durable commitments，R=applied reserve，T=canonical available+offers+lent（去重），E_cell=該 cell 掛著的受管 offers 的剩餘金額 + unreflected commitments。active credits/loans 只計入該 symbol 的 C 與 T，不歸屬到任何 cell（ADR `docs/adr/2026-11-14-cell-limit-bounds-resting-offers-not-lent-stock.md`）；per-cell 金額在觀測接受時寫進 basis（`accepted_capital_basis_cell`），authorization read 只查表、不問 venue（`ledger/_internal/basis.py`）。`accepted_capital_basis_credit_cell` 是留著的歷史表，新 basis 不寫入；symbol 表的 `unattributed_credits` 與 credit 表的 `attribution_basis` 仍在、寫過渡值、授權讀取與 API 不讀，下一次發版刪除。外來 offer（D2）不進 T 也不進 E_cell；未知 ownership 不捏造。
+- **I-CAP canonical capital authority**：每 account/symbol 獨立計算。A=venue available，L=尚未證明反映於 snapshot 的 durable commitments，R=applied reserve，T=canonical available+offers+lent（去重），E_cell=該 cell 掛著的受管 offers 的剩餘金額 + unreflected commitments。active credits/loans 只計入該 symbol 的 C 與 T，不歸屬到任何 cell（ADR `docs/adr/2026-11-14-cell-limit-bounds-resting-offers-not-lent-stock.md`）；per-cell 金額在觀測接受時寫進 basis（`accepted_capital_basis_cell`），authorization read 只查表、不問 venue（`ledger/_internal/basis.py`）。`accepted_capital_basis_credit_cell` 是留著的歷史表，新 basis 不寫入；歸屬留下的 symbol 表 `unattributed_credits` 與 credit 表 `attribution_basis` 已由 migration `dc9d9290c2c0` 刪除。外來 offer（D2）不進 T 也不進 E_cell；未知 ownership 不捏造。
 - **I-SP spendable**：`spendable=max(0,A-L-R)`；每 tick 多 cells 共用此 pool。planner、command admission、status 共用 evaluator；command gate 在 scope lock 與同一 transaction 內以 CAS 重驗 query、clock、basis 與 policy head、重算預算並跑 guard，才 insert attempt；授權不讀任何 in-memory 狀態。
 - **I-CC concentration**：`cell_limit=max(0,T-R)*0.70`，`cell_headroom=max(0,cell_limit-E_cell)`，`new_offer_amount≤min(spendable,cell_headroom)`；單一 active cell 也固定70%。reserve 增加或資金下降不召回貸款，只阻擋超限新單。金額向下量化並通過 adapter minimum/precision；不足 minimum 就 block，不增加金額跨越 headroom。
 - **歷史／simulation 說明**：舊 `allocate_gap`（已刪除）、reserved-only tracker rescale、固定 cap 與153 dust threshold 不是 live authority；`0d29fc8` 的單 active cell100% relaxation 已移除。相關歷史及 G3 未通過結果保留，不作新命令授權。
