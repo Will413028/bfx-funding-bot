@@ -16,7 +16,8 @@ It reports; it does not gate. A surviving mutant is a line the mirrored unit tes
 change, which is a question for the reviewer, not a verdict: the mutant may be equivalent, or
 an integration test may be what defends it (those are not run here). The exit code is 0 unless
 the script itself fails; a source it could not judge is named in the summary with the reason
-(its unit tests do not run it, or its changed functions have more than ``--max-mutants`` mutants).
+(its unit tests do not run it, or more than ``--max-mutants`` mutants would have to run). A
+mutant in code no unit test runs is counted apart, not as a survivor: nothing was tried on it.
 
 Usage (from ``backend/``):
     uv run python -m scripts.mutation_changed --base origin/dev --summary /tmp/mutation.md
@@ -62,6 +63,7 @@ class Judged:
     mutants: int = 0
     skipped: str = ""                       # why it was not judged; empty when it was
     unjudged: int = 0                       # mutants that timed out or crashed: neither killed nor survived
+    not_run: int = 0                        # mutants in code no selected test runs; not in ``mutants``
     diffs: dict[str, str] = field(default_factory=dict)
 
 
@@ -151,15 +153,23 @@ def judge(source: Path, functions: Sequence[str], out_dir: Path, jobs: int,
     report_path = out_dir / (source.with_suffix("").as_posix().replace("/", "__") + ".json")
     try:
         report = matrix.build([source], selection, jobs, report_path, functions=functions,
-                              derived_functions=True, show_survivors=True, max_mutants=max_mutants)
+                              derived_functions=True, show_survivors=True, max_mutants=max_mutants,
+                              max_diffs=SHOWN)
     except matrix.MatrixError as exc:
         print(f"{source}: not judged: {exc}", flush=True)        # the whole reason, for the job log
         reason = str(exc).splitlines()[0]
         if reason.startswith("no test broke"):       # the matrix's canary: nothing selected runs this code
             reason = f"the unit tests under {tests} do not run this file (an integration test may)"
         return Judged(source, tuple(functions), tests, skipped=reason)
-    return Judged(source, tuple(report["functions"]), tests, tuple(report["survived"]),
-                  int(report["killed"]), int(report["mutants"]), diffs=dict(report["survivor_diffs"]),
+    not_run = set(report["not_reached"])     # the matrix counts these as survived
+    survived = tuple(mutant for mutant in report["survived"] if mutant not in not_run)
+    if not_run and len(not_run) == int(report["mutants"]):
+        return Judged(source, tuple(report["functions"]), tests, not_run=len(not_run),
+                      skipped=f"the unit tests under {tests} run none of these functions "
+                              "(an integration test may)")
+    return Judged(source, tuple(report["functions"]), tests, survived,
+                  int(report["killed"]), int(report["mutants"]) - len(not_run),
+                  diffs=dict(report["survivor_diffs"]), not_run=len(not_run),
                   unjudged=len(report["timed_out"]) + len(report["crashed"]))
 
 
@@ -189,6 +199,7 @@ def render(judged: Sequence[Judged], not_started: Sequence[Path], base: str) -> 
         else:
             total = item.mutants + item.unjudged
             hung = f" ({item.unjudged} timed out or crashed)" if item.unjudged else ""
+            hung += f" ({item.not_run} more in code these tests do not run)" if item.not_run else ""
             lines.append(f"| `{item.source}` | {names} | `{item.tests}` | {item.killed}/{total}{hung} "
                          f"| {len(item.survived)} |")
     for path in not_started:
@@ -244,7 +255,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _write_json(out_dir: Path, judged: Sequence[Judged], not_started: Sequence[Path]) -> None:
     (out_dir / "mutation-changed.json").write_text(json.dumps(
         [{"source": str(j.source), "functions": list(j.functions), "tests": str(j.tests) if j.tests else None,
-          "killed": j.killed, "mutants": j.mutants, "unjudged": j.unjudged, "survived": list(j.survived),
+          "killed": j.killed, "mutants": j.mutants, "unjudged": j.unjudged, "not_run": j.not_run,
+          "survived": list(j.survived),
           "skipped": j.skipped}
          for j in judged] + [{"source": str(p), "skipped": "time budget"} for p in not_started],
         indent=2) + "\n")

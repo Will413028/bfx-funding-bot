@@ -290,15 +290,16 @@ def survivor_diffs(copy: Path, sources: Sequence[Path], module_name: str | None,
 def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Path,
           module_name: str | None = None, functions: Sequence[str] = (), *,
           derived_functions: bool = False, show_survivors: bool = False,
-          max_mutants: int | None = None) -> dict[str, Any]:
+          max_mutants: int | None = None, max_diffs: int | None = None) -> dict[str, Any]:
+    """``max_mutants`` limits the mutants a test runs for: one no selected test reaches costs
+    nothing. ``show_survivors`` adds mutmut's diff of the survivors a test did run, the first
+    ``max_diffs`` of them: a diff parses the whole module, seconds each in a large one."""
     before = sandbox.digest(sources)
     with tempfile.TemporaryDirectory(prefix="mutation-kill-matrix-") as tmp:
         workdir = Path(tmp)
         copy = workdir / "repo"
         sandbox.copy_repository(copy)
         names = select_mutants(_mutate(copy, sources, module_name), functions, derived_functions)
-        if max_mutants is not None and len(names) > max_mutants:
-            raise MatrixError(f"{len(names)} mutants, over the limit of {max_mutants} for one run")
         judged_functions = sorted({f for f in functions
                                    if any(in_functions(name, [f], derived_functions) for name in names)})
         started = time.monotonic()
@@ -315,6 +316,9 @@ def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Pat
             if not tests:
                 results[name] = "not_reached"
         print(f"{len(names)} mutants, {len(results)} reached by no selected test", flush=True)
+        if max_mutants is not None and len(names) - len(results) > max_mutants:
+            raise MatrixError(f"{len(names) - len(results)} mutants to run, "
+                              f"over the limit of {max_mutants} for one run")
         with ThreadPoolExecutor(max_workers=jobs) as pool:
             futures = {pool.submit(_judge, copy, workdir, name, tests, timeout): name
                        for name, tests in reached.items() if tests}
@@ -329,8 +333,10 @@ def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Pat
                     report["sources"], report["selection"] = [str(s) for s in sources], list(selection)
                     report["functions"] = judged_functions
                     out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-        diffs = (survivor_diffs(copy, sources, module_name, _report(results, len(names))["survived"])
-                 if show_survivors else None)
+        diffs = None
+        if show_survivors:
+            ran = [m for m in _report(results, len(names))["survived"] if results[m] != "not_reached"]
+            diffs = survivor_diffs(copy, sources, module_name, ran[:max_diffs])
     if sandbox.digest(sources) != before:
         raise MatrixError("a source changed while the matrix ran")
     report = _report(results, len(names))

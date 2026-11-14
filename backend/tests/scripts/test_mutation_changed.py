@@ -130,7 +130,7 @@ def test_judging_asks_the_matrix_for_those_functions_only(tmp_path: Path, monkey
         seen.update(kwargs, sources=sources, selection=selection, out=out)
         return {"functions": ["derive_capital"], "survived": ["m.x_derive_capital__mutmut_2"], "killed": 4,
                 "mutants": 5, "survivor_diffs": {"m.x_derive_capital__mutmut_2": "-a\n+b"},
-                "timed_out": ["m.x_derive_capital__mutmut_7"], "crashed": []}
+                "timed_out": ["m.x_derive_capital__mutmut_7"], "crashed": [], "not_reached": []}
 
     monkeypatch.setattr(matrix, "build", fake)
     source = Path("backend/src/bfx_funding_bot/modules/trading/capital.py")
@@ -139,6 +139,7 @@ def test_judging_asks_the_matrix_for_those_functions_only(tmp_path: Path, monkey
     assert seen["selection"] == ["-m", changed.UNIT_ONLY, "tests/modules/trading"]
     assert seen["functions"] == ["derive_capital", "SymbolCapital.__post_init__"]
     assert seen["derived_functions"] is True and seen["show_survivors"] is True and seen["max_mutants"] == 300
+    assert seen["max_diffs"] == changed.SHOWN
     assert (result.killed, result.mutants, result.survived) == (4, 5, ("m.x_derive_capital__mutmut_2",))
     assert result.unjudged == 1
     assert result.functions == ("derive_capital",)          # what was judged, not what was asked
@@ -233,3 +234,22 @@ def test_main_reports_and_exits_zero_whatever_survives(tmp_path: Path, monkeypat
     listed = json.loads((out / "mutation-changed.json").read_text())
     assert [entry["source"] for entry in listed] == [str(source) for source in sources]
     assert listed[0]["survived"] == ["m.x_f__mutmut_1"] and listed[1]["skipped"] == "time budget"
+
+
+def test_a_mutant_no_unit_test_runs_is_not_a_survivor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = Path("backend/src/bfx_funding_bot/modules/trading/capital.py")
+    report: dict[str, object] = {
+        "functions": ["f", "g"], "killed": 1, "mutants": 4, "timed_out": [], "crashed": [],
+        "survived": ["m.x_f__mutmut_2", "m.x_g__mutmut_1", "m.x_g__mutmut_2"],
+        "not_reached": ["m.x_g__mutmut_1", "m.x_g__mutmut_2"], "survivor_diffs": {"m.x_f__mutmut_2": "-a\n+b"},
+    }
+    monkeypatch.setattr(matrix, "build", lambda *args, **kwargs: report)
+    partly = changed.judge(source, ["f", "g"], tmp_path, 2)
+    assert (partly.killed, partly.mutants, partly.survived, partly.not_run) == (1, 2, ("m.x_f__mutmut_2",), 2)
+    text = changed.render([partly], [], "b")
+    assert "| 1/2 (2 more in code these tests do not run) | 1 |" in text and "x_g__mutmut_1" not in text
+    report.update(killed=0, mutants=2, survived=report["not_reached"], survivor_diffs={})
+    none = changed.judge(source, ["g"], tmp_path, 2)
+    assert none.survived == () and none.not_run == 2
+    assert none.skipped == ("the unit tests under backend/tests/modules/trading run none of these functions "
+                            "(an integration test may)")
