@@ -104,8 +104,8 @@ applied policy 的「既有 max_cell_fraction 0.70」，
   顯示與文案刪除。後者修訂 [2026-10-02-ledger-s1-port-and-wire-contracts](2026-10-02-ledger-s1-port-and-wire-contracts.md)
   的 positions wire 契約（那裡已加註）。
 - **已結束 offer 的 provenance 矛盾（D3、D5）**：保留 `credit_provenance_conflict`，對象改為每一筆 terminal history 列
-  （不看成交量）、上一份 basis 有而現在不見的 offer、本次觀測的每一筆 trade。這個 block 是否升為停機級（D6）未決，
-  現行行為是暫時擋住該幣別。
+  （不看成交量）、上一份 basis 有而現在不見的 offer、本次觀測的每一筆 trade。這個 block 不升為停機級（D6：B，正式庫沒有
+  任何 venue offer 被兩個 attempt 認領），暫時擋住該幣別，出現一次就重新設計。
 - **還原演練開機檢查（D4）**：每個 symbol 列至少做一次資金讀取，沒有 cell 列時用探測 cell id `boot-check`。
 - **分配順序（D7）**：同幣別的 cell 都沒有掛單時，`allocate_capital` 依 cell id 排序先分配，已由
   `test_equal_exposure_breaks_ties_by_cell_id` 釘住並寫進 `backend/ARCHITECTURE.md`。

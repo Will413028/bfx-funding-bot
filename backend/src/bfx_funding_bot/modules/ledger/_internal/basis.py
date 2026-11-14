@@ -142,7 +142,14 @@ class _Classifier:
 
     def require_one_story(self, venue_id: str, symbol: str) -> None:
         """An ended offer named by contradictory provenance blocks its symbol: two
-        attempts claiming one venue offer could both be classified as reflected."""
+        attempts claiming one venue offer could both be classified as reflected.
+
+        The block is deliberately temporary and not a halt trigger (unlike
+        ``offer_provenance_conflict``): it lasts while the ended offer stays in the
+        observed range, then clears with both attempts recorded as reflected. A halt
+        would not fix that either and spends an automatic recovery; production had no
+        venue offer claimed by two attempts when this was decided (plan D6).
+        """
         try:
             self.owner(venue_id, symbol)
         except LookupError:
