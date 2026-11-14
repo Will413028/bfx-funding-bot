@@ -257,3 +257,13 @@ def test_a_mutant_no_unit_test_runs_is_not_a_survivor(tmp_path: Path, monkeypatc
     report.update(timed_out=["m.x_f__mutmut_9"])
     hung = changed.judge(source, ["f", "g"], tmp_path, 2)
     assert (hung.skipped, hung.mutants, hung.unjudged, hung.not_run) == ("", 0, 1, 2)
+
+
+def test_mutants_over_the_limit_are_listed_as_not_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = Path("backend/src/bfx_funding_bot/modules/trading/capital.py")
+    report = {"functions": ["f"], "killed": 2, "mutants": 3, "timed_out": [], "crashed": [], "not_reached": [],
+              "survived": ["m.x_f__mutmut_3"], "survivor_diffs": {}, "over_limit": ["m.x_f__mutmut_4"]}
+    monkeypatch.setattr(matrix, "build", lambda *args, **kwargs: report)
+    result = changed.judge(source, ["f"], tmp_path, 2, 3)
+    assert (result.skipped, result.mutants, result.over_limit) == ("", 3, 1)
+    assert "| 2/3 (1 more over the limit, not run) | 1 |" in changed.render([result], [], "b")
