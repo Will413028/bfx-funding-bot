@@ -67,8 +67,21 @@ class Box:
 
 def test_a_diff_gives_the_added_and_changed_lines_of_each_file() -> None:
     ranges = changed.changed_lines(DIFF)
-    # A hunk that only removes lines changes none; a deleted file has no new lines.
-    assert ranges == {Path("backend/src/bfx_funding_bot/modules/ledger/x.py"): [(3, 4), (20, 20)]}
+    # A hunk that only removes lines touches the lines it sat between; a deleted file has none.
+    assert ranges == {Path("backend/src/bfx_funding_bot/modules/ledger/x.py"): [(3, 4), (10, 11), (20, 20)]}
+
+
+def test_lines_removed_from_a_function_name_it() -> None:
+    source = "def first():\n    a = 1\n    return a\n\n\ndef second():\n    return 2\n"
+    removed = """\
+--- a/backend/src/bfx_funding_bot/m.py
++++ b/backend/src/bfx_funding_bot/m.py
+@@ -3,2 +2,0 @@ def first():
+-    a += 1
+-    a += 2
+"""
+    ranges = changed.changed_lines(removed)[Path("backend/src/bfx_funding_bot/m.py")]
+    assert changed.functions_at(source, ranges) == ["first"]
 
 
 def test_lines_name_top_level_functions_and_methods() -> None:

@@ -66,8 +66,9 @@ class Judged:
 
 
 def changed_lines(diff: str) -> dict[Path, list[tuple[int, int]]]:
-    """Per file, the line ranges (first, last; in the new file) a unified diff adds or changes.
-    A hunk that only removes lines changes none."""
+    """Per file, the line ranges (first, last; in the new file) a unified diff touches. A hunk
+    that only removes lines touches the two lines the removal sits between: lines taken out of
+    a function change it, and the diff alone does not say which side they belonged to."""
     ranges: dict[Path, list[tuple[int, int]]] = {}
     current: Path | None = None
     previous = ""
@@ -83,9 +84,8 @@ def changed_lines(diff: str) -> dict[Path, list[tuple[int, int]]]:
         hunk = _HUNK.match(line)
         if hunk and current is not None:
             count = int(hunk["count"]) if hunk["count"] is not None else 1
-            if count:
-                start = int(hunk["start"])
-                ranges.setdefault(current, []).append((start, start + count - 1))
+            start = int(hunk["start"])              # for a removal, the line it comes after
+            ranges.setdefault(current, []).append((start, start + count - 1) if count else (start, start + 1))
     return ranges
 
 
