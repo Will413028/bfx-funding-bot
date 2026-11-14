@@ -438,7 +438,6 @@ async def test_u_counts_once_in_total_and_in_no_cell(book) -> None:
         assert view.snapshot.cell_exposure == 0
         assert view.budget.cell_headroom == Decimal("700")
         assert view.budget.max_new_offer == Decimal("700")
-        assert view.unattributed_credit_exposure == Decimal("300")
 
 
 @pytest.mark.asyncio
@@ -458,7 +457,6 @@ async def test_trade_attributed_credit_is_its_cells_exposure(book) -> None:
     )
     a30, p2 = _view(await book.read()), _view(await book.read(cell="p2"))
     assert a30.snapshot.total_capital == p2.snapshot.total_capital == Decimal("1000")
-    assert a30.unattributed_credit_exposure == 0
     assert (a30.snapshot.cell_exposure, a30.budget.cell_headroom) == (
         Decimal("200"),
         Decimal("500"),
@@ -500,7 +498,7 @@ async def test_loan_turning_into_split_credits_stays_in_its_cells_exposure(book)
         await book.accept(_observation(cash, credits=credits, **extra))
         a30, p2 = _view(await book.read()), _view(await book.read(cell="p2"))
         assert a30.snapshot.cell_exposure == trade
-        assert a30.unattributed_credit_exposure == p2.snapshot.cell_exposure == 0
+        assert p2.snapshot.cell_exposure == 0
 
 
 @pytest.mark.asyncio
@@ -615,7 +613,6 @@ async def test_partial_fill_does_not_add_original_reservation(book) -> None:
     view = _view(await book.read())
     assert view.snapshot.total_capital == Decimal("1000")
     assert view.snapshot.cell_exposure == Decimal("200")
-    assert view.unattributed_credit_exposure == 0
     assert view.snapshot.unreflected_commitments == 0
 
 

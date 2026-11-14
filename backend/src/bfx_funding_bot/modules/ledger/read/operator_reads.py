@@ -395,7 +395,6 @@ class LedgerOperatorReads:
                 AcceptedCapitalBasisSymbolRow.available,
                 AcceptedCapitalBasisSymbolRow.offered,
                 AcceptedCapitalBasisSymbolRow.credits,
-                AcceptedCapitalBasisSymbolRow.unattributed_credits,
             )
             .where(AcceptedCapitalBasisSymbolRow.basis_id == basis.id)
             .order_by(AcceptedCapitalBasisSymbolRow.symbol)
@@ -406,12 +405,11 @@ class LedgerOperatorReads:
                 available=available,
                 offered=offered,
                 lent=credits,
-                unattributed_lent=unattributed,
                 n_credits=counts.get(symbol, 0),
                 last_updated_ms=accepted_at_ms,
                 last_reconciled_at_ms=accepted_at_ms,
             )
-            for symbol, available, offered, credits, unattributed in rows.tuples()
+            for symbol, available, offered, credits in rows.tuples()
         )
 
     async def list_offers(

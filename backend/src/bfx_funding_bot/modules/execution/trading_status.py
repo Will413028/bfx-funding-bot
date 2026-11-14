@@ -325,7 +325,6 @@ class TradingStatusService:
                 "unreflected_commitments": str(first.snapshot.unreflected_commitments),
                 "total_capital": str(first.snapshot.total_capital),
                 "spendable": str(first.budget.spendable),
-                "unattributed_credit_exposure": str(first.unattributed_credit_exposure),
                 "cells": {cell: {key: str(value) if isinstance(value, Decimal) else value
                                  for key, value in asdict(view.budget).items()}
                           for cell, view in views.items()},

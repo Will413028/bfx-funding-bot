@@ -186,7 +186,7 @@ async def scoped_app(sqlite_engine, monkeypatch) -> TestClient:
 
         async def list_positions(self, session, scope):
             symbol, amount = lent[scope.exchange_account_id]
-            return (PositionView(symbol, Decimal("0"), Decimal("0"), amount, None, 1, 1, None),)
+            return (PositionView(symbol, Decimal("0"), Decimal("0"), amount, 1, 1, None),)
 
     unused = object()
     app.state.read_models = ReadModels(_Positions(), unused, unused, unused)  # type: ignore[arg-type]

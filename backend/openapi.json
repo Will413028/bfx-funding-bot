@@ -1244,10 +1244,6 @@
             "type": "string",
             "title": "Spendable"
           },
-          "unattributed_credit_exposure": {
-            "type": "string",
-            "title": "Unattributed Credit Exposure"
-          },
           "cells": {
             "additionalProperties": {
               "$ref": "#/components/schemas/CapitalBudgetStatus"
@@ -1268,7 +1264,6 @@
           "unreflected_commitments",
           "total_capital",
           "spendable",
-          "unattributed_credit_exposure",
           "cells"
         ],
         "title": "CapitalAvailable"
@@ -2347,17 +2342,6 @@
             "type": "string",
             "title": "Lent"
           },
-          "unattributedLent": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Unattributedlent"
-          },
           "nCredits": {
             "anyOf": [
               {
@@ -2391,13 +2375,12 @@
           "available",
           "offered",
           "lent",
-          "unattributedLent",
           "nCredits",
           "lastUpdatedMs",
           "lastReconciledAtMs"
         ],
         "title": "PositionResponse",
-        "description": "One symbol's capital as disjoint components, in the symbol's own units.\n\n``available + offered + lent`` is the symbol's total. ``unattributedLent`` is a\nsubset of ``lent`` (never an addend); null when the authority has no such fact."
+        "description": "One symbol's capital as disjoint components, in the symbol's own units.\n\n``available + offered + lent`` is the symbol's total."
       },
       "ProfileResponse": {
         "properties": {
