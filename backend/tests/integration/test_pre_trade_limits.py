@@ -19,9 +19,11 @@ import pytest
 from sqlalchemy import create_engine, select, text
 
 from bfx_funding_bot.core.errors import ExecutorTransientError
+from bfx_funding_bot.external.bitfinex.order_port import CancelOutcome, CancelResult
 from bfx_funding_bot.modules.execution.command_gate import CommandGateBlocked
 from bfx_funding_bot.modules.execution.events import PositionReconciled
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
+from bfx_funding_bot.modules.execution.reconcile_monitors import StoppedOffersMonitor
 from bfx_funding_bot.modules.execution.safety.nav_pnl_source import ReconcileNavTracker
 from bfx_funding_bot.modules.execution.safety.nav_window_store import NavWindowStore
 from bfx_funding_bot.modules.execution.safety.pre_trade import (
@@ -307,6 +309,7 @@ class Canceller:
         if venue_offer_id in self.fail:
             raise ExecutorTransientError("venue unavailable")
         self.cancelled.append(venue_offer_id)
+        return CancelResult(CancelOutcome.SUCCESS)
 
 
 async def _offer_rows(stack: Stack) -> None:
@@ -332,6 +335,7 @@ async def test_disabling_a_currency_pulls_only_its_managed_offers(gate_stack):  
     canceller = Canceller()
     planner = object.__new__(DeploymentReconciler)
     planner._conflict_alerted = set()
+    planner._stopped_offers, planner._clock = StoppedOffersMonitor(), lambda: 0
     for name, port in planner_ports(gate_stack).items():
         setattr(planner, f"_{name}", port)
     planner._managed_sweep = ManagedOfferSweep(
@@ -362,6 +366,7 @@ async def test_a_halt_pulls_managed_offers_every_tick_until_none_is_left(gate_st
     canceller = Canceller(fail={"101"})
     planner = object.__new__(DeploymentReconciler)
     planner._conflict_alerted = set()
+    planner._stopped_offers, planner._clock = StoppedOffersMonitor(), lambda: 0
     for name, port in planner_ports(gate_stack).items():
         setattr(planner, f"_{name}", port)
     planner._managed_sweep = ManagedOfferSweep(
@@ -397,6 +402,7 @@ async def test_a_halt_sweep_cancels_while_market_data_was_never_seen(gate_stack)
     await rig.halt.transition("HALTED", cause="auto", actor="auto:identity_conflict", reason="x")
     planner = object.__new__(DeploymentReconciler)
     planner._conflict_alerted = set()
+    planner._stopped_offers, planner._clock = StoppedOffersMonitor(), lambda: 0
     for name, port in planner_ports(gate_stack).items():
         setattr(planner, f"_{name}", port)
     planner._managed_sweep = ManagedOfferSweep(

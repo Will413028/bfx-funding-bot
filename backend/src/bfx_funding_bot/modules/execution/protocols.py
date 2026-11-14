@@ -17,7 +17,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.external.bitfinex.credentials import Credentials
-from bfx_funding_bot.external.bitfinex.order_port import FundingCancelAllResult
+from bfx_funding_bot.external.bitfinex.order_port import CancelResult, FundingCancelAllResult
 from bfx_funding_bot.external.bitfinex.submit_outcomes import (
     SubmitAcknowledged,
     SubmitOutcome,
@@ -133,7 +133,9 @@ class CancelPort(Protocol):
 
     The gate publishes CancelRequested / CancelAcknowledged around the venue
     call; the offer's end is observed by the ledger (WS foc is only a venue
-    hint), so callers never touch the ledger.
+    hint), so callers never touch the ledger. The result says how the venue
+    answered: a cancel it did not acknowledge is a request that failed, and the
+    offer is still live as far as anyone knows. A refused admission raises.
     """
     async def cancel(
         self,
@@ -142,7 +144,7 @@ class CancelPort(Protocol):
         signal_correlation_id: UUID,
         account_id: str,
         ctx: AccountContext,
-    ) -> None: ...
+    ) -> CancelResult: ...
 
 
 @runtime_checkable

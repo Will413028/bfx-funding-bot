@@ -18,11 +18,13 @@ import pytest
 import pytest_asyncio
 
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+from bfx_funding_bot.external.bitfinex.order_port import CancelOutcome, CancelResult
 from bfx_funding_bot.modules.execution.deployment import reconciler as reconciler_module
 from bfx_funding_bot.modules.execution.deployment.reconciler import DeploymentReconciler
 from bfx_funding_bot.modules.execution.deployment_input import LedgerDeploymentInput
 from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
 from bfx_funding_bot.modules.execution.protocols import AccountContext, Credentials
+from bfx_funding_bot.modules.execution.reconcile_monitors import StoppedOffersMonitor
 from bfx_funding_bot.modules.ledger.wiring import (
     build_ledger_managed_offers,
     build_managed_offer_reader,
@@ -83,8 +85,9 @@ class _Canceller:
     def __init__(self) -> None:
         self.cancelled: list[str] = []
 
-    async def cancel(self, *, venue_offer_id, **_kwargs) -> None:
+    async def cancel(self, *, venue_offer_id, **_kwargs):
         self.cancelled.append(venue_offer_id)
+        return CancelResult(CancelOutcome.SUCCESS)
 
 
 @pytest.mark.asyncio
@@ -122,6 +125,7 @@ async def test_a_provenance_conflict_stops_only_its_symbol(ledger: Book, monkeyp
     planner._cells = [_cell("fUST", "30"), _cell("fUSD", "30")]
     planner._safety = SimpleNamespace(evaluate_before_sizing=evaluate_before_sizing)
     planner._conflict_alerted = set()
+    planner._stopped_offers = StoppedOffersMonitor()
     planner._managed_sweep = ManagedOfferSweep(
         session_factory=ledger.factory, account_id=ledger.scope.exchange_account_id,
         canceller=canceller, ctx=ctx,

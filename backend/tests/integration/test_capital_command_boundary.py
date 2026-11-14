@@ -158,10 +158,12 @@ class Venue:
         self.received.append(offer)
         return SubmitAcknowledged("101")
 
+    cancel_outcome = CancelOutcome.SUCCESS
+
     async def cancel(self, venue_offer_id, account, *, before_transport=None):
         self.cancel_clock.append(await clock_revision(self.stack))
         self.received.append(venue_offer_id)
-        return CancelResult(CancelOutcome.SUCCESS)
+        return CancelResult(self.cancel_outcome, "venue text")
 
 
 def stop_chain(halt, *guards):
@@ -439,6 +441,18 @@ async def test_stop_blocks_submit_but_cancel_stays_durable_before_io(gate_stack,
     # A cancel ACK never releases capital inside this boundary.
     view = await read_capital(gate_stack, "a30")
     assert view.budget.spendable == Decimal("1000") - Decimal(AMOUNT)
+
+
+@pytest.mark.parametrize("outcome", list(CancelOutcome))
+async def test_the_gate_hands_the_venue_answer_to_a_cancel_back_to_its_caller(gate_stack, outcome):
+    """A caller must be able to tell an acknowledged cancel from one the venue did not
+    acknowledge: the offer of the second is still live as far as anyone knows."""
+    rig = await boundary(gate_stack)
+    await rig.gate.submit(rig.ready, rig.ctx)
+    rig.venue.cancel_outcome = outcome
+    result = await rig.gate.cancel(venue_offer_id="101", signal_correlation_id=uuid4(),
+                                   account_id=rig.ctx.account_id, ctx=rig.ctx)
+    assert (result.outcome, result.text) == (outcome, "venue text")
 
 
 async def test_cancel_admission_needs_an_evaluator_that_knows_cancel_exemptions(gate_stack):

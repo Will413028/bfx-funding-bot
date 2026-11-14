@@ -138,7 +138,7 @@ container（見 §7）：停下的 bot 不會掛新單，但也不會撤單。
 |---|---|---|---|
 | 1 | 違反包絡、book 過期、auth DOWN、heartbeat 過期 | 擋那一筆 | 無 |
 | 2 | 送單結果不明（UNKNOWN）、讀取失敗、未被接受的 snapshot | 只隔離該幣別；settle 窗口（120s）後以金額指紋＋完整 history 自動結案 | 30 分鐘仍未結案時收到 `unknown_quarantine_aged`（之後每 6 小時），見 §5 |
-| 3 | `unclassifiable_commitment`、`offer_amount_mismatch`、`identity_conflict`、`venue_lent_above_ledger`、`command_rate_exceeded` | `HALTED/auto`，之後 planner 每一輪按 id 撤**受管** offer 直到沒有（外來 offer 不碰）；停滿 15 分鐘且連續 3 個乾淨 snapshot 後自動恢復（`ACTIVE/auto`），24 小時內最多 2 次 | 收到 `auto_resume_limit_reached` 或停機一直沒解除時：查清原因後以 CLI 恢復（§3） |
+| 3 | `unclassifiable_commitment`、`offer_amount_mismatch`、`identity_conflict`、`venue_lent_above_ledger`、`command_rate_exceeded` | `HALTED/auto`，之後 planner 每一輪按 id 撤**受管** offer 直到沒有（外來 offer 不碰）；停滿 15 分鐘且連續 3 個乾淨 snapshot 後自動恢復（`ACTIVE/auto`），24 小時內最多 2 次 | 收到 `auto_resume_limit_reached` 或停機一直沒解除時：查清原因後以 CLI 恢復（§3）；受管 offer 撤了 30 分鐘還在時收到 `stopped_offers_standing` |
 | 4 | 外來 offer（`foreign_exposure`）、外來 offer 成交造成的借出（`foreign_lending`）、NAV 下降（`nav_drop`） | 只告警 | 確認是不是你自己的操作 |
 
 - **不會**觸發任何反應：借款到期造成 lent 減少、reconcile 補回 WS 漏掉的成交或撤單。
@@ -209,7 +209,7 @@ sudo bfx-op manual-resolution <uncertainty_id> --evidence-ref <ref> \
 
 | 來源 | 設定檔 | 內容 |
 |---|---|---|
-| bot 內的 sink（`observability/alerts.py`，非阻塞） | 秘密檔 `/opt/bfx/runtime/secrets/bot/TELEGRAM_BOT_TOKEN` 與 `bot.env` 的 `TELEGRAM_CHAT_ID` | 交易狀態轉換、自動保護、kill 結果、恢復結果、幣別啟停結果（`capital_policy_request_*`）、憑證輪替結果（`credential_rotation_*`）、key 重查持續失敗（`credential_recheck_failing`）、`foreign_exposure`、`foreign_lending`、`unknown_quarantine_aged`、`nav_drop`、`venue_offers_may_remain` |
+| bot 內的 sink（`observability/alerts.py`，非阻塞） | 秘密檔 `/opt/bfx/runtime/secrets/bot/TELEGRAM_BOT_TOKEN` 與 `bot.env` 的 `TELEGRAM_CHAT_ID` | 交易狀態轉換、自動保護、kill 結果、恢復結果、幣別啟停結果（`capital_policy_request_*`）、憑證輪替結果（`credential_rotation_*`）、key 重查持續失敗（`credential_recheck_failing`）、`foreign_exposure`、`foreign_lending`、`unknown_quarantine_aged`、`stopped_offers_standing`、`nav_drop`、`venue_offers_may_remain` |
 | host 工具 `bfx-notify` | `/opt/bfx/runtime/notify.env`（同樣兩個 key） | bfx-deploy 結果、bfx-backup-check（RPO>300s、evidence 超過 15 分鐘、restore heartbeat 超過 35 天、磁碟 ≥95% 為 critical；restore timer 停用、weekly report 超過 8 天沒成功、磁碟 ≥85% 為 warning）、`bfx-alert@` 的 unit 失敗（pgBackRest 備份、restore test） |
 | GitHub Actions `venue-contract.yml` 的 `notify` job | repository secrets `TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID` | 每日 Bitfinex 公開 endpoint 合約檢查失敗（§8） |
 
@@ -404,6 +404,13 @@ bot 發出的每個事件都登錄在 `observability/alerts.py` 的 `ALERT_EVENT
 - 代表：要撤某幣別的受管 offer（帳戶 HALTED 或該幣別停用）時，有一筆 live offer 的 provenance 自相矛盾，sweep 分不出哪些 offer 是 bot 的。同一（symbol、offer id）只發一次，直到該幣別撤單成功一次才重新計算。
 - 系統會做：該幣別這一輪什麼都不做（不撤也不掛），下一輪再讀一次；其他幣別照常。
 - operator 判斷：持續出現代表該幣別的受管 offer 撤不掉；需要撤時走 kill（§3，cancel-all 不看 provenance）。這是 ledger 與 venue 的紀錄矛盾，要附 offer id 回報成 bug。
+
+<a id="alert-stopped_offers_standing"></a>
+#### `stopped_offers_standing`（critical；`reason=stop_state_unreachable` 時 warning）
+
+- 代表：某幣別應該沒有受管 offer（`reason=halted`：帳戶 HALTED；`reason=disabled`：該幣別停用），planner 每一輪去撤，但連續 30 分鐘都有撤不掉的受管 offer；仍未解除時每 6 小時再提醒一次。附 symbol、minutes、offers（這一輪撤不掉的筆數；連受管 offer 都列不出來時是 `unknown`）、venue_offer_ids。另外兩個 reason 是「停機狀態讀不到」，各自計時、不帶 offer：`stop_state_unreachable`（資料庫沒回應，warning）與 `stop_state_failed`（讀取本身出錯，是程式問題，critical）；這段時間該幣別不掛單也不撤單，帳戶若其實已 HALTED，受管 offer 會留著。
+- 系統會做：每一輪繼續按 id 撤受管 offer（撤單被拒、venue 沒確認、provenance 矛盾都算沒撤掉）；外來 offer 不碰。不會自動升級成 cancel-all。venue 拒絕 key 時不發這則：bot 直接以 key 被拒結束，重啟後進入憑證復原模式（`credential_recovery_mode`，§11）。
+- operator 判斷：bot log 找 `managed_offer_sweep`（`failed=` 帶每筆的原因）、`deployment_stop_sweep_failed` 與 `deployment_stop_state_unreadable`。原因是該幣別有未結案的 uncertainty（`cancel_provenance_uncertain`）時照 §5 處理；venue 持續拒絕或原因不明、而這些 offer 不能留著時走 kill（§3，cancel-all 會連外來 offer 一起撤）。`stop_state_failed` 要附 traceback 回報成 bug，帳戶處於 HALTED 時先走 kill。
 
 <a id="alert-nav_drop"></a>
 #### `nav_drop`（warning）

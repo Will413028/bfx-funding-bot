@@ -27,6 +27,7 @@ from bfx_funding_bot.external.bitfinex.live_executor import (
 )
 from bfx_funding_bot.external.bitfinex.order_port import (
     CancelOutcome,
+    CancelResult,
     OfferRequest,
     VenueOrderPort,
 )
@@ -335,8 +336,10 @@ class AccountCommandGate:
             raise CommandGateBlocked(result.reason or f"guard blocked: {result.guard_name}")
 
     async def cancel(self, *, venue_offer_id: str, signal_correlation_id: UUID,
-                     account_id: str, ctx: AccountContext) -> None:
+                     account_id: str, ctx: AccountContext) -> CancelResult:
         """Durable cancel admission; ACK never releases capital in this boundary.
+
+        Returns the venue's answer; a refused admission raises ``CommandGateBlocked``.
 
         Cancelling is allowed in every trading state -- it is what HALTED is
         for -- so it is not gated on the trading state. It is still refused without managed provenance and
@@ -387,7 +390,7 @@ class AccountCommandGate:
                 venue_offer_id, ctx, before_transport=before_transport,
             )
             if not result.outcome.acknowledged:
-                return  # the adapter logged it; nothing was acknowledged
+                return result  # the adapter logged it; the caller decides what a failure means
             rest_status: Literal["success", "already_terminal"] = (
                 "success" if result.outcome is CancelOutcome.SUCCESS else "already_terminal"
             )
@@ -399,6 +402,7 @@ class AccountCommandGate:
                 rest_status=rest_status,
                 venue_response_text=result.text,
             ))
+            return result
 
     async def _persist_outcome(
         self,
