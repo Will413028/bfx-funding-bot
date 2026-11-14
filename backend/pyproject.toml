@@ -51,7 +51,7 @@ dev = [
     "types-jsonschema",
     # deploy/vm/ops tests import the host tooling, pinned in deploy/vm/ops/uv.lock.
     "pathspec==1.1.1",
-    "import-linter==2.15",
+    "import-linter==2.16",
     "pytest-xdist>=3.8.0",
     "pytest-postgresql>=9.1.0",
     "diff-cover==11.0.1",
