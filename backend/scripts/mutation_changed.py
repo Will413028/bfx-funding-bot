@@ -3,8 +3,8 @@
 ``mutation_kill_matrix.py`` answers the question for a whole file in hours. A review needs it
 for the code in front of it, in minutes, so this script
 
-1. reads the change (``git diff <base> HEAD``) and keeps the added or modified lines of the
-   Python files under ``backend/src/bfx_funding_bot``;
+1. reads the change (``git diff <base> HEAD``) and keeps the lines it adds, modifies or removes
+   lines beside, in the Python files under ``backend/src/bfx_funding_bot``;
 2. names the functions those lines are in: top-level functions, and methods of top-level
    classes as ``Class.method`` (what mutmut mutates; a nested function counts as its outer
    one, and a line outside any function, such as a constant or a class attribute, names none);
@@ -66,8 +66,9 @@ class Judged:
 
 
 def changed_lines(diff: str) -> dict[Path, list[tuple[int, int]]]:
-    """Per file, the line ranges (first, last; in the new file) a unified diff adds or changes.
-    A hunk that only removes lines changes none."""
+    """Per file, the line ranges (first, last; in the new file) a unified diff touches. A hunk
+    that only removes lines touches the two lines the removal sits between: lines taken out of
+    a function change it, and the diff alone does not say which side they belonged to."""
     ranges: dict[Path, list[tuple[int, int]]] = {}
     current: Path | None = None
     previous = ""
@@ -83,9 +84,9 @@ def changed_lines(diff: str) -> dict[Path, list[tuple[int, int]]]:
         hunk = _HUNK.match(line)
         if hunk and current is not None:
             count = int(hunk["count"]) if hunk["count"] is not None else 1
-            if count:
-                start = int(hunk["start"])
-                ranges.setdefault(current, []).append((start, start + count - 1))
+            start = int(hunk["start"])              # for a removal, the line it comes after
+            last = start + count - 1 if count else start + 1
+            ranges.setdefault(current, []).append((start, last))
     return ranges
 
 
