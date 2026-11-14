@@ -3,8 +3,8 @@
 ``mutation_kill_matrix.py`` answers the question for a whole file in hours. A review needs it
 for the code in front of it, in minutes, so this script
 
-1. reads the change (``git diff <base> HEAD``) and keeps the added or modified lines of the
-   Python files under ``backend/src/bfx_funding_bot``;
+1. reads the change (``git diff <base> HEAD``) and keeps the lines it adds, modifies or removes
+   lines beside, in the Python files under ``backend/src/bfx_funding_bot``;
 2. names the functions those lines are in: top-level functions, and methods of top-level
    classes as ``Class.method`` (what mutmut mutates; a nested function counts as its outer
    one, and a line outside any function, such as a constant or a class attribute, names none);
@@ -16,7 +16,8 @@ It reports; it does not gate. A surviving mutant is a line the mirrored unit tes
 change, which is a question for the reviewer, not a verdict: the mutant may be equivalent, or
 an integration test may be what defends it (those are not run here). The exit code is 0 unless
 the script itself fails; a source it could not judge is named in the summary with the reason
-(its unit tests do not run it, or its changed functions have more than ``--max-mutants`` mutants).
+(its unit tests do not run it, or more than ``--max-mutants`` mutants would have to run). A
+mutant in code no unit test runs is counted apart, not as a survivor: nothing was tried on it.
 
 Usage (from ``backend/``):
     uv run python -m scripts.mutation_changed --base origin/dev --summary /tmp/mutation.md
@@ -62,12 +63,14 @@ class Judged:
     mutants: int = 0
     skipped: str = ""                       # why it was not judged; empty when it was
     unjudged: int = 0                       # mutants that timed out or crashed: neither killed nor survived
+    not_run: int = 0                        # mutants in code no selected test runs; not in ``mutants``
     diffs: dict[str, str] = field(default_factory=dict)
 
 
 def changed_lines(diff: str) -> dict[Path, list[tuple[int, int]]]:
-    """Per file, the line ranges (first, last; in the new file) a unified diff adds or changes.
-    A hunk that only removes lines changes none."""
+    """Per file, the line ranges (first, last; in the new file) a unified diff touches. A hunk
+    that only removes lines touches the two lines the removal sits between: lines taken out of
+    a function change it, and the diff alone does not say which side they belonged to."""
     ranges: dict[Path, list[tuple[int, int]]] = {}
     current: Path | None = None
     previous = ""
@@ -83,9 +86,9 @@ def changed_lines(diff: str) -> dict[Path, list[tuple[int, int]]]:
         hunk = _HUNK.match(line)
         if hunk and current is not None:
             count = int(hunk["count"]) if hunk["count"] is not None else 1
-            if count:
-                start = int(hunk["start"])
-                ranges.setdefault(current, []).append((start, start + count - 1))
+            start = int(hunk["start"])              # for a removal, the line it comes after
+            last = start + count - 1 if count else start + 1
+            ranges.setdefault(current, []).append((start, last))
     return ranges
 
 
@@ -150,16 +153,24 @@ def judge(source: Path, functions: Sequence[str], out_dir: Path, jobs: int,
     report_path = out_dir / (source.with_suffix("").as_posix().replace("/", "__") + ".json")
     try:
         report = matrix.build([source], selection, jobs, report_path, functions=functions,
-                              derived_functions=True, show_survivors=True, max_mutants=max_mutants)
+                              derived_functions=True, show_survivors=True, max_mutants=max_mutants,
+                              max_diffs=SHOWN)
     except matrix.MatrixError as exc:
         print(f"{source}: not judged: {exc}", flush=True)        # the whole reason, for the job log
         reason = str(exc).splitlines()[0]
         if reason.startswith("no test broke"):       # the matrix's canary: nothing selected runs this code
             reason = f"the unit tests under {tests} do not run this file (an integration test may)"
         return Judged(source, tuple(functions), tests, skipped=reason)
-    return Judged(source, tuple(report["functions"]), tests, tuple(report["survived"]),
-                  int(report["killed"]), int(report["mutants"]), diffs=dict(report["survivor_diffs"]),
-                  unjudged=len(report["timed_out"]) + len(report["crashed"]))
+    not_run = set(report["not_reached"])     # the matrix counts these as survived
+    survived = tuple(mutant for mutant in report["survived"] if mutant not in not_run)
+    unjudged = len(report["timed_out"]) + len(report["crashed"])    # not counted in "mutants"
+    if not_run and len(not_run) == int(report["mutants"]) and not unjudged:
+        return Judged(source, tuple(report["functions"]), tests, not_run=len(not_run),
+                      skipped=f"the unit tests under {tests} run none of these functions "
+                              "(an integration test may)")
+    return Judged(source, tuple(report["functions"]), tests, survived,
+                  int(report["killed"]), int(report["mutants"]) - len(not_run),
+                  diffs=dict(report["survivor_diffs"]), not_run=len(not_run), unjudged=unjudged)
 
 
 def _cell(text: str) -> str:
@@ -188,6 +199,7 @@ def render(judged: Sequence[Judged], not_started: Sequence[Path], base: str) -> 
         else:
             total = item.mutants + item.unjudged
             hung = f" ({item.unjudged} timed out or crashed)" if item.unjudged else ""
+            hung += f" ({item.not_run} more in code these tests do not run)" if item.not_run else ""
             lines.append(f"| `{item.source}` | {names} | `{item.tests}` | {item.killed}/{total}{hung} "
                          f"| {len(item.survived)} |")
     for path in not_started:
@@ -216,7 +228,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--budget-seconds", type=float, default=900.0,
                         help="start no further file once this much time has passed (default 900)")
     parser.add_argument("--max-mutants", type=int, default=400,
-                        help="do not judge a file whose changed functions have more mutants (default 400)")
+                        help="do not judge a file with more mutants to run than this (default 400)")
     args = parser.parse_args(argv)
     out_dir = args.out_dir or args.summary.parent
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -243,7 +255,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _write_json(out_dir: Path, judged: Sequence[Judged], not_started: Sequence[Path]) -> None:
     (out_dir / "mutation-changed.json").write_text(json.dumps(
         [{"source": str(j.source), "functions": list(j.functions), "tests": str(j.tests) if j.tests else None,
-          "killed": j.killed, "mutants": j.mutants, "unjudged": j.unjudged, "survived": list(j.survived),
+          "killed": j.killed, "mutants": j.mutants, "unjudged": j.unjudged, "not_run": j.not_run,
+          "survived": list(j.survived),
           "skipped": j.skipped}
          for j in judged] + [{"source": str(p), "skipped": "time budget"} for p in not_started],
         indent=2) + "\n")
