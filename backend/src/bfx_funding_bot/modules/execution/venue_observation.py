@@ -314,15 +314,6 @@ class BitfinexVenueObservation:
         start_ms = window.history_start_ms
         if start_ms is None:
             start_ms = query_started_at_ms - HISTORY_QUERY_MARGIN_MS
-        # Credits opened before the previous accepted query were in that basis
-        # and are carried by (symbol, period, opening): they need no trades.
-        # Later openings fall after start_ms. Only with no accepted query yet
-        # must trades reach back to every current opening.
-        if window.previous_query_started_at_ms is None and active.credits:
-            trade_start_ms = min(start_ms, *(credit.mts_opening - HISTORY_QUERY_MARGIN_MS
-                                             for credit in active.credits))
-        else:
-            trade_start_ms = start_ms
         # Wallet and credit symbols are the capital; the window's anchor attempts add
         # the symbols an UNKNOWN or R6 absence proof needs even when no wallet names them.
         # P's live offers that are gone from this active read ended somewhere in
@@ -350,7 +341,7 @@ class BitfinexVenueObservation:
                 stream="loans", symbol=symbol, start_ms=start_ms, end_ms=end_ms, budget=budget))
             trades.append(await self._history(
                 self._rest.fetch_trade_observations, normalize_trade,
-                stream="trades", symbol=symbol, start_ms=trade_start_ms, end_ms=end_ms, budget=budget))
+                stream="trades", symbol=symbol, start_ms=start_ms, end_ms=end_ms, budget=budget))
         offers = [end.windowed for end in ends]  # coverage: the windowed query only
         history: list[CoveredHistory[OfferHistory] | CoveredHistory[CreditHistory]] = [*offers, *credits]
         # R-e: one shared requested range; never manufacture a broader range
@@ -358,7 +349,7 @@ class BitfinexVenueObservation:
         history_range_matches = all((h.requested_start_ms, h.requested_end_ms) ==
                                     (start_ms, end_ms) for h in history)
         trade_range_matches = all((h.requested_start_ms, h.requested_end_ms) ==
-                                  (trade_start_ms, end_ms) for h in trades)
+                                  (start_ms, end_ms) for h in trades)
         created = [h.offer.mts_created for stream in offers for h in stream.rows]
         created.extend(h.credit.mts_created for stream in credits for h in stream.rows
                        if h.credit.mts_created is not None)
@@ -374,7 +365,7 @@ class BitfinexVenueObservation:
             history_oldest_mts_created=min(created) if created else None,
             history_newest_mts_created=max(created) if created else None,
             trades_complete=trade_range_matches and all(h.complete for h in trades),
-            trades_requested_start_ms=trades[0].requested_start_ms if trades else trade_start_ms,
+            trades_requested_start_ms=trades[0].requested_start_ms if trades else start_ms,
             trades_requested_end_ms=trades[0].requested_end_ms if trades else end_ms,
             history_symbols=frozenset(symbols),
         )

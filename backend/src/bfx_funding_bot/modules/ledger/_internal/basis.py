@@ -1,10 +1,15 @@
 """Classify an accepted observation into the capital basis (venue facts only).
 
-Ports legacy ``CapitalRepository._classify`` / ``_attribute_credits`` onto the
-journals and the observation store. Policy is not read here: it is applied per
-symbol when the basis is read. Every query is bounded by the current
-observation, the previous basis, or the attempts recorded after the previous
-basis's ``attempt_seq_high_water``.
+Ports legacy ``CapitalRepository._classify`` onto the journals and the
+observation store. Policy is not read here: it is applied per symbol when the
+basis is read. Every query is bounded by the current observation, the previous
+basis, or the attempts recorded after the previous basis's
+``attempt_seq_high_water``.
+
+A cell's amount is the remaining amount of its resting managed offers, and
+nothing else. Lent credits count in their symbol's ``credits`` only: the venue
+gives no credit-to-offer link, so no cell holds lent stock
+(docs/adr/2026-11-14-cell-limit-bounds-resting-offers-not-lent-stock.md).
 
 Provenance of a venue offer (``read.provenance``): a transport ``ack``
 outcome or a ``bound_to_venue`` resolution names it -> the attempt. No
@@ -46,7 +51,6 @@ from bfx_funding_bot.modules.ledger.read.quarantine import unresolved_quarantine
 from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisAttemptRow,
     AcceptedCapitalBasisCellRow,
-    AcceptedCapitalBasisCreditCellRow,
     AcceptedCapitalBasisCreditRow,
     AcceptedCapitalBasisQuarantineRow,
     AcceptedCapitalBasisRow,
@@ -66,19 +70,8 @@ from bfx_funding_bot.modules.ledger.tables import (
 from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ZERO = Decimal(0)
-
-type Group = tuple[str, int, int]
-type CreditKey = tuple[str, str]
-
-
-@dataclass(frozen=True, slots=True)
-class _Fill:
-    cell: str
-    symbol: str
-    filled: Decimal
-    created: int | None
 
 
 @dataclass(slots=True)
@@ -86,21 +79,8 @@ class _Symbol:
     available: Decimal
     offered: Decimal = ZERO
     credits: Decimal = ZERO
-    unattributed: Decimal = ZERO
     foreign: Decimal = ZERO
     reasons: list[JsonObject] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class _Credit:
-    source_kind: str
-    venue_credit_id: str
-    symbol: str
-    amount: Decimal
-    period_days: int | None
-    opening: int | None
-    attribution: str
-    cells: set[str] = field(default_factory=set)
 
 
 def _text(value: Decimal) -> str:
@@ -160,14 +140,13 @@ class _Classifier:
         """
         return sole_owner(self.provenance.get(venue_id, set()), self.attempts, self.scope, symbol)
 
-    def cell_of(self, venue_id: str, symbol: str) -> str | None:
-        """The owning cell for fill evidence; None when foreign or contradictory."""
+    def require_one_story(self, venue_id: str, symbol: str) -> None:
+        """An ended offer named by contradictory provenance blocks its symbol: two
+        attempts claiming one venue offer could both be classified as reflected."""
         try:
-            attempt = self.owner(venue_id, symbol)
+            self.owner(venue_id, symbol)
         except LookupError:
             self.block(symbol, "credit_provenance_conflict", venue_offer_id=venue_id)
-            return None
-        return attempt.cell_id if attempt is not None else None
 
 
 async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID) -> UUID:
@@ -225,7 +204,6 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
     current_ids = {offer.venue_offer_id for offer in offers}
     prior_offers: list[LedgerObservationOfferRow] = []
     prior_credits: list[AcceptedCapitalBasisCreditRow] = []
-    prior_cells: dict[CreditKey, set[str]] = {}
     prior_attempts: list[AcceptedCapitalBasisAttemptRow] = []
     if previous is not None:
         prior_offers = list(
@@ -246,14 +224,6 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
                 )
             ).all()
         )
-        for cell_row in await session.scalars(
-            select(AcceptedCapitalBasisCreditCellRow).where(
-                AcceptedCapitalBasisCreditCellRow.basis_id == previous.id
-            )
-        ):
-            prior_cells.setdefault((cell_row.source_kind, cell_row.venue_credit_id), set()).add(
-                cell_row.cell_id
-            )
         prior_attempts = list(
             (
                 await session.scalars(
@@ -267,16 +237,6 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
 
     gone = [row for row in prior_offers if row.venue_offer_id not in current_ids]
 
-    # Credit groups (symbol, period, opening) and this observation's trades at them.
-    group_of: dict[CreditKey, Group] = {}
-    live: dict[Group, Decimal] = {}
-    for credit in credits:
-        if credit.period_days is not None and credit.mts_opening is not None:
-            key: Group = (credit.symbol, credit.period_days, credit.mts_opening)
-            group_of[(credit.source_kind, credit.venue_credit_id)] = key
-            live[key] = live.get(key, ZERO) + credit.amount
-    trades: list[tuple[Group, Decimal, str]] = []
-    traded_offer_ids: set[str] = set()
     trade_rows = list(
         await session.scalars(
             select(LedgerObservationTradeRow).where(
@@ -284,11 +244,7 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
             )
         )
     )
-    for trade in trade_rows:
-        traded_offer_ids.add(trade.venue_offer_id)
-        key = (trade.symbol, trade.period_days, trade.mts_create)
-        if key in live:
-            trades.append((key, trade.amount, trade.venue_offer_id))
+    traded_offer_ids = {trade.venue_offer_id for trade in trade_rows}
 
     # Considered attempts: recorded after the previous basis, plus its unresolved.
     high_water = previous.attempt_seq_high_water if previous is not None else 0
@@ -335,13 +291,12 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
             *(row.venue_offer_id for row in history),
             *(row.venue_offer_id for row in prior_offers),
             *(row.venue_offer_id for row in trade_rows),
-            *(offer_id for _, _, offer_id in trades),
         ]
     )
 
     # Active offers: managed ones count their remaining amount in offered and cell.
+    # Nothing else adds to a cell, so each symbol's cells sum to its ``offered``.
     cells: dict[tuple[str, str], Decimal] = {}
-    fills: list[_Fill] = []
     reflected_by_offer: dict[UUID, str] = {}
     for offer in offers:
         remaining, original = offer.amount_remaining, offer.amount_original
@@ -367,108 +322,31 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         cell = managed.cell_id
         values.offered += remaining
         cells[(offer.symbol, cell)] = cells.get((offer.symbol, cell), ZERO) + remaining
-        if original - remaining > ZERO:
-            fills.append(_Fill(cell, offer.symbol, original - remaining, offer.mts_created))
 
-    # Fill evidence: this observation's terminal history, previous managed offers gone.
+    # Ended offers: this observation's terminal history, the previous basis's offers
+    # now gone, and every trade. Each must have one provenance story.
     terminal: dict[str, LedgerObservationOfferHistoryRow] = {}
     for row in history:
         if row.venue_offer_id not in terminal or (
             row.occurred_at_ms > terminal[row.venue_offer_id].occurred_at_ms
         ):
             terminal[row.venue_offer_id] = row
-        filled = (row.amount_original or ZERO) - row.amount_remaining
-        if filled > ZERO:
-            owner_cell = c.cell_of(row.venue_offer_id, row.symbol)
-            if owner_cell is not None:
-                fills.append(_Fill(owner_cell, row.symbol, filled, row.mts_created))
+        if (row.amount_original or ZERO) - row.amount_remaining > ZERO:
+            c.require_one_story(row.venue_offer_id, row.symbol)
     for gone_row in gone:
-        owner_cell = c.cell_of(gone_row.venue_offer_id, gone_row.symbol)
-        if owner_cell is not None:
-            fills.append(
-                _Fill(owner_cell, gone_row.symbol, gone_row.amount_remaining, gone_row.mts_created)
-            )
+        c.require_one_story(gone_row.venue_offer_id, gone_row.symbol)
+    for trade in trade_rows:
+        c.require_one_story(trade.venue_offer_id, trade.symbol)
 
-    # Credits: trade, carry, recent fill; otherwise unattributed (U).
-    traders: dict[Group, set[str]] = {}
-    traded: dict[Group, Decimal] = {}
-    for key, amount, offer_id in trades:
-        traded[key] = traded.get(key, ZERO) + amount
-        owners = traders.setdefault(key, set())
-        owner_cell = c.cell_of(offer_id, key[0])
-        if owner_cell is not None:
-            owners.add(owner_cell)
-    carried: dict[Group, set[str]] = {}
-    for prior in prior_credits:
-        if prior.period_days is not None and prior.mts_opening is not None:
-            carried.setdefault((prior.symbol, prior.period_days, prior.mts_opening), set()).update(
-                prior_cells.get((prior.source_kind, prior.venue_credit_id), set())
-            )
-    attributed: list[_Credit] = []
+    # Credits count in their symbol only; no cell holds lent stock.
     for credit in credits:
-        group = group_of.get((credit.source_kind, credit.venue_credit_id))
-        # A group carried from the previous basis is already attributed; only a
-        # new opening needs trades evidence covering it (else old credits would
-        # demand trades back to their opening on every observation).
-        if (group is None or group not in carried) and (
-            credit.mts_opening is None or not _trades_cover(credit.mts_opening, observation)
-        ):
-            c.block(
-                credit.symbol,
-                "trades_range_uncovered",
-                venue_credit_id=credit.venue_credit_id,
-                source_kind=credit.source_kind,
-            )
-        amount = credit.amount
         values = symbols.get(credit.symbol)
         if values is None:
             c.block(credit.symbol, "missing_wallet")
-        elif amount <= ZERO:
-            c.block(credit.symbol, "invalid_active_credit", venue_credit_id=credit.venue_credit_id)
-        owners_now: set[str]
-        if group is not None and group in traded and live[group] <= traded[group]:
-            owners_now, basis = set(traders[group]), "trade"
-        else:
-            if group is not None and group in carried:
-                owners_now, basis = set(carried[group]), "carry"
-            else:
-                owners_now = {
-                    fill.cell
-                    for fill in fills
-                    if fill.symbol == credit.symbol
-                    and amount <= fill.filled
-                    and (
-                        fill.created is None
-                        or credit.mts_opening is None
-                        or fill.created <= credit.mts_opening
-                    )
-                }
-                basis = "recent_fill" if owners_now else "unattributed"
-            if group is not None and group in traders:
-                # More live than traded: each record keeps every candidate cell.
-                owners_now |= traders[group]
-                basis = "trade"
-        attributed.append(
-            _Credit(
-                credit.source_kind,
-                credit.venue_credit_id,
-                credit.symbol,
-                amount,
-                credit.period_days,
-                credit.mts_opening,
-                basis,
-                owners_now,
-            )
-        )
-        if values is None:
             continue
-        values.credits += amount
-        if not owners_now:
-            values.unattributed += amount
-        for owner_cell in owners_now:
-            cells[(credit.symbol, owner_cell)] = (
-                cells.get((credit.symbol, owner_cell), ZERO) + amount
-            )
+        if credit.amount <= ZERO:
+            c.block(credit.symbol, "invalid_active_credit", venue_credit_id=credit.venue_credit_id)
+        values.credits += credit.amount
 
     # Attempts since the previous basis (and its unresolved ones).
     classified: dict[UUID, tuple[str, str]] = {}
@@ -590,7 +468,6 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
                 _text(v.available),
                 _text(v.offered),
                 _text(v.credits),
-                _text(v.unattributed),
                 _text(v.foreign),
                 _block_json(v.reasons),
                 verdicts[name].conservation,
@@ -602,17 +479,9 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         ],
         "cells": [[s, cell, _text(amount)] for (s, cell), amount in sorted(cells.items())],
         "credits": [
-            [
-                x.source_kind,
-                x.venue_credit_id,
-                x.symbol,
-                _text(x.amount),
-                x.period_days,
-                x.opening,
-                x.attribution,
-                sorted(x.cells),
-            ]
-            for x in sorted(attributed, key=lambda x: (x.source_kind, x.venue_credit_id))
+            [x.source_kind, x.venue_credit_id, x.symbol, _text(x.amount), x.period_days,
+             x.mts_opening]
+            for x in sorted(credits, key=lambda x: (x.source_kind, x.venue_credit_id))
         ],
         "attempts": [
             [str(attempt_id), symbol, kind]
@@ -644,7 +513,8 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
                 available=v.available,
                 offered=v.offered,
                 credits=v.credits,
-                unattributed_credits=v.unattributed,
+                # Transitional until the column is dropped (plan step 3): every credit.
+                unattributed_credits=v.credits,
                 foreign_offers=v.foreign,
                 block=_block_json(v.reasons),
                 conservation=verdicts[name].conservation,
@@ -657,7 +527,7 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         session.add(
             AcceptedCapitalBasisCellRow(basis_id=basis_id, symbol=name, cell_id=cell, amount=amount)
         )
-    for x in attributed:
+    for x in credits:
         session.add(
             AcceptedCapitalBasisCreditRow(
                 basis_id=basis_id,
@@ -666,8 +536,9 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
                 symbol=x.symbol,
                 amount=x.amount,
                 period_days=x.period_days,
-                mts_opening=x.opening,
-                attribution_basis=x.attribution,
+                mts_opening=x.mts_opening,
+                # Transitional until the column is dropped (plan step 3).
+                attribution_basis="unattributed",
             )
         )
     for attempt_id, (symbol, kind) in classified.items():
@@ -680,17 +551,6 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         session.add(
             AcceptedCapitalBasisQuarantineRow(basis_id=basis_id, quarantine_id=quarantine_id)
         )
-    await session.flush()
-    for x in attributed:
-        for cell in sorted(x.cells):
-            session.add(
-                AcceptedCapitalBasisCreditCellRow(
-                    basis_id=basis_id,
-                    source_kind=x.source_kind,
-                    venue_credit_id=x.venue_credit_id,
-                    cell_id=cell,
-                )
-            )
     await session.flush()
     _report_end_outcomes(end_outcomes, verdicts, observation_id)
     return basis_id

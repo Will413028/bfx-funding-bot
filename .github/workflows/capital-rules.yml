@@ -18,11 +18,13 @@ on:
       - backend/tests/modules/trading/test_capital.py
       - backend/tests/modules/execution/deployment/test_sizing.py
       - backend/tests/modules/execution/deployment/test_reconciler.py
-      # Integration-owned rules (M12 guard, M13 command gate) and their owning tests.
+      # Integration-owned rules (M12 guard, M13 command gate, M19 basis) and their owning tests.
       - backend/src/bfx_funding_bot/modules/execution/safety/hard_guards.py
       - backend/src/bfx_funding_bot/modules/ledger/_internal/journal.py
+      - backend/src/bfx_funding_bot/modules/ledger/_internal/basis.py
       - backend/tests/integration/test_capital_command_boundary.py
       - backend/tests/integration/test_ledger_command_authorize.py
+      - backend/tests/integration/test_ledger_basis.py
       # The gate itself.
       - backend/scripts/capital_mutation_gate.py
       - backend/scripts/mutation_sandbox.py
@@ -63,7 +65,7 @@ jobs:
         run: |
           changed="$(git diff --name-only HEAD^1 HEAD)"
           echo "$changed"
-          pattern='^(backend/src/bfx_funding_bot/modules/execution/safety/hard_guards\.py|backend/src/bfx_funding_bot/modules/ledger/_internal/journal\.py|backend/tests/integration/test_capital_command_boundary\.py|backend/tests/integration/test_ledger_command_authorize\.py|backend/scripts/capital_mutation_gate\.py|backend/scripts/mutation_sandbox\.py|\.github/workflows/capital-rules\.yml|\.github/actions/postgres-18/action\.yml)$'
+          pattern='^(backend/src/bfx_funding_bot/modules/execution/safety/hard_guards\.py|backend/src/bfx_funding_bot/modules/ledger/_internal/journal\.py|backend/src/bfx_funding_bot/modules/ledger/_internal/basis\.py|backend/tests/integration/test_capital_command_boundary\.py|backend/tests/integration/test_ledger_command_authorize\.py|backend/tests/integration/test_ledger_basis\.py|backend/scripts/capital_mutation_gate\.py|backend/scripts/mutation_sandbox\.py|\.github/workflows/capital-rules\.yml|\.github/actions/postgres-18/action\.yml)$'
           if grep -qE "$pattern" <<< "$changed"; then
             echo "args=--include-integration" >> "$GITHUB_OUTPUT"
           else

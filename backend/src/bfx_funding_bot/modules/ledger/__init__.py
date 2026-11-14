@@ -121,7 +121,7 @@ class Credit:
     flags: JsonObject | int | None
     mts_created: int | None
     mts_updated: int | None
-    mts_opening: int  # the venue's trade instant; required (carry key)
+    mts_opening: int  # the venue's trade instant; required
     raw: JsonObject
 
 
@@ -363,7 +363,6 @@ class ObservationWindow:
     """
 
     earliest_attempt_started_at_ms: int | None
-    previous_query_started_at_ms: int | None
     history_start_ms: int | None
     # Symbols of the anchor attempts: the port must fetch their history even
     # when no wallet or credit names them.

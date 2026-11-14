@@ -11,6 +11,7 @@ Rule ownership:
   derive_capital (trading/capital.py)        -> tests/modules/trading/test_capital.py
   allocate_capital (deployment/sizing.py)    -> tests/modules/execution/deployment/test_sizing.py
   reconciler wiring (deployment/reconciler)  -> tests/modules/execution/deployment/test_reconciler.py
+  write_basis (ledger/_internal/basis.py)    -> tests/integration/test_ledger_basis.py
   guard and command-gate re-validation       -> integration tests (need local PostgreSQL 18)
 
 Every anchor must occur exactly once in its file: a refactor that moves or rewrites a
@@ -53,6 +54,7 @@ SIZING = PACKAGE / "modules/execution/deployment/sizing.py"
 RECONCILER = PACKAGE / "modules/execution/deployment/reconciler.py"
 HARD_GUARDS = PACKAGE / "modules/execution/safety/hard_guards.py"
 JOURNAL = PACKAGE / "modules/ledger/_internal/journal.py"
+BASIS = PACKAGE / "modules/ledger/_internal/basis.py"
 
 POLICY_TESTS = ("tests/modules/trading/test_policy.py",)
 CAPITAL_TESTS = ("tests/modules/trading/test_capital.py",)
@@ -60,6 +62,7 @@ SIZING_TESTS = ("tests/modules/execution/deployment/test_sizing.py",)
 RECONCILER_TESTS = ("tests/modules/execution/deployment/test_reconciler.py",)
 BOUNDARY_TESTS = ("tests/integration/test_capital_command_boundary.py",)
 COMMAND_TESTS = ("tests/integration/test_ledger_command_authorize.py",)
+BASIS_TESTS = ("tests/integration/test_ledger_basis.py",)
 
 _SPENDABLE = (
     "        snapshot.available_amount - snapshot.unreflected_commitments"
@@ -138,6 +141,12 @@ MUTANTS: tuple[Mutant, ...] = (
     Mutant("M18", "reconciler fingerprints without the per-offer ceiling", RECONCILER,
            "maximum=views[cell_id].applied.policy.max_offer_amount,", "maximum=None,",
            RECONCILER_TESTS),
+    Mutant("M19", "basis counts a lent credit into the symbol's cells", BASIS,
+           "        values.credits += credit.amount\n",
+           "        values.credits += credit.amount\n"
+           "        for key in [key for key in cells if key[0] == credit.symbol]:\n"
+           "            cells[key] += credit.amount\n",
+           BASIS_TESTS, integration=True),
 )
 
 _CANARY = 'raise ImportError("capital-mutation-gate canary")\n'

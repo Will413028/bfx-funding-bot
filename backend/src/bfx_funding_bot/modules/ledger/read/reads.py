@@ -157,7 +157,6 @@ def _window_from_anchors(
     ]
     return ObservationWindow(
         earliest_attempt_started_at_ms,
-        previous_query_started_at_ms,
         min(anchors) - HISTORY_QUERY_MARGIN_MS if anchors else None,
         anchor_symbols,
     )
