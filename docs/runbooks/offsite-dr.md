@@ -517,9 +517,9 @@ resources, then verifies the restored copy two ways:
    (the deployed one) on the internal network, as a per-run LOGIN that
    has `SELECT` on exactly the ledger tables plus `alembic_version`, `database_realm` and the capital policy tables, and `default_transaction_read_only`: schema at the image's
    migration head, the stamped realm, epoch `ledger` from a known writer (the Bitfinex epoch guard), and the
-   ledger capital reader for every symbol of each scope's newest accepted basis (once per
-   cell the basis names for it, or once under the probe cell id `boot-check` when no cell
-   has an offer resting), which must fold a basis (or report that the newest query was still pending at the
+   ledger capital reader for each scope's newest accepted basis (once per (symbol, cell) the
+   basis names, and once under the probe cell id `boot-check` for a symbol that has a
+   capital policy but no offer resting in any cell), which must fold a basis (or report that the newest query was still pending at the
    restore point). It contacts no venue. The drill matches the report's scopes to the
    bounds by `exchange_account_id` alone and ignores other keys, so the target release's
    drill reads the report of an image from before `545b2877e9bd` (one

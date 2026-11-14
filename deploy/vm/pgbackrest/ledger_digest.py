@@ -597,9 +597,10 @@ def parse_boot(output: str, bounds: Bounds) -> dict[str, object]:
                 _fail("restore_output_invalid")
         scopes.append({**scope, "reads": reads})
     expected = sorted(scope.account for scope in bounds.scopes)
-    # A scope may have no reads: an image that reads per symbol reports none only when its
-    # newest basis has no symbol row; an older image also reports none when no cell has an
-    # offer resting. Either way the row-by-row comparison with production already confirmed it.
+    # A scope may have no reads: an image that probes lendable symbols reports none only when
+    # its newest basis names no cell and no symbol with a capital policy; an older image also
+    # reports none when no cell has an offer resting. Either way the row-by-row comparison
+    # with production already confirmed that state.
     if len(seen) != len(set(seen)) or sorted(seen) != expected:
         _fail("restore_output_invalid")
     return {**boot, "scopes": scopes}

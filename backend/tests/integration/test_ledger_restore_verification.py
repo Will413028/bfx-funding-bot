@@ -34,6 +34,12 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 
+from bfx_funding_bot.modules.trading import (
+    CapitalPolicy,
+    policy_digest,
+    policy_payload,
+    policy_schema_version,
+)
 from tests import pg_local
 
 from .test_ledger_schema_roles import (
@@ -61,6 +67,7 @@ _T3 = "00000000-0000-0000-0000-00000000c003"
 _Q2 = "00000000-0000-0000-0000-00000000c011"
 _O2 = "00000000-0000-0000-0000-00000000c012"
 _B2 = "00000000-0000-0000-0000-00000000c013"
+_P2 = "00000000-0000-0000-0000-00000000c014"
 
 
 def _load(name: str, path: Path) -> ModuleType:
@@ -245,6 +252,23 @@ def test_production_ahead_of_the_restore_point_matches(clusters) -> None:
         assert conn.execute("SELECT count(*) FROM ledger_observation_wallet").fetchone() == (2,)
 
 
+def _lendable(url: str) -> None:
+    """A valid capital policy for fUST and the scope's head at it: the account can lend it."""
+    policy = CapitalPolicy(enabled=True)
+    payload = policy_payload(policy)
+    with psycopg.connect(_libpq(url), autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO capital_policy_revisions(id, exchange_account_id, symbol, revision, "
+            "schema_version, policy, digest, source) VALUES (%s, %s, 'fUST', 2, %s, %s::jsonb, "
+            "%s, '{}')",
+            (_P2, _A, policy_schema_version(policy), json.dumps(payload), policy_digest(payload)),
+        )
+        conn.execute(
+            "INSERT INTO capital_policy_heads(exchange_account_id, symbol, revision_id, revision) "
+            "VALUES (%s, 'fUST', %s, 2)", (_A, _P2),
+        )
+
+
 def _accept_a_basis_without_credit_cells(url: str) -> None:
     """A second accepted observation whose basis is the shape written since cells stopped
     holding lent credits: ``schema_version`` 2, a credit row, no credit-cell row."""
@@ -281,6 +305,7 @@ def test_a_basis_without_credit_cells_after_one_with_them_matches(pg_templates, 
     template = pg_templates.template("ledger_restore_verification", _template)
     restored, production = pg_clone(template), pg_clone(template)
     for url in (restored, production):
+        _lendable(url)
         _accept_a_basis_without_credit_cells(url)
     tables = _verify(restored, production)["tables"]
     assert tables["accepted_capital_basis"]["count"] == 2
@@ -428,17 +453,44 @@ def test_boot_check_accepts_the_restored_copy_with_the_drill_grants_only(cluster
         ("fUST", "cell", _B)]
 
 
-def test_boot_check_reads_a_symbol_whose_capital_is_all_lent(clusters) -> None:
-    """A basis names a cell only while that cell has an offer resting. With none, the symbol
-    is still read once, under the probe cell id, and the drill accepts that report."""
-    restored, _ = clusters
-    _superuser(restored, "DELETE FROM accepted_capital_basis_cell")
-    completed = _boot_check(_verifier_url(restored))
+def _reads(completed: subprocess.CompletedProcess[str], restored: str) -> list[tuple[Any, ...]]:
     assert completed.returncode == 0, completed.stdout + completed.stderr
     [scope] = ledger.parse_boot(completed.stdout, _bounds(restored))["scopes"]
-    assert scope["basis_id"] == _B
-    assert [(read["symbol"], read["cell_id"], read["basis_id"]) for read in scope["reads"]] == [
-        ("fUST", "boot-check", _B)]
+    return [(read["symbol"], read["cell_id"], read["basis_id"], read["result"])
+            for read in scope["reads"]]
+
+
+def test_boot_check_reads_a_symbol_whose_capital_is_all_lent(clusters) -> None:
+    """A basis names a cell only while that cell has an offer resting. With none, a symbol
+    the account can lend is still read once, under the probe cell id, and the drill accepts
+    that report."""
+    restored, _ = clusters
+    _lendable(restored)
+    _superuser(restored, "DELETE FROM accepted_capital_basis_cell")
+    [read] = _reads(_boot_check(_verifier_url(restored)), restored)
+    assert read[:3] == ("fUST", "boot-check", _B)
+
+
+def test_boot_check_probe_reports_a_pending_query(clusters) -> None:
+    """The restore point fell inside an observation cycle: the probe read says so."""
+    restored, _ = clusters
+    _lendable(restored)
+    _superuser(restored, "DELETE FROM accepted_capital_basis_cell")
+    with psycopg.connect(_libpq(restored), autocommit=True) as conn:
+        conn.execute(_query_sql(_Q2, 2, 1, started_at_ms=10))
+    assert _reads(_boot_check(_verifier_url(restored)), restored) == [
+        ("fUST", "boot-check", None, "blocked:snapshot_query_pending")]
+
+
+def test_boot_check_does_not_read_a_wallet_symbol_that_cannot_lend(clusters) -> None:
+    """No cell row and no capital policy (a dust wallet): nothing to read. Reading it would
+    refuse a healthy copy whenever the newest query is pending, since the reader answers
+    with the missing policy before it looks at the query."""
+    restored, _ = clusters
+    _superuser(restored, "DELETE FROM accepted_capital_basis_cell")
+    with psycopg.connect(_libpq(restored), autocommit=True) as conn:
+        conn.execute(_query_sql(_Q2, 2, 1, started_at_ms=10))
+    assert _reads(_boot_check(_verifier_url(restored)), restored) == []
 
 
 def test_boot_check_refuses_a_restored_copy_that_is_not_on_the_ledger(clusters) -> None:
