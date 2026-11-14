@@ -66,7 +66,7 @@
 
 ## 步驟
 
-- [ ] **1. 讀取鏈、API 與營運 UI 拿掉「未歸屬」**（被擋於：無）
+- [x] **1. 讀取鏈、API 與營運 UI 拿掉「未歸屬」**（被擋於：無）
   - 範圍：inventory R01–R03、R07–R10、A01–A06、F01–F05，以及 X03、X05 裡帶這些欄位的 fixture（F05 含 `frontend/e2e/uncertainty.spec.ts` 的 fixture）。`SymbolCapital.unattributed_credits`、`CapitalView.unattributed_credit_exposure`、`CapitalAvailable.unattributed_credit_exposure`、`PositionView.unattributed_lent`、funding status 的 `unattributed_credit_exposure`、positions 回應的 `unattributedLent`、前端兩處顯示與四則文案都刪除。`backend/openapi.json` 以 `cd backend && uv run python scripts/dump_openapi.py` 重新產生，`frontend/src/types/api.gen.ts` 以 `cd frontend && pnpm gen:api` 重新產生（不手改）。這一步之後 basis 仍照舊寫 `unattributed_credits` 欄，只是沒有人讀；欄位在步驟 3 刪除。
   - 消費端：`git grep -nE 'unattributed_credit|unattributed_lent|unattributedLent' -- backend/src backend/scripts backend/tests deploy frontend/src frontend/messages frontend/e2e backend/openapi.json`，文案鍵另以 `rg -n '"unattributed' frontend/messages` 找（2026-11-14 的結果在 inventory；`modules/live_validation/` 的命中是週報自己的計數，不動）。API 的呼叫端只有同一個 image 裡的前端（static export），沒有其他 repo 的消費端。
   - 不能動：`cell_limit`、`cell_headroom`、`max_cell_fraction`、`total_capital`、`spendable` 等其餘 API 欄位與它們的值；`basis.py`；資料表；`modules/live_validation/`。
@@ -178,7 +178,7 @@
 
 | 步驟 | 狀態 | 已跑的驗收 | 未跑的驗收與原因 | commit |
 |---|---|---|---|---|
-| 1 讀取鏈、API 與營運 UI 拿掉「未歸屬」 | 未開始 | | | |
+| 1 讀取鏈、API 與營運 UI 拿掉「未歸屬」 | 完成 | 2026-11-14：消費端搜尋只剩 `basis.py`、`tables.py`、`modules/live_validation/`，文案鍵 0 行；本機 `mypy`、`ruff`、`lint-imports --no-cache`（26 kept）、三個受影響的 integration 檔（53 passed）、`pnpm lint`、`pnpm test`（167 passed）、`quality_ratchet.py`；本機單元 5383 passed、1 failed（`test_tick_candles.py::test_a_venue_that_never_answers_does_not_stall_the_tick`，單獨跑通過，CI 的 unit job 通過）；PR #400 的 CI 與 Security 全綠（unit、integration、Frontend、e2e smoke、契約檢查、Quality ratchet、Capital mutation gate）；`test_ledger_positions_offers.py` 檔頭的 mutation（`lent = credits + offered`）在複本實跑，被 `test_positions_use_only_the_latest_basis` 擋下；`/code-review`：findings 7（blocking 0），fixed 3、recorded 2、rejected 2、raised 0；`tests_executed` 5862→5860（兩條 `Removed-Test:`） | 無 | `e87b106d`（PR #400） |
 | 2 basis 不再把 credit 歸屬到 cell | 未開始 | | | |
 | 3 刪掉 `unattributed_credits` 與 `attribution_basis` 兩欄 | 未開始 | | | |
 | 4 架構文件改寫 | 未開始 | | | |
