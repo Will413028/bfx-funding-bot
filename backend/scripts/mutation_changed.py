@@ -15,7 +15,8 @@ for the code in front of it, in minutes, so this script
 It reports; it does not gate. A surviving mutant is a line the mirrored unit tests would let
 change, which is a question for the reviewer, not a verdict: the mutant may be equivalent, or
 an integration test may be what defends it (those are not run here). The exit code is 0 unless
-the script itself fails; a source it could not judge is named in the summary with the reason.
+the script itself fails; a source it could not judge is named in the summary with the reason
+(its unit tests do not run it, or its changed functions have more than ``--max-mutants`` mutants).
 
 Usage (from ``backend/``):
     uv run python -m scripts.mutation_changed --base origin/dev --summary /tmp/mutation.md
@@ -60,6 +61,7 @@ class Judged:
     killed: int = 0
     mutants: int = 0
     skipped: str = ""                       # why it was not judged; empty when it was
+    unjudged: int = 0                       # mutants that timed out or crashed: neither killed nor survived
     diffs: dict[str, str] = field(default_factory=dict)
 
 
@@ -68,11 +70,16 @@ def changed_lines(diff: str) -> dict[Path, list[tuple[int, int]]]:
     A hunk that only removes lines changes none."""
     ranges: dict[Path, list[tuple[int, int]]] = {}
     current: Path | None = None
+    previous = ""
     for line in diff.splitlines():
-        if line.startswith("+++ "):
-            name = line[4:].strip()
+        # A file header is the pair "--- old" then "+++ new"; an added line that starts with
+        # "++ " also begins with "+++ ", but the line before it is not "--- ".
+        if line.startswith("+++ ") and previous.startswith("--- "):
+            name = line[4:].strip().strip('"')
             current = None if name == "/dev/null" else Path(name.removeprefix("b/"))
+            previous = line
             continue
+        previous = line
         hunk = _HUNK.match(line)
         if hunk and current is not None:
             count = int(hunk["count"]) if hunk["count"] is not None else 1
@@ -104,7 +111,7 @@ def functions_at(source: str, ranges: Sequence[tuple[int, int]]) -> list[str]:
         elif isinstance(node, ast.ClassDef):
             found += [f"{node.name}.{item.name}" for item in node.body
                       if isinstance(item, _Function) and touched(item)]
-    return found
+    return list(dict.fromkeys(found))       # a property and its setter share one name
 
 
 def tests_for(source: Path, repo: Path = REPO) -> Path | None:
@@ -134,7 +141,8 @@ def changed_functions(diff: str, repo: Path = REPO) -> dict[Path, list[str]]:
     return out
 
 
-def judge(source: Path, functions: Sequence[str], out_dir: Path, jobs: int) -> Judged:
+def judge(source: Path, functions: Sequence[str], out_dir: Path, jobs: int,
+          max_mutants: int | None = None) -> Judged:
     tests = tests_for(source)
     if tests is None:
         return Judged(source, tuple(functions), skipped="no test directory mirrors this file")
@@ -142,14 +150,27 @@ def judge(source: Path, functions: Sequence[str], out_dir: Path, jobs: int) -> J
     report_path = out_dir / (source.with_suffix("").as_posix().replace("/", "__") + ".json")
     try:
         report = matrix.build([source], selection, jobs, report_path, functions=functions,
-                              strict_functions=False, show_survivors=True)
+                              derived_functions=True, show_survivors=True, max_mutants=max_mutants)
     except matrix.MatrixError as exc:
+        print(f"{source}: not judged: {exc}", flush=True)        # the whole reason, for the job log
         reason = str(exc).splitlines()[0]
         if reason.startswith("no test broke"):       # the matrix's canary: nothing selected runs this code
             reason = f"the unit tests under {tests} do not run this file (an integration test may)"
         return Judged(source, tuple(functions), tests, skipped=reason)
     return Judged(source, tuple(report["functions"]), tests, tuple(report["survived"]),
-                  int(report["killed"]), int(report["mutants"]), diffs=dict(report["survivor_diffs"]))
+                  int(report["killed"]), int(report["mutants"]), diffs=dict(report["survivor_diffs"]),
+                  unjudged=len(report["timed_out"]) + len(report["crashed"]))
+
+
+def _cell(text: str) -> str:
+    """Text for one table cell: a pipe would end the cell, a newline the row."""
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+def _fence(text: str) -> str:
+    """A code fence longer than any run of backticks in ``text``."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    return "`" * max(3, longest + 1)
 
 
 def render(judged: Sequence[Judged], not_started: Sequence[Path], base: str) -> str:
@@ -163,9 +184,11 @@ def render(judged: Sequence[Judged], not_started: Sequence[Path], base: str) -> 
     for item in judged:
         names = ", ".join(f"`{name}`" for name in item.functions) or "-"
         if item.skipped:
-            lines.append(f"| `{item.source}` | {names} | - | not judged | {item.skipped} |")
+            lines.append(f"| `{item.source}` | {names} | - | not judged | {_cell(item.skipped)} |")
         else:
-            lines.append(f"| `{item.source}` | {names} | `{item.tests}` | {item.killed}/{item.mutants} "
+            total = item.mutants + item.unjudged
+            hung = f" ({item.unjudged} timed out or crashed)" if item.unjudged else ""
+            lines.append(f"| `{item.source}` | {names} | `{item.tests}` | {item.killed}/{total}{hung} "
                          f"| {len(item.survived)} |")
     for path in not_started:
         lines.append(f"| `{path}` | - | - | not judged | the time budget ran out before this file |")
@@ -177,9 +200,10 @@ def render(judged: Sequence[Judged], not_started: Sequence[Path], base: str) -> 
             lines += [f"The first {SHOWN} are shown; the JSON report in the artifact lists every one.", ""]
         for mutant in item.survived[:SHOWN]:
             short = mutant.rsplit(".", 1)[-1]
-            diff = item.diffs.get(mutant, "")
+            diff = item.diffs.get(mutant, "") or "(mutmut could not show this mutant)"
+            fence = _fence(diff)
             lines += [f"<details><summary><code>{short}</code></summary>", "",
-                      "```diff", diff or "(mutmut could not show this mutant)", "```", "", "</details>"]
+                      f"{fence}diff", diff, fence, "", "</details>"]
     return "\n".join([*lines, ""])
 
 
@@ -191,11 +215,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--jobs", type=int, default=4, help="mutants run at once (default 4)")
     parser.add_argument("--budget-seconds", type=float, default=900.0,
                         help="start no further file once this much time has passed (default 900)")
+    parser.add_argument("--max-mutants", type=int, default=400,
+                        help="do not judge a file whose changed functions have more mutants (default 400)")
     args = parser.parse_args(argv)
-    diff = subprocess.run(["git", "-C", str(REPO), "diff", "--unified=0", "--no-color", args.base, "HEAD",
-                           "--", str(PACKAGE)], capture_output=True, text=True, check=True).stdout
     out_dir = args.out_dir or args.summary.parent
     out_dir.mkdir(parents=True, exist_ok=True)
+    args.summary.parent.mkdir(parents=True, exist_ok=True)
+    diff = subprocess.run(["git", "-C", str(REPO), "-c", "core.quotepath=off", "diff", "--unified=0",
+                           "--no-color", args.base, "HEAD", "--", str(PACKAGE)],
+                          capture_output=True, text=True, check=True).stdout
     started = time.monotonic()
     judged: list[Judged] = []
     not_started: list[Path] = []
@@ -204,15 +232,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             not_started.append(source)
             continue
         print(f"{source}: {', '.join(functions)}", flush=True)
-        judged.append(judge(source, functions, out_dir, args.jobs))
+        judged.append(judge(source, functions, out_dir, args.jobs, args.max_mutants))
+        _write_json(out_dir, judged, not_started)        # after every file: a run cut short keeps what it judged
+    _write_json(out_dir, judged, not_started)
     with args.summary.open("a") as handle:
         handle.write(render(judged, not_started, args.base))
+    return 0
+
+
+def _write_json(out_dir: Path, judged: Sequence[Judged], not_started: Sequence[Path]) -> None:
     (out_dir / "mutation-changed.json").write_text(json.dumps(
         [{"source": str(j.source), "functions": list(j.functions), "tests": str(j.tests) if j.tests else None,
-          "killed": j.killed, "mutants": j.mutants, "survived": list(j.survived), "skipped": j.skipped}
+          "killed": j.killed, "mutants": j.mutants, "unjudged": j.unjudged, "survived": list(j.survived),
+          "skipped": j.skipped}
          for j in judged] + [{"source": str(p), "skipped": "time budget"} for p in not_started],
         indent=2) + "\n")
-    return 0
 
 
 if __name__ == "__main__":

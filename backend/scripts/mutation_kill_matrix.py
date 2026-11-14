@@ -239,31 +239,34 @@ def _report(results: Mapping[str, Run | str | None], total: int) -> dict[str, An
     return report
 
 
-def in_functions(mutant: str, functions: Sequence[str]) -> bool:
+def in_functions(mutant: str, functions: Sequence[str], exact: bool = False) -> bool:
     """Whether ``mutant`` belongs to one of ``functions``, each a function or method name as
     written in the source (``_pull_if_stopped``, or ``DeploymentReconciler._pull_if_stopped``
-    when two classes of the file have a method of that name)."""
+    when two classes of the file have a method of that name). A bare name also means the
+    method of that name in every class, unless ``exact``: then it is the top-level function only."""
     owner = function_of_mutant(mutant).rsplit(".", 1)[-1]          # x_name, or xǁClassǁname
     if owner.startswith("xǁ"):
         klass, _, name = owner[2:].partition("ǁ")
-        return name in functions or f"{klass}.{name}" in functions
+        return f"{klass}.{name}" in functions or (not exact and name in functions)
     return owner.removeprefix("x_") in functions
 
 
-def select_mutants(names: Sequence[str], functions: Sequence[str], strict: bool = True) -> list[str]:
+def select_mutants(names: Sequence[str], functions: Sequence[str], derived: bool = False) -> list[str]:
     """The mutants of ``functions``, or all of ``names`` when no function is named. Every name
     must select at least one mutant: a misspelt name beside a good one would otherwise be
-    dropped without a word, and the report would cover less than was asked. ``strict=False``
-    is for names a program derived from a diff, where a function mutmut has nothing to mutate
-    in (a body that is one ``return name``) is expected: those are left out, and only a
-    selection with no mutant at all is an error."""
+    dropped without a word, and the report would cover less than was asked.
+
+    ``derived`` is for names a program read off the source (``mutation_changed.py``): a bare
+    name is the top-level function only, since that program writes methods as ``Class.method``,
+    and a function mutmut has nothing to mutate in (a body that is one ``return name``) is left
+    out; only a selection with no mutant at all is an error."""
     if not functions:
         return list(names)
-    unmatched = [f for f in functions if not any(in_functions(name, [f]) for name in names)]
-    if unmatched and (strict or len(unmatched) == len(functions)):
+    unmatched = [f for f in functions if not any(in_functions(name, [f], derived) for name in names)]
+    if unmatched and (not derived or len(unmatched) == len(functions)):
         raise MatrixError(f"mutmut wrote no mutant for {', '.join(unmatched)}: name functions or "
                           "methods of the sources as the source spells them")
-    return [name for name in names if in_functions(name, functions)]
+    return [name for name in names if in_functions(name, functions, derived)]
 
 
 def survivor_diffs(copy: Path, sources: Sequence[Path], module_name: str | None,
@@ -286,14 +289,18 @@ def survivor_diffs(copy: Path, sources: Sequence[Path], module_name: str | None,
 
 def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Path,
           module_name: str | None = None, functions: Sequence[str] = (), *,
-          strict_functions: bool = True, show_survivors: bool = False) -> dict[str, Any]:
+          derived_functions: bool = False, show_survivors: bool = False,
+          max_mutants: int | None = None) -> dict[str, Any]:
     before = sandbox.digest(sources)
     with tempfile.TemporaryDirectory(prefix="mutation-kill-matrix-") as tmp:
         workdir = Path(tmp)
         copy = workdir / "repo"
         sandbox.copy_repository(copy)
-        names = select_mutants(_mutate(copy, sources, module_name), functions, strict_functions)
-        judged_functions = sorted(f for f in functions if any(in_functions(name, [f]) for name in names))
+        names = select_mutants(_mutate(copy, sources, module_name), functions, derived_functions)
+        if max_mutants is not None and len(names) > max_mutants:
+            raise MatrixError(f"{len(names)} mutants, over the limit of {max_mutants} for one run")
+        judged_functions = sorted({f for f in functions
+                                   if any(in_functions(name, [f], derived_functions) for name in names)})
         started = time.monotonic()
         stats = _baseline(copy, selection, workdir)
         timeout = max(60.0, 10 * (time.monotonic() - started))
