@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 COLUMNS = ("id", "位置", "現況", "去向", "步驟")
 VERBS = ("保留", "改寫", "刪除")
-STEPS = {"1", "2", "3", "4", "5"}
+STEPS = {"1", "2", "3", "4", "5", "6"}
 PATTERN = (
     r"cell_exposure|max_cell_fraction|cell_limit|cell_headroom"
     r"|accepted_capital_basis_(credit_)?cell|AcceptedCapitalBasis(Credit)?Cell"
