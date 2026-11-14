@@ -22,8 +22,10 @@ so it cannot say which tests are redundant. Here every selected test runs agains
    errored (the baseline has neither, so the mutant caused it). A mutant no test calls is
    ``not_reached`` (and survived); a run past ten times the baseline's duration (at least a
    minute) is ``timed_out``; a run that leaves no readable report (the mutant crashed pytest)
-   is ``crashed``. The report is rewritten after every mutant, ``complete`` false until the
-   last, so a run cut short still leaves what it judged.
+   is ``crashed``; past ``max_mutants`` (a ``build`` argument) the rest are ``over_limit``,
+   never run. The report is rewritten after every mutant, ``complete`` false until every
+   mutant has a category (an ``over_limit`` one counts), so a run cut short still leaves
+   what it judged.
 
 The report (``--out``, JSON) has, per mutant, the test functions that killed it (parameter ids
 dropped), and per test function its kills and the kills no other test shares. ``survived`` are
@@ -55,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import itertools
 import json
 import re
 import shlex
@@ -227,6 +230,15 @@ def _judge(copy: Path, workdir: Path, mutant: str, tests: Sequence[str],
     return read_report(report)
 
 
+def _in_turn(names: Sequence[str]) -> list[str]:
+    """``names`` reordered to take one mutant of each function in turn, so a cut at any length
+    leaves every function some of its mutants."""
+    by_function: dict[str, list[str]] = {}
+    for name in names:
+        by_function.setdefault(function_of_mutant(name), []).append(name)
+    return [name for group in itertools.zip_longest(*by_function.values()) for name in group if name]
+
+
 def _report(results: Mapping[str, Run | str | None], total: int) -> dict[str, Any]:
     judged = {m: r for m, r in results.items() if isinstance(r, Run) and not r.crashed}
     report = summarize({m: {function_of(t) for t in run.broken} for m, run in judged.items()}
@@ -234,6 +246,7 @@ def _report(results: Mapping[str, Run | str | None], total: int) -> dict[str, An
     report["not_reached"] = sorted(m for m, r in results.items() if r == "not_reached")
     report["timed_out"] = sorted(m for m, r in results.items() if r is None)
     report["crashed"] = sorted(m for m, r in results.items() if isinstance(r, Run) and r.crashed)
+    report["over_limit"] = sorted(m for m, r in results.items() if r == "over_limit")
     report["complete"] = len(results) == total
     report["mutants_total"] = total
     return report
@@ -291,8 +304,10 @@ def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Pat
           module_name: str | None = None, functions: Sequence[str] = (), *,
           derived_functions: bool = False, show_survivors: bool = False,
           max_mutants: int | None = None, max_diffs: int | None = None) -> dict[str, Any]:
-    """``max_mutants`` limits the mutants a test runs for: one no selected test reaches costs
-    nothing. ``show_survivors`` adds mutmut's diff of the survivors a test did run, the first
+    """``max_mutants`` limits the mutants a test runs for (one no selected test reaches costs
+    nothing): past it the rest are ``over_limit``, taken in turn from each function so every
+    function keeps some, and the baseline already paid for is not thrown away.
+    ``show_survivors`` adds mutmut's diff of the survivors a test did run, the first
     ``max_diffs`` of them: a diff parses the whole module, seconds each in a large one."""
     before = sandbox.digest(sources)
     with tempfile.TemporaryDirectory(prefix="mutation-kill-matrix-") as tmp:
@@ -316,12 +331,15 @@ def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Pat
             if not tests:
                 results[name] = "not_reached"
         print(f"{len(names)} mutants, {len(results)} reached by no selected test", flush=True)
-        if max_mutants is not None and len(names) - len(results) > max_mutants:
-            raise MatrixError(f"{len(names) - len(results)} mutants to run, "
-                              f"over the limit of {max_mutants} for one run")
+        to_run = _in_turn([name for name, tests in reached.items() if tests])
+        if max_mutants is not None and len(to_run) > max_mutants:
+            for name in to_run[max_mutants:]:
+                results[name] = "over_limit"
+            print(f"{len(to_run) - max_mutants} over the limit of {max_mutants}, not run", flush=True)
+            to_run = to_run[:max_mutants]
         with ThreadPoolExecutor(max_workers=jobs) as pool:
-            futures = {pool.submit(_judge, copy, workdir, name, tests, timeout): name
-                       for name, tests in reached.items() if tests}
+            futures = {pool.submit(_judge, copy, workdir, name, reached[name], timeout): name
+                       for name in to_run}
             for future in as_completed(futures):
                 name, run = futures[future], future.result()
                 with lock:
