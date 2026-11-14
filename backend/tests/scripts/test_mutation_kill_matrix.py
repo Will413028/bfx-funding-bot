@@ -83,3 +83,18 @@ def test_a_missing_or_truncated_report_is_a_crashed_run(tmp_path: Path) -> None:
     truncated.write_text("")
     assert matrix.read_report(truncated).crashed
     assert matrix.read_report(tmp_path / "missing.xml").crashed
+
+
+def test_function_names_select_the_mutants_of_functions_and_methods() -> None:
+    module = "bfx_funding_bot.modules.x"
+    plain = f"{module}.x_allocate__mutmut_3"
+    method = f"{module}.xǁReconcilerǁ_pull_if_stopped__mutmut_12"
+    other = f"{module}.xǁSweeperǁ_pull_if_stopped__mutmut_1"
+    assert matrix.in_functions(plain, ["allocate"])
+    assert not matrix.in_functions(plain, ["allocate_more", "x_allocate", "llocate"])
+    assert matrix.in_functions(method, ["_pull_if_stopped"])
+    assert matrix.in_functions(other, ["_pull_if_stopped"])           # the bare name means every class
+    assert matrix.in_functions(method, ["Reconciler._pull_if_stopped"])
+    assert not matrix.in_functions(other, ["Reconciler._pull_if_stopped"])
+    assert not matrix.in_functions(method, ["Reconciler", "pull_if_stopped"])
+    assert not matrix.in_functions(method, [])

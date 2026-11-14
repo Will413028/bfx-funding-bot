@@ -70,3 +70,16 @@ def test_pytest_runs_from_the_copys_backend(tmp_path: Path) -> None:
         "    assert os.environ['PYTHONDONTWRITEBYTECODE'] == '1'\n")
     result = sandbox.pytest(copy, ["-q", "test_where.py"], timeout=120)
     assert result is not None and result.returncode == 0, result and result.stdout
+    assert not list(copy.rglob("*.pyc"))
+
+
+def test_pytest_keeps_bytecode_only_when_asked(tmp_path: Path) -> None:
+    copy = tmp_path / "copy"
+    (copy / "backend").mkdir(parents=True)
+    (copy / "backend" / "helper.py").write_text("VALUE = 1\n")
+    (copy / "backend" / "test_cached.py").write_text(
+        "import os\n\nimport helper\n\n\ndef test_cached():\n"
+        "    assert helper.VALUE == 1\n    assert not os.environ['PYTHONDONTWRITEBYTECODE']\n")
+    result = sandbox.pytest(copy, ["-q", "test_cached.py"], timeout=120, bytecode=True)
+    assert result is not None and result.returncode == 0, result and result.stdout
+    assert [path.name.split(".")[0] for path in copy.rglob("helper*.pyc")] == ["helper"]
