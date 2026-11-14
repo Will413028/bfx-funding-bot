@@ -67,7 +67,7 @@ ALLOWED: dict[str, set[str]] = {
     "accepted_capital_basis_attempt": {"basis_id", "attempt_id", "symbol", "classification"},
     "accepted_capital_basis_quarantine": {"basis_id", "quarantine_id"},
     "accepted_capital_basis_symbol": {
-        "basis_id", "symbol", "available", "offered", "credits", "unattributed_credits",
+        "basis_id", "symbol", "available", "offered", "credits",
     },
     "accepted_capital_basis_credit": {"basis_id", "symbol"},
     "submission_attempt_journal": {

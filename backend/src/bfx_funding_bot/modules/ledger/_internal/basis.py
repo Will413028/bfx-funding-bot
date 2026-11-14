@@ -513,8 +513,6 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
                 available=v.available,
                 offered=v.offered,
                 credits=v.credits,
-                # Transitional until the column is dropped (plan step 3): every credit.
-                unattributed_credits=v.credits,
                 foreign_offers=v.foreign,
                 block=_block_json(v.reasons),
                 conservation=verdicts[name].conservation,
@@ -537,8 +535,6 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
                 amount=x.amount,
                 period_days=x.period_days,
                 mts_opening=x.mts_opening,
-                # Transitional until the column is dropped (plan step 3).
-                attribution_basis="unattributed",
             )
         )
     for attempt_id, (symbol, kind) in classified.items():

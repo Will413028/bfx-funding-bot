@@ -287,14 +287,13 @@ def _accept_a_basis_without_credit_cells(url: str) -> None:
         )
         conn.execute(
             "INSERT INTO accepted_capital_basis_symbol(basis_id, symbol, available, offered, "
-            "credits, unattributed_credits, foreign_offers, conservation, lent_unexplained, "
-            f"foreign_executed, fill_conflicts) VALUES ('{_B2}', 'fUST', 9, 0, 1, 1, 0, "
+            "credits, foreign_offers, conservation, lent_unexplained, "
+            f"foreign_executed, fill_conflicts) VALUES ('{_B2}', 'fUST', 9, 0, 1, 0, "
             "'conserved', 0, 0, 0)"
         )
         conn.execute(
             "INSERT INTO accepted_capital_basis_credit (basis_id, source_kind, venue_credit_id, "
-            f"symbol, amount, attribution_basis) VALUES ('{_B2}', 'credit', 'credit-1', 'fUST', "
-            "1, 'unattributed')"
+            f"symbol, amount) VALUES ('{_B2}', 'credit', 'credit-1', 'fUST', 1)"
         )
 
 

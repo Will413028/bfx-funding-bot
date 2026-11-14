@@ -186,8 +186,9 @@ EXPECTED_TABLES: dict[str, set[str]] = {
 }
 # 545b2877e9bd: every live table loses deployment_environment and its column grants with it
 # (the archive keeps the column: ARCHIVE_COLUMNS).
+# dc9d9290c2c0: accepted_capital_basis_symbol loses unattributed_credits.
 EXPECTED_COLUMNS: dict[tuple[str, str], set[str]] = {
-    key: cols - {"deployment_environment"}
+    key: cols - {"deployment_environment", "unattributed_credits"}
     for key, cols in REVERSIBLE_COLUMNS.items() if key != _REQUEST_INSERT}
 # Before e4f5a6b7c8d9 revoked it, the web API could still insert the pre-switch evidence column.
 PRE_CONTRACT_COLUMNS = {

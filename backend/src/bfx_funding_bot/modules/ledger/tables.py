@@ -892,7 +892,6 @@ class AcceptedCapitalBasisSymbolRow(Base):
     available: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     offered: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     credits: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
-    unattributed_credits: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     foreign_offers: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     block: Mapped[dict[str, Any] | None] = mapped_column(_JSON)
     # Conservation verdict against the scope's previous accepted basis
@@ -904,8 +903,7 @@ class AcceptedCapitalBasisSymbolRow(Base):
     fill_conflicts: Mapped[int] = mapped_column(Integer, nullable=False)
     __table_args__ = (
         CheckConstraint(
-            "available >= 0 AND offered >= 0 AND credits >= 0 AND unattributed_credits >= "
-            "0 AND foreign_offers >= 0 AND unattributed_credits <= credits",
+            "available >= 0 AND offered >= 0 AND credits >= 0 AND foreign_offers >= 0",
             name="ck_accepted_basis_symbol_amount",
         ),
         CheckConstraint(
@@ -947,14 +945,9 @@ class AcceptedCapitalBasisCreditRow(Base):
     amount: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     period_days: Mapped[int | None] = mapped_column(Integer)
     mts_opening: Mapped[int | None] = mapped_column(BigInteger)
-    attribution_basis: Mapped[str] = mapped_column(Text, nullable=False)
     __table_args__ = (
         CheckConstraint("source_kind IN ('credit','loan')", name="ck_accepted_basis_credit_kind"),
         CheckConstraint("amount >= 0", name="ck_accepted_basis_credit_amount"),
-        CheckConstraint(
-            "attribution_basis IN ('trade','carry','recent_fill','unattributed')",
-            name="ck_accepted_basis_credit_attribution",
-        ),
         Index(
             "ix_accepted_basis_credit_cell_lookup",
             "basis_id",
