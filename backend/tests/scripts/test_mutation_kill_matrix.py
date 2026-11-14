@@ -107,6 +107,34 @@ def test_every_named_function_must_select_a_mutant() -> None:
     assert matrix.select_mutants(names, ["allocate", "Reconciler._pull"]) == names
     with pytest.raises(matrix.MatrixError, match=r"no mutant for _pul, Sweeper\._pull"):
         matrix.select_mutants(names, ["_pull", "_pul", "Sweeper._pull"])
+    # Names derived from the source: one with nothing to mutate is left out, none at all is an error,
+    # and a bare name is the top-level function only (methods come as Class.method).
+    assert matrix.select_mutants(names, ["Reconciler._pull", "trivial"], derived=True) == names[1:]
+    with pytest.raises(matrix.MatrixError, match="no mutant for trivial, other"):
+        matrix.select_mutants(names, ["trivial", "other"], derived=True)
+    same = ["m.x_run__mutmut_1", "m.xǁAǁrun__mutmut_1", "m.xǁBǁrun__mutmut_1"]
+    assert matrix.select_mutants(same, ["run"]) == same
+    assert matrix.select_mutants(same, ["run"], derived=True) == same[:1]
+    assert matrix.select_mutants(same, ["run", "B.run"], derived=True) == [same[0], same[2]]
+    with pytest.raises(matrix.MatrixError, match="no mutant for _pull"):
+        matrix.select_mutants(names, ["_pull"], derived=True)
+
+
+def test_survivor_diffs_come_from_the_mutated_copy(tmp_path: Path) -> None:
+    from mutmut.__main__ import create_mutants_for_file
+
+    source = Path("pkg/calc.py")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / source).write_text("def add(a, b):\n    return a + b\n")
+    import contextlib
+    with contextlib.chdir(tmp_path):
+        (Path("mutants") / source).parent.mkdir(parents=True)
+        assert create_mutants_for_file(source, source).error is None
+    names = matrix.mutant_names(tmp_path / source, "calc")
+    assert names
+    diffs = matrix.survivor_diffs(tmp_path, [source], "calc", [names[0], "calc.x_gone__mutmut_1", "other.x_f__mutmut_1"])
+    assert "-    return a + b" in diffs[names[0]] and "\n+    return" in diffs[names[0]]
+    assert diffs["calc.x_gone__mutmut_1"] == "" and diffs["other.x_f__mutmut_1"] == ""
 
 
 def test_mutant_runs_share_the_copys_bytecode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
