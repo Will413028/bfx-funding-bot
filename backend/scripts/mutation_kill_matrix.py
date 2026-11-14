@@ -42,6 +42,12 @@ runs it on demand and uploads the report):
         --module-name vm_ops_bfx_deploy_under_test --out /tmp/deploy.json \\
         --pytest-args 'tests/scripts/test_vm_deploy.py'
 
+``--function NAME`` (repeatable) judges only the mutants of that function or method, which is
+how to ask about the code one change touched: the whole of ``deployment/reconciler.py`` is
+about 1,300 mutants, one method of it about 50. A report made this way speaks for those
+functions only (the report lists them under ``functions``, empty for a whole-file run); its
+``not_in_cover`` is not a list of tests to remove. A name that selects no mutant is an error.
+
 Exit codes: 0 = report written; 2 = cannot judge (baseline failing, erroring or crashing,
 canary not caught, or a source changed).
 """
@@ -185,8 +191,10 @@ def _mutate(copy: Path, sources: Sequence[Path], module_name: str | None) -> lis
 
 def _pytest(copy: Path, tests: Sequence[str], report: Path, env: Mapping[str, str],
             timeout: float) -> subprocess.CompletedProcess[str] | None:
+    # The copy's sources do not change after ``_mutate``: every run may share one bytecode cache.
     return sandbox.pytest(copy, ["-q", "--tb=no", "-p", "no:randomly",
-                                 f"--junitxml={report}", *tests], env=env, timeout=timeout)
+                                 f"--junitxml={report}", *tests], env=env, timeout=timeout,
+                          bytecode=True)
 
 
 def _env(mutant: str) -> dict[str, str]:
@@ -231,14 +239,38 @@ def _report(results: Mapping[str, Run | str | None], total: int) -> dict[str, An
     return report
 
 
+def in_functions(mutant: str, functions: Sequence[str]) -> bool:
+    """Whether ``mutant`` belongs to one of ``functions``, each a function or method name as
+    written in the source (``_pull_if_stopped``, or ``DeploymentReconciler._pull_if_stopped``
+    when two classes of the file have a method of that name)."""
+    owner = function_of_mutant(mutant).rsplit(".", 1)[-1]          # x_name, or xǁClassǁname
+    if owner.startswith("xǁ"):
+        klass, _, name = owner[2:].partition("ǁ")
+        return name in functions or f"{klass}.{name}" in functions
+    return owner.removeprefix("x_") in functions
+
+
+def select_mutants(names: Sequence[str], functions: Sequence[str]) -> list[str]:
+    """The mutants of ``functions``, or all of ``names`` when no function is named. Every name
+    must select at least one mutant: a misspelt name beside a good one would otherwise be
+    dropped without a word, and the report would cover less than was asked."""
+    if not functions:
+        return list(names)
+    unmatched = [f for f in functions if not any(in_functions(name, [f]) for name in names)]
+    if unmatched:
+        raise MatrixError(f"mutmut wrote no mutant for {', '.join(unmatched)}: name functions or "
+                          "methods of the sources as the source spells them")
+    return [name for name in names if in_functions(name, functions)]
+
+
 def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Path,
-          module_name: str | None = None) -> dict[str, Any]:
+          module_name: str | None = None, functions: Sequence[str] = ()) -> dict[str, Any]:
     before = sandbox.digest(sources)
     with tempfile.TemporaryDirectory(prefix="mutation-kill-matrix-") as tmp:
         workdir = Path(tmp)
         copy = workdir / "repo"
         sandbox.copy_repository(copy)
-        names = _mutate(copy, sources, module_name)
+        names = select_mutants(_mutate(copy, sources, module_name), functions)
         started = time.monotonic()
         stats = _baseline(copy, selection, workdir)
         timeout = max(60.0, 10 * (time.monotonic() - started))
@@ -265,11 +297,13 @@ def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Pat
                     print(f"[{len(results)}/{len(names)}] {name}: {status}", flush=True)
                     report = _report(results, len(names))
                     report["sources"], report["selection"] = [str(s) for s in sources], list(selection)
+                    report["functions"] = sorted(functions)
                     out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     if sandbox.digest(sources) != before:
         raise MatrixError("a source changed while the matrix ran")
     report = _report(results, len(names))
     report["sources"], report["selection"] = [str(s) for s in sources], list(selection)
+    report["functions"] = sorted(functions)       # empty: every mutant of the sources was judged
     out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     return report
 
@@ -282,6 +316,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="the module the sources run under, for a file loaded by its path")
     parser.add_argument("--out", type=Path, required=True, help="where the JSON report goes")
     parser.add_argument("--jobs", type=int, default=4, help="mutants run at once (default 4)")
+    parser.add_argument("--function", action="append", default=[], metavar="NAME",
+                        help="judge only the mutants of this function or method (repeatable; "
+                             "Class.method when the name alone is ambiguous)")
     parser.add_argument("--pytest-args", default="",
                         help="the tests to run as one shell-quoted string (for the workflow)")
     parser.add_argument("selection", nargs="*", help="pytest arguments after --: the tests to run")
@@ -293,7 +330,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if source.is_absolute() or ".." in source.parts or not (REPO / source).is_file():
             parser.error(f"--source must be a file relative to the repository root: {source}")
     try:
-        report = build(args.source, selection, args.jobs, args.out, args.module_name)
+        report = build(args.source, selection, args.jobs, args.out, args.module_name,
+                       args.function)
     except MatrixError as exc:
         print(f"mutation kill matrix cannot judge: {exc}", file=sys.stderr)
         return 2
