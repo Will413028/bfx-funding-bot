@@ -104,7 +104,7 @@ async def test_a_full_simulated_run_conserves_every_accepted_basis(sim: SimEnv) 
     assert str(offer.offer_id) in open_ids, "the partially filled offer is still managed and open"
     assert open_ids == {str(o.offer_id) for o in venue.state.offers.values() if o.resting}
     result = await sweep.cancel(reason="test reprice")
-    assert result.failed == () and set(result.requested) == open_ids
+    assert result.failed == () and set(result.acknowledged) == open_ids
     await sim.tick(daemon)
     await sim.assert_sound(daemon)
     assert venue.state.offers[offer.offer_id].status == "CANCELED"
