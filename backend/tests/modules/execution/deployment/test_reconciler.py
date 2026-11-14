@@ -4,7 +4,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
@@ -44,6 +44,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     GuardResult,
     SubmittedOrder,
 )
+from bfx_funding_bot.modules.ledger import CapitalBlocked
 from bfx_funding_bot.modules.lending.tracking.artifact import (
     FillModelEvidence,
     FillModelUnavailable,
@@ -53,6 +54,18 @@ from bfx_funding_bot.modules.strategy import CellConfig, DecisionOutcome, Strate
 from tests.external.bitfinex.test_funding_rules import FixedRules
 
 D = Decimal
+
+
+@pytest.fixture(autouse=True)
+def no_recorded_trading_state(monkeypatch):
+    """The planner's stop check reads the trading state with SQL; these tests have no
+    database, so it answers what an account with no recorded decision answers."""
+    async def read_current(session, *, account_id):
+        return None
+
+    monkeypatch.setattr(
+        "bfx_funding_bot.modules.execution.deployment.reconciler.read_current", read_current,
+    )
 
 
 @pytest.mark.asyncio
@@ -116,6 +129,13 @@ def _simulated_capital(ledger, *, cell_exposure=None, totals=None, reserves=None
                                     "explicit-test-policy", UUID(int=1), policy)
             return CapitalAvailable(applied, snapshot, evaluate_capital(policy, snapshot), D("0"),
                                     "1", {})
+
+        async def read_policy(self, session, scope, symbol):
+            total = totals[symbol]
+            policy = CapitalPolicy(enabled=total > 0, reserve_amount=reserves.get(symbol, D("0")),
+                                   max_cell_fraction=D("0.70"))
+            return AppliedPolicy(scope.exchange_account_id, symbol, 1,
+                                 "explicit-test-policy", UUID(int=1), policy)
 
         async def fingerprints_in_use(self, session, scope, symbol):
             return frozenset()
@@ -1145,6 +1165,12 @@ class _RecordingCapital:
     async def session_factory():
         yield None
 
+    async def read_policy(self, session, scope, symbol):
+        from bfx_funding_bot.modules.trading import AppliedPolicy, CapitalPolicy
+        policy = CapitalPolicy(enabled=True, max_cell_fraction=D("0.5"),
+                               max_offer_amount=self._ceilings.get(symbol))
+        return AppliedPolicy(scope.exchange_account_id, symbol, 1, "digest", UUID(int=1), policy)
+
     async def read(self, scope, *, now_ms, session=None):
         from bfx_funding_bot.modules.ledger import CapitalAvailable
         from bfx_funding_bot.modules.trading import (
@@ -1690,33 +1716,73 @@ def test_the_neutral_reconciler_keeps_no_authority_cache() -> None:
 
 
 class _StopStateCapital:
-    def __init__(self, error: Exception) -> None:
-        self._error = error
+    def __init__(self, answer) -> None:
+        self._answer = answer
 
     async def read_policy(self, session, scope, symbol):
-        raise self._error
+        if isinstance(self._answer, Exception):
+            raise self._answer
+        return self._answer
 
 
-def _stop_state_planner(error: Exception) -> DeploymentReconciler:
+class _RecordingSweep:
+    def __init__(self) -> None:
+        self.cancelled: list = []
+
+    async def cancel(self, symbols, *, reason):
+        self.cancelled.append((list(symbols), reason))
+
+
+def _stop_state_planner(answer) -> DeploymentReconciler:
+    from bfx_funding_bot.modules.ledger import Scope
+
     @asynccontextmanager
     async def session_factory():
         yield object()
 
     planner = object.__new__(DeploymentReconciler)
-    planner._scope = object()
+    planner._scope = Scope(UUID(int=7))
     planner._session_factory = session_factory
-    planner._capital = _StopStateCapital(error)
-    planner._managed_sweep = None
+    planner._capital = _StopStateCapital(answer)
+    planner._managed_sweep = _RecordingSweep()
+    planner._conflict_alerted = set()
     return planner
 
 
+def _stop_read_records(caplog) -> list[int]:
+    return [r.levelno for r in caplog.records
+            if r.getMessage() == "deployment_stop_state_unreadable symbol=fUST"]
+
+
 @pytest.mark.asyncio
-async def test_a_programming_error_reading_the_stop_state_is_not_read_as_not_stopped() -> None:
-    """A bug in the stop-state read must fail the tick, not answer "this currency is not
-    stopped": that answer once left a halted currency's offers standing behind a warning."""
-    planner = _stop_state_planner(TypeError("read_policy() got an unexpected keyword argument"))
-    with pytest.raises(TypeError):
-        await planner._pull_if_stopped("fUST")
+@pytest.mark.parametrize("error", [
+    TypeError("read_policy() got an unexpected keyword argument"),
+    ProgrammingError("select x", {}, Exception("column x does not exist")),
+    PermissionError("secret file unreadable"),
+])
+async def test_a_bug_in_the_stop_state_read_places_nothing_and_is_an_error(error, caplog) -> None:
+    """A failed stop read is not "this currency is not stopped": that answer once left a
+    halted currency's offers standing behind a warning. The currency places nothing, and
+    nothing is cancelled on a state nobody could read."""
+    planner = _stop_state_planner(error)
+    with caplog.at_level(logging.WARNING):
+        assert await planner._pull_if_stopped("fUST") is True
+    assert planner._managed_sweep.cancelled == []
+    assert _stop_read_records(caplog) == [logging.ERROR]
+
+
+@pytest.mark.asyncio
+async def test_a_bug_in_the_trading_state_read_places_nothing(monkeypatch, caplog) -> None:
+    async def read_current(session, *, account_id, environment):
+        return None
+
+    monkeypatch.setattr(
+        "bfx_funding_bot.modules.execution.deployment.reconciler.read_current", read_current,
+    )
+    planner = _stop_state_planner(CapitalBlocked("policy_missing"))
+    with caplog.at_level(logging.WARNING):
+        assert await planner._pull_if_stopped("fUST") is True
+    assert _stop_read_records(caplog) == [logging.ERROR]
 
 
 @pytest.mark.asyncio
@@ -1725,11 +1791,47 @@ async def test_a_programming_error_reading_the_stop_state_is_not_read_as_not_sto
     PoolTimeoutError("QueuePool limit reached"),
     ConnectionResetError("connection reset by peer"),
 ])
-async def test_an_unreachable_database_reading_the_stop_state_is_left_to_the_capital_read(
+async def test_an_unreachable_database_reading_the_stop_state_places_nothing_as_a_warning(
     error, caplog,
 ) -> None:
-    """The database not answering is not "stopped": the capital read after it fails closed."""
     planner = _stop_state_planner(error)
     with caplog.at_level(logging.WARNING):
-        assert await planner._pull_if_stopped("fUST") is False
-    assert "deployment_stop_state_unreadable symbol=fUST" in caplog.text
+        assert await planner._pull_if_stopped("fUST") is True
+    assert planner._managed_sweep.cancelled == []
+    assert _stop_read_records(caplog) == [logging.WARNING]
+
+
+@pytest.mark.asyncio
+async def test_a_halted_account_pulls_its_offers_even_when_the_policy_is_refused(
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    async def read_current(session, *, account_id):
+        return SimpleNamespace(state="HALTED")
+
+    monkeypatch.setattr(
+        "bfx_funding_bot.modules.execution.deployment.reconciler.read_current", read_current,
+    )
+    planner = _stop_state_planner(CapitalBlocked("policy_rejected"))
+    assert await planner._pull_if_stopped("fUST") is True
+    assert planner._managed_sweep.cancelled == [(["fUST"], "fUST account HALTED")]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_policy_on_an_account_that_is_not_halted_is_left_to_the_capital_read(
+) -> None:
+    planner = _stop_state_planner(CapitalBlocked("policy_missing"))
+    assert await planner._pull_if_stopped("fUST") is False
+    assert planner._managed_sweep.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_stop_read_submits_nothing_for_that_currency(monkeypatch) -> None:
+    async def broken(self, session, scope, symbol):
+        raise TypeError("bug")
+
+    rec, executor, *_ = _build(exposure=D("0"), quotes=[_post_quote("fUST_a30")])
+    monkeypatch.setattr(type(rec._capital), "read_policy", broken)
+    await rec.deploy()
+    assert executor.ready_submissions == []

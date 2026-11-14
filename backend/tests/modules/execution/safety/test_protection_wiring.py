@@ -42,8 +42,22 @@ class _RefusingCapital:
     async def read(self, scope, *, now_ms, session=None):  # type: ignore[no-untyped-def]
         return CapitalBlocked(self.reason)
 
+    async def read_policy(self, session: object, scope: Scope, symbol: str) -> CapitalBlocked:
+        return CapitalBlocked(self.reason)
+
 
 SCOPE = Scope(UUID(int=7))
+
+
+@pytest.fixture(autouse=True)
+def no_recorded_trading_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No database here: the stop check's trading-state read answers "nothing recorded"."""
+    async def read_current(session: object, *, account_id: UUID) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "bfx_funding_bot.modules.execution.deployment.reconciler.read_current", read_current,
+    )
 
 
 class _NoUncertainty:

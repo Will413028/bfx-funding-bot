@@ -15,6 +15,8 @@ from math import isfinite
 from typing import Any, Protocol, cast
 from uuid import NAMESPACE_URL, uuid5
 
+from sqlalchemy.exc import DisconnectionError, InterfaceError, OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
@@ -106,6 +108,13 @@ from bfx_funding_bot.modules.strategy import (
 from bfx_funding_bot.modules.trading import CapitalScope, fingerprint_of
 
 log = logging.getLogger(__name__)
+
+# "The database did not answer" (connection, pool, timeout), as opposed to an answer about
+# this process's own statements or setup. It only picks the log level of a failed stop read.
+_DATABASE_UNREACHABLE = (
+    OperationalError, InterfaceError, DisconnectionError, PoolTimeoutError,
+    ConnectionError, TimeoutError,
+)
 
 # A book that never qualified and a book that went stale are different faults
 # with different operator responses; the event must say which.
@@ -248,7 +257,7 @@ class DeploymentReconciler:
         }
 
     async def _pull_if_stopped(self, symbol: str) -> bool:
-        """Whether ``symbol`` must place nothing; if so, cancel its managed offers.
+        """Whether ``symbol`` must place nothing; if stopped, cancel its managed offers.
 
         The one place where the offers this bot placed are pulled when trading
         stops (D3 level 3, D4): the account is HALTED (an automatic protection
@@ -256,23 +265,27 @@ class DeploymentReconciler:
         or the currency's applied policy is disabled. Level-triggered: every
         tick re-reads the state and cancels what is still open, so a cancel
         refused or failed on one tick is retried on the next. Foreign offers
-        and taken loans are never touched. An unreadable state or policy is not
-        "stopped": the capital read below fails closed on it instead.
+        and taken loans are never touched. HALTED pulls whatever the policy
+        read says; a refused policy on an account that is not halted is not
+        "stopped" (the capital read below fails closed on it instead).
+
+        A read that fails answers neither "stopped" nor "not stopped": this
+        symbol places nothing and cancels nothing this tick, and the other
+        currencies go on. Answering "not stopped" for a bug in this read once
+        left a halted currency's offers standing behind a warning.
         """
+        scope = self._scope
         try:
-            scope = self._scope
             async with self._session_factory() as session:
-                applied = await self._capital.read_policy(session, scope, symbol)
-                if isinstance(applied, CapitalBlocked):
-                    return False
                 state = await read_current(session, account_id=scope.exchange_account_id)
-        except Exception:
-            # Not "stopped" (see above), but never silent: a programming error here once
-            # left a halted currency's offers standing without a trace.
-            log.warning("deployment_stop_state_unreadable symbol=%s", symbol, exc_info=True)
-            return False
+                applied = await self._capital.read_policy(session, scope, symbol)
+        except Exception as exc:
+            # The database not answering is expected now and then; anything else is a bug.
+            level = logging.WARNING if isinstance(exc, _DATABASE_UNREACHABLE) else logging.ERROR
+            log.log(level, "deployment_stop_state_unreadable symbol=%s", symbol, exc_info=True)
+            return True
         halted = state is not None and state.state == HALTED
-        if applied.policy.enabled and not halted:
+        if not halted and (isinstance(applied, CapitalBlocked) or applied.policy.enabled):
             return False
         if self._managed_sweep is not None:
             why = "account HALTED" if halted else "disabled by policy"
