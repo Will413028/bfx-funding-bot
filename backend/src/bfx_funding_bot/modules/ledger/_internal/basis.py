@@ -323,16 +323,16 @@ async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID)
         values.offered += remaining
         cells[(offer.symbol, cell)] = cells.get((offer.symbol, cell), ZERO) + remaining
 
-    # Ended offers: this observation's terminal history, the previous basis's offers
-    # now gone, and every trade. Each must have one provenance story.
+    # Ended offers: this observation's terminal history (filled or not: ``_reflected``
+    # takes either as an attempt's end), the previous basis's offers now gone, and
+    # every trade. Each must have one provenance story.
     terminal: dict[str, LedgerObservationOfferHistoryRow] = {}
     for row in history:
         if row.venue_offer_id not in terminal or (
             row.occurred_at_ms > terminal[row.venue_offer_id].occurred_at_ms
         ):
             terminal[row.venue_offer_id] = row
-        if (row.amount_original or ZERO) - row.amount_remaining > ZERO:
-            c.require_one_story(row.venue_offer_id, row.symbol)
+        c.require_one_story(row.venue_offer_id, row.symbol)
     for gone_row in gone:
         c.require_one_story(gone_row.venue_offer_id, gone_row.symbol)
     for trade in trade_rows:
