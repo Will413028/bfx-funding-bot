@@ -129,6 +129,15 @@ def _has_realm_column(conn) -> bool:
     )))
 
 
+def _has_attribution_columns(conn) -> bool:
+    """Whether this database is older than dc9d9290c2c0, so a basis still records attribution."""
+    return bool(conn.scalar(text(
+        "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' "
+        "AND table_name = 'accepted_capital_basis_symbol' "
+        "AND column_name = 'unattributed_credits')"
+    )))
+
+
 def _other_account(conn) -> str:
     """A second exchange account, for the rows a scope guard must refuse."""
     other = str(uuid4())
@@ -264,6 +273,12 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
     realm = _has_realm_column(conn)
     realm_column = "\n      deployment_environment," if realm else ""
     realm_value = "\n      'ci'," if realm else ""
+    # The attribution columns left with dc9d9290c2c0; a database stopped before it requires them.
+    attributed = _has_attribution_columns(conn)
+    unattributed_column = "\n      unattributed_credits," if attributed else ""
+    unattributed_value = "\n      0," if attributed else ""
+    attribution_column = ", attribution_basis" if attributed else ""
+    attribution_value = ", 'trade'" if attributed else ""
     statements = (
         f"INSERT INTO exchange_accounts(id,venue,label) VALUES ('{_A}','bitfinex','ledger')",
         f"""INSERT INTO capital_policy_revisions(id,
@@ -403,15 +418,13 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       symbol,
       available,
       offered,
-      credits,
-      unattributed_credits,
+      credits,{unattributed_column}
       foreign_offers{verdict_column})
       VALUES ('{_B}',
       'fUST',
       10,
       0,
-      0,
-      0,
+      0,{unattributed_value}
       0{verdict_value})""",
         f"""INSERT INTO accepted_capital_basis_cell(basis_id,
       symbol,
@@ -422,8 +435,8 @@ def _seed(conn, *, old_member: bool = False, pre_verdict: bool = False) -> None:
       'cell',
       10)""",
         f"""INSERT INTO accepted_capital_basis_credit
-      (basis_id, source_kind, venue_credit_id, symbol, amount, attribution_basis)
-      VALUES ('{_B}', 'credit', 'credit-1', 'fUST', 1, 'trade')""",
+      (basis_id, source_kind, venue_credit_id, symbol, amount{attribution_column})
+      VALUES ('{_B}', 'credit', 'credit-1', 'fUST', 1{attribution_value})""",
         f"""INSERT INTO accepted_capital_basis_credit_cell
       (basis_id, source_kind, venue_credit_id, cell_id)
       VALUES ('{_B}', 'credit', 'credit-1', 'cell')""",
@@ -1001,9 +1014,9 @@ def test_basis_credit_constraints_and_foreign_key(seeded) -> None:
     for statement, message in (
         (
             f"INSERT INTO accepted_capital_basis_credit "
-            f"(basis_id, source_kind, venue_credit_id, symbol, amount, attribution_basis) "
-            f"VALUES ('{_B}', 'loan', 'bad-attribution', 'fUST', 1, 'unknown')",
-            "ck_accepted_basis_credit_attribution",
+            f"(basis_id, source_kind, venue_credit_id, symbol, amount) "
+            f"VALUES ('{_B}', 'swap', 'bad-kind', 'fUST', 1)",
+            "ck_accepted_basis_credit_kind",
         ),
         (
             f"INSERT INTO accepted_capital_basis_credit_cell "
@@ -1199,8 +1212,8 @@ def test_roles_are_read_only_or_exact_writer(seeded) -> None:
         conn.exec_driver_sql("UPDATE venue_credit_mirror SET amount=2")
         conn.exec_driver_sql(
             f"INSERT INTO accepted_capital_basis_credit "
-            f"(basis_id, source_kind, venue_credit_id, symbol, amount, attribution_basis) "
-            f"VALUES ('{_B}', 'loan', 'loan-role', 'fUST', 1, 'carry')"
+            f"(basis_id, source_kind, venue_credit_id, symbol, amount) "
+            f"VALUES ('{_B}', 'loan', 'loan-role', 'fUST', 1)"
         )
         conn.exec_driver_sql(
             f"INSERT INTO accepted_capital_basis_credit_cell "

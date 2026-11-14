@@ -19,6 +19,7 @@ from tests.pg_templates import alembic, upgrade_head_after_w3
 
 from .test_ledger_schema_roles import (  # noqa: F401 - fixtures
     _B,
+    _has_attribution_columns,
     _seed,
     append_epoch,
     ledger_db,
@@ -42,11 +43,13 @@ def _columns(conn) -> set[str]:
 def _insert(
     conn, conservation: str, unexplained: str, foreign: str, conflicts: int = 0, symbol: str = "fX"
 ) -> None:
+    # ``unattributed_credits`` left with dc9d9290c2c0; the downgrade tests insert before it.
+    column, value = ("unattributed_credits, ", "0, ") if _has_attribution_columns(conn) else ("", "")
     conn.execute(
         text(
             f"INSERT INTO {_TABLE}(basis_id, symbol, available, offered, credits, "
-            "unattributed_credits, foreign_offers, conservation, lent_unexplained, "
-            "foreign_executed, fill_conflicts) VALUES (:b, :s, 0, 0, 0, 0, 0, :c, :u, :f, :n)"
+            f"{column}foreign_offers, conservation, lent_unexplained, "
+            f"foreign_executed, fill_conflicts) VALUES (:b, :s, 0, 0, 0, {value}0, :c, :u, :f, :n)"
         ),
         {"b": _B, "s": symbol, "c": conservation, "u": unexplained, "f": foreign, "n": conflicts},
     )
