@@ -98,3 +98,42 @@ def test_function_names_select_the_mutants_of_functions_and_methods() -> None:
     assert not matrix.in_functions(other, ["Reconciler._pull_if_stopped"])
     assert not matrix.in_functions(method, ["Reconciler", "pull_if_stopped"])
     assert not matrix.in_functions(method, [])
+
+
+def test_every_named_function_must_select_a_mutant() -> None:
+    names = ["m.x_allocate__mutmut_1", "m.xǁReconcilerǁ_pull__mutmut_1", "m.xǁReconcilerǁ_pull__mutmut_2"]
+    assert matrix.select_mutants(names, []) == names
+    assert matrix.select_mutants(names, ["_pull"]) == names[1:]
+    assert matrix.select_mutants(names, ["allocate", "Reconciler._pull"]) == names
+    with pytest.raises(matrix.MatrixError, match=r"no mutant for _pul, Sweeper\._pull"):
+        matrix.select_mutants(names, ["_pull", "_pul", "Sweeper._pull"])
+
+
+def test_mutant_runs_share_the_copys_bytecode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake(copy: Path, args: list[str], **kwargs: object) -> None:
+        seen.update(kwargs, args=args)
+
+    monkeypatch.setattr(matrix.sandbox, "pytest", fake)
+    matrix._pytest(tmp_path, ["tests/x.py"], tmp_path / "r.xml", {"MUTANT_UNDER_TEST": "m"}, 60.0)
+    assert seen["bytecode"] is True
+    assert seen["env"] == {"MUTANT_UNDER_TEST": "m"}
+
+
+def test_the_command_line_passes_the_named_functions_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[object, ...]] = []
+
+    def fake(*args: object) -> dict[str, object]:
+        seen.append(args)
+        return {"killed": 0, "mutants": 0, "survived": [], "not_reached": [], "timed_out": [],
+                "crashed": [], "not_in_cover": [], "tests": {}}
+
+    monkeypatch.setattr(matrix, "build", fake)
+    out = tmp_path / "report.json"
+    source = "backend/scripts/mutation_kill_matrix.py"
+    assert matrix.main(["--source", source, "--out", str(out), "--function", "a", "--function", "B.c",
+                        "--", "tests/x.py"]) == 0
+    assert seen[0][-1] == ["a", "B.c"]
+    assert matrix.main(["--source", source, "--out", str(out), "--", "tests/x.py"]) == 0
+    assert seen[1][-1] == []

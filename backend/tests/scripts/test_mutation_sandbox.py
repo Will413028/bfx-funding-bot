@@ -80,6 +80,8 @@ def test_pytest_keeps_bytecode_only_when_asked(tmp_path: Path) -> None:
     (copy / "backend" / "test_cached.py").write_text(
         "import os\n\nimport helper\n\n\ndef test_cached():\n"
         "    assert helper.VALUE == 1\n    assert not os.environ['PYTHONDONTWRITEBYTECODE']\n")
-    result = sandbox.pytest(copy, ["-q", "test_cached.py"], timeout=120, bytecode=True)
+    # The caller's environment may send bytecode elsewhere; the cache belongs in the copy.
+    result = sandbox.pytest(copy, ["-q", "test_cached.py"], timeout=120, bytecode=True,
+                            env={"PYTHONPYCACHEPREFIX": ""})
     assert result is not None and result.returncode == 0, result and result.stdout
     assert [path.name.split(".")[0] for path in copy.rglob("helper*.pyc")] == ["helper"]

@@ -45,7 +45,8 @@ runs it on demand and uploads the report):
 ``--function NAME`` (repeatable) judges only the mutants of that function or method, which is
 how to ask about the code one change touched: the whole of ``deployment/reconciler.py`` is
 about 1,300 mutants, one method of it about 50. A report made this way speaks for those
-functions only; its ``not_in_cover`` is not a list of tests to remove.
+functions only (the report lists them under ``functions``, empty for a whole-file run); its
+``not_in_cover`` is not a list of tests to remove. A name that selects no mutant is an error.
 
 Exit codes: 0 = report written; 2 = cannot judge (baseline failing, erroring or crashing,
 canary not caught, or a source changed).
@@ -249,6 +250,19 @@ def in_functions(mutant: str, functions: Sequence[str]) -> bool:
     return owner.removeprefix("x_") in functions
 
 
+def select_mutants(names: Sequence[str], functions: Sequence[str]) -> list[str]:
+    """The mutants of ``functions``, or all of ``names`` when no function is named. Every name
+    must select at least one mutant: a misspelt name beside a good one would otherwise be
+    dropped without a word, and the report would cover less than was asked."""
+    if not functions:
+        return list(names)
+    unmatched = [f for f in functions if not any(in_functions(name, [f]) for name in names)]
+    if unmatched:
+        raise MatrixError(f"mutmut wrote no mutant for {', '.join(unmatched)}: name functions or "
+                          "methods of the sources as the source spells them")
+    return [name for name in names if in_functions(name, functions)]
+
+
 def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Path,
           module_name: str | None = None, functions: Sequence[str] = ()) -> dict[str, Any]:
     before = sandbox.digest(sources)
@@ -256,12 +270,7 @@ def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Pat
         workdir = Path(tmp)
         copy = workdir / "repo"
         sandbox.copy_repository(copy)
-        names = _mutate(copy, sources, module_name)
-        if functions:
-            names = [name for name in names if in_functions(name, functions)]
-            if not names:
-                raise MatrixError(f"mutmut wrote no mutant for {', '.join(functions)}: "
-                                  "name functions or methods of the sources as the source spells them")
+        names = select_mutants(_mutate(copy, sources, module_name), functions)
         started = time.monotonic()
         stats = _baseline(copy, selection, workdir)
         timeout = max(60.0, 10 * (time.monotonic() - started))
@@ -288,11 +297,13 @@ def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Pat
                     print(f"[{len(results)}/{len(names)}] {name}: {status}", flush=True)
                     report = _report(results, len(names))
                     report["sources"], report["selection"] = [str(s) for s in sources], list(selection)
+                    report["functions"] = sorted(functions)
                     out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     if sandbox.digest(sources) != before:
         raise MatrixError("a source changed while the matrix ran")
     report = _report(results, len(names))
     report["sources"], report["selection"] = [str(s) for s in sources], list(selection)
+    report["functions"] = sorted(functions)       # empty: every mutant of the sources was judged
     out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     return report
 
