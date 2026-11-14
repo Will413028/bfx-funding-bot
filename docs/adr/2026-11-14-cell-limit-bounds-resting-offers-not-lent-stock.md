@@ -1,13 +1,13 @@
 ---
 title: cell 上限只管掛單中的金額，不再把已借出的 credit 歸屬到 cell
 date: 2026-11-14
-status: proposed
+status: active
 tags: [bfx-funding-bot, decision, ledger, capital]
 ---
 
 # cell 上限只管掛單中的金額，不再把已借出的 credit 歸屬到 cell
 
-> 狀態：草稿，等 owner 核可。核可前不改程式；「Result」列的是預計改動的盤點，不是已完成的事。
+> owner 於 2026-11-14 核可。「Result」列的是核可當下的改動盤點，實作另依計畫進行，完成後把這段換成實際結果。
 
 ## Context
 
@@ -60,11 +60,11 @@ applied policy 的「既有 max_cell_fraction 0.70」，
 - **B 每個 cell 一個子帳戶**：歸屬由 venue 保證。每個子帳戶都要過最低掛單額，各自一把 key 與一個 worker
   （[2026-08-31-account-isolated-execution-target-architecture](2026-08-31-account-isolated-execution-target-architecture.md)）；
   以現在的資金規模與兩個同質 cell 不划算。
-- **C（提議）cell 上限只管掛單中的金額**：`E_cell` = 該 cell 掛著的 offers ＋ 尚未反映的 commitments，兩者都由 bot
+- **C（採用）cell 上限只管掛單中的金額**：`E_cell` = 該 cell 掛著的 offers ＋ 尚未反映的 commitments，兩者都由 bot
   自己的 provenance 精確決定。已借出的 credit 只計入幣別的總量，不再歸屬到 cell。
 - **D 維持現狀**：缺陷照舊（重複計、閒置）。
 
-## Decision（提議）
+## Decision
 
 1. **`E_cell` 的定義**改為「該 cell 掛著的受管 offers 的剩餘金額＋尚未被 basis 反映的 commitments」。`cell_limit`
    的公式不變；它的意思變成「一個 cell 同一時間最多能掛多少」，也就是 2026-05-29 D2 的分配規則。
@@ -87,7 +87,7 @@ applied policy 的「既有 max_cell_fraction 0.70」，
 - 授權裡不再有推論出來的數字，「低估」與「重複計」都不會發生；`trades_range_uncovered` 造成的暫停也消失。
 - 掛單中的金額是 bot 自己的 offer，provenance 精確，不需要 venue 沒給的資料。
 
-## Result（預計改動的盤點，`origin/dev` `1b3b33b5`）
+## Result（核可當下的改動盤點，`origin/dev` `1b3b33b5`；尚未實作）
 
 `git grep -lE 'cell_exposure|max_cell_fraction|cell_limit|cell_headroom|accepted_capital_basis_(credit_)?cell|AcceptedCapitalBasis(Credit)?Cell'`
 在 `backend/src`、`backend/scripts`、`deploy`、`frontend/src` 命中 13 個檔：
