@@ -4,6 +4,8 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.core.telemetry import EventType, Phase
@@ -1685,3 +1687,49 @@ def test_the_neutral_reconciler_keeps_no_authority_cache() -> None:
     source = inspect.getsource(reconciler)
     assert "uncertain_exposure" not in source and "clear_uncertainty" not in source
     assert "getattr(self._ledger" not in source
+
+
+class _StopStateCapital:
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def read_policy(self, session, scope, symbol):
+        raise self._error
+
+
+def _stop_state_planner(error: Exception) -> DeploymentReconciler:
+    @asynccontextmanager
+    async def session_factory():
+        yield object()
+
+    planner = object.__new__(DeploymentReconciler)
+    planner._scope = object()
+    planner._session_factory = session_factory
+    planner._capital = _StopStateCapital(error)
+    planner._managed_sweep = None
+    return planner
+
+
+@pytest.mark.asyncio
+async def test_a_programming_error_reading_the_stop_state_is_not_read_as_not_stopped() -> None:
+    """A bug in the stop-state read must fail the tick, not answer "this currency is not
+    stopped": that answer once left a halted currency's offers standing behind a warning."""
+    planner = _stop_state_planner(TypeError("read_policy() got an unexpected keyword argument"))
+    with pytest.raises(TypeError):
+        await planner._pull_if_stopped("fUST")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [
+    OperationalError("select 1", {}, ConnectionRefusedError("db down")),
+    PoolTimeoutError("QueuePool limit reached"),
+    ConnectionResetError("connection reset by peer"),
+])
+async def test_an_unreachable_database_reading_the_stop_state_is_left_to_the_capital_read(
+    error, caplog,
+) -> None:
+    """The database not answering is not "stopped": the capital read after it fails closed."""
+    planner = _stop_state_planner(error)
+    with caplog.at_level(logging.WARNING):
+        assert await planner._pull_if_stopped("fUST") is False
+    assert "deployment_stop_state_unreadable symbol=fUST" in caplog.text
