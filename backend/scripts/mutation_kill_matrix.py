@@ -250,27 +250,50 @@ def in_functions(mutant: str, functions: Sequence[str]) -> bool:
     return owner.removeprefix("x_") in functions
 
 
-def select_mutants(names: Sequence[str], functions: Sequence[str]) -> list[str]:
+def select_mutants(names: Sequence[str], functions: Sequence[str], strict: bool = True) -> list[str]:
     """The mutants of ``functions``, or all of ``names`` when no function is named. Every name
     must select at least one mutant: a misspelt name beside a good one would otherwise be
-    dropped without a word, and the report would cover less than was asked."""
+    dropped without a word, and the report would cover less than was asked. ``strict=False``
+    is for names a program derived from a diff, where a function mutmut has nothing to mutate
+    in (a body that is one ``return name``) is expected: those are left out, and only a
+    selection with no mutant at all is an error."""
     if not functions:
         return list(names)
     unmatched = [f for f in functions if not any(in_functions(name, [f]) for name in names)]
-    if unmatched:
+    if unmatched and (strict or len(unmatched) == len(functions)):
         raise MatrixError(f"mutmut wrote no mutant for {', '.join(unmatched)}: name functions or "
                           "methods of the sources as the source spells them")
     return [name for name in names if in_functions(name, functions)]
 
 
+def survivor_diffs(copy: Path, sources: Sequence[Path], module_name: str | None,
+                   survived: Sequence[str]) -> dict[str, str]:
+    """mutmut's diff of each surviving mutant against the function it mutates; an empty string
+    for one it cannot show. Read from the mutated copy, so call it while the copy exists."""
+    from mutmut.mutation.diff_apply import get_diff_for_mutant
+
+    texts = {module_of(source, module_name): (source, (copy / source).read_text()) for source in sources}
+    diffs: dict[str, str] = {}
+    for mutant in survived:
+        source, text = next(((s, t) for module, (s, t) in texts.items() if mutant.startswith(module + ".")),
+                            (None, ""))
+        try:
+            diffs[mutant] = get_diff_for_mutant(mutant, source=text, path=source) if source else ""
+        except (KeyError, ValueError, IndexError, AttributeError, TypeError, OSError):
+            diffs[mutant] = ""          # a diff is a convenience; the verdict does not depend on it
+    return diffs
+
+
 def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Path,
-          module_name: str | None = None, functions: Sequence[str] = ()) -> dict[str, Any]:
+          module_name: str | None = None, functions: Sequence[str] = (), *,
+          strict_functions: bool = True, show_survivors: bool = False) -> dict[str, Any]:
     before = sandbox.digest(sources)
     with tempfile.TemporaryDirectory(prefix="mutation-kill-matrix-") as tmp:
         workdir = Path(tmp)
         copy = workdir / "repo"
         sandbox.copy_repository(copy)
-        names = select_mutants(_mutate(copy, sources, module_name), functions)
+        names = select_mutants(_mutate(copy, sources, module_name), functions, strict_functions)
+        judged_functions = sorted(f for f in functions if any(in_functions(name, [f]) for name in names))
         started = time.monotonic()
         stats = _baseline(copy, selection, workdir)
         timeout = max(60.0, 10 * (time.monotonic() - started))
@@ -297,13 +320,17 @@ def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Pat
                     print(f"[{len(results)}/{len(names)}] {name}: {status}", flush=True)
                     report = _report(results, len(names))
                     report["sources"], report["selection"] = [str(s) for s in sources], list(selection)
-                    report["functions"] = sorted(functions)
+                    report["functions"] = judged_functions
                     out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        diffs = (survivor_diffs(copy, sources, module_name, _report(results, len(names))["survived"])
+                 if show_survivors else None)
     if sandbox.digest(sources) != before:
         raise MatrixError("a source changed while the matrix ran")
     report = _report(results, len(names))
     report["sources"], report["selection"] = [str(s) for s in sources], list(selection)
-    report["functions"] = sorted(functions)       # empty: every mutant of the sources was judged
+    report["functions"] = judged_functions        # empty: every mutant of the sources was judged
+    if diffs is not None:
+        report["survivor_diffs"] = diffs
     out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     return report
 

@@ -107,6 +107,10 @@ def test_every_named_function_must_select_a_mutant() -> None:
     assert matrix.select_mutants(names, ["allocate", "Reconciler._pull"]) == names
     with pytest.raises(matrix.MatrixError, match=r"no mutant for _pul, Sweeper\._pull"):
         matrix.select_mutants(names, ["_pull", "_pul", "Sweeper._pull"])
+    # Names derived from a diff: one with nothing to mutate is left out, none at all is an error.
+    assert matrix.select_mutants(names, ["_pull", "trivial"], strict=False) == names[1:]
+    with pytest.raises(matrix.MatrixError, match="no mutant for trivial, other"):
+        matrix.select_mutants(names, ["trivial", "other"], strict=False)
 
 
 def test_mutant_runs_share_the_copys_bytecode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
