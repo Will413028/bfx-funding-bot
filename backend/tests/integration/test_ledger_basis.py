@@ -513,14 +513,15 @@ async def test_an_offer_that_fills_between_snapshots_is_accounted_for(ledger) ->
     assert basis.cells == {}
 
 
-@pytest.mark.parametrize("seen_as", ["history", "gone", "trade"])
+@pytest.mark.parametrize("seen_as", ["history", "canceled", "gone", "trade"])
 @pytest.mark.asyncio
 async def test_an_ended_offer_with_contradictory_provenance_blocks_its_symbol(
     ledger, seen_as: str
 ) -> None:
     """Two attempts naming one venue offer is a ledger contradiction wherever the offer's
-    end shows up: its terminal history row, its absence after a basis that held it, or a
-    trade (the only place an offer that lent and was repaid in between is seen)."""
+    end shows up: its terminal history row (executed, or canceled with nothing filled),
+    its absence after a basis that held it, or a trade (the only place an offer that lent
+    and was repaid in between is seen)."""
     await ledger.accept(_observation(usd=True))
     await ledger.attempt(amount="200", venue_offer_id="X")
     bound = await ledger.attempt(amount="200", outcome="unknown")
@@ -528,9 +529,10 @@ async def test_an_ended_offer_with_contradictory_provenance_blocks_its_symbol(
     ended = _observation(
         "800",
         usd=True,
-        history=(OfferHistory(_offer("X", "200", "0"), "executed", 1150),)
-        if seen_as == "history"
-        else (),
+        history={
+            "history": (OfferHistory(_offer("X", "200", "0"), "executed", 1150),),
+            "canceled": (OfferHistory(_offer("X", "200"), "canceled", 1150),),
+        }.get(seen_as, ()),
         trades=(_trade("X", "200"),) if seen_as == "trade" else (),
     )
     if seen_as == "gone":
