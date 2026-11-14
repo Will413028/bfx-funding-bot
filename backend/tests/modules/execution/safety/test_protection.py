@@ -287,7 +287,7 @@ async def test_a_lost_writer_lock_ends_the_process_instead_of_halting(sent) -> N
     "attempt_intent_scope_conflict", "attempt_outcome_evidence_conflict",
     "attempt_outcome_evidence_identity", "attempt_outcome_evidence_scope",
     "duplicate_attempt_intent", "execution_unknown_resolution_conflict",
-    "snapshot_conflicting_identity",
+    "snapshot_conflicting_identity", "snapshot_evidence_conflict", "inconsistent_policy_pointer",
 ])
 def test_identity_conflicts_are_protections(reason: str) -> None:
     from bfx_funding_bot.modules.execution.safety.protection import CAPITAL_BLOCK_TRIGGERS
@@ -326,6 +326,8 @@ def test_capital_block_trigger_keeps_every_legacy_reason_and_maps_the_ledger_one
     }
     ledger = {"attempt_evidence_conflict": "identity_conflict",
               "uncertainty_scope_conflict": "identity_conflict",
+              "snapshot_evidence_conflict": "identity_conflict",
+              "inconsistent_policy_pointer": "identity_conflict",
               "venue_lent_above_ledger": "venue_lent_above_ledger"}
     assert legacy | ledger == CAPITAL_BLOCK_TRIGGERS
     for reason, trigger in (legacy | ledger).items():
