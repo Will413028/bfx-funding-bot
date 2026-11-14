@@ -36,7 +36,7 @@ from bfx_funding_bot.modules.observability.alerts import (
 
 SCOPE = Scope(UUID("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"))
 QUERY_START = 1_000_000
-EMPTY_WINDOW = ObservationWindow(None, None, None)
+EMPTY_WINDOW = ObservationWindow(None, None)
 ACTIVE_PATHS = ["wallets", "funding/offers", "funding/credits", "funding/loans"]
 CTX = AccountContext(str(SCOPE.exchange_account_id), Credentials("TEST_KEY", "TEST_SECRET"),
                      Decimal("1000"))
@@ -148,7 +148,7 @@ class Venue:
         self.history: dict[str, Any] = {
             "offers": [offer_row("EXECUTED (was: PARTIALLY FILLED)")],
             "credits": [credit_row("CLOSED (used)")], "loans": [],
-            "trades": [[30, "fUST", 800_000, 10, "-6.00000000000000004",
+            "trades": [[30, "fUST", 960_000, 10, "-6.00000000000000004",
                         "0.00030000000000000004", 2, 1]],
         }
         self.override: Callable[[str, dict[str, Any]], httpx.Response | None] | None = None
@@ -214,39 +214,22 @@ async def test_no_anchor_uses_query_start_minus_margin(has_credits: bool) -> Non
         venue.active["funding/credits"] = []
     first, _, _ = await observe(venue)
     assert first.coverage.history_requested_start_ms == 940_000
-    assert [body["start"] for path, body in venue.requests
-            if path.endswith("/hist") and "trades" not in path] == [940_000] * 3
+    assert first.coverage.trades_requested_start_ms == 940_000
+    assert [body["start"] for path, body in venue.requests if path.endswith("/hist")] == [940_000] * 4
 
 
-async def test_window_shared_range_and_trades_cover_oldest_credit_or_loan_opening() -> None:
-    """No accepted query yet: every current opening needs trades evidence."""
+async def test_trades_share_the_history_range_whatever_the_credit_openings() -> None:
+    """No credit is attributed to a cell, so no opening pulls the trades request back:
+    a loan opened long before the window leaves all four streams on one range."""
     venue = Venue()
     venue.active["funding/loans"] = [credit_row(symbol="fUST", opening=700_000, row_id=21)]
-    first, _, _ = await observe(venue, window=ObservationWindow(980_000, None, 920_000))
+    first, _, _ = await observe(venue, window=ObservationWindow(980_000, 920_000))
     assert first.coverage.history_requested_start_ms == 920_000
-    assert first.coverage.trades_requested_start_ms == 640_000
+    assert first.coverage.trades_requested_start_ms == 920_000
     assert first.coverage.trades_requested_end_ms == first.coverage.history_requested_end_ms
     for path, body in venue.requests:
         if path.endswith("/hist"):
-            assert body == {"start": 640_000 if "trades" in path else 920_000,
-                            "end": QUERY_START + 400, "limit": 500, "sort": -1}
-
-
-async def test_old_credits_do_not_widen_trades_after_an_accepted_query() -> None:
-    """Openings before the previous accepted query were in that basis and are
-    carried; trades need not reach back to them on every observation."""
-    venue = Venue()
-    venue.active["funding/loans"] = [credit_row(symbol="fUST", opening=700_000, row_id=21)]
-    first, _, _ = await observe(venue, window=ObservationWindow(980_000, 970_000, 910_000))
-    assert first.coverage.trades_requested_start_ms == 910_000
-    assert first.coverage.history_requested_start_ms == 910_000
-
-
-async def test_trade_range_includes_history_when_all_openings_are_newer() -> None:
-    venue = Venue()
-    venue.active["funding/credits"] = [credit_row(opening=990_000)]
-    first, _, _ = await observe(venue, window=ObservationWindow(800_000, None, 740_000))
-    assert first.coverage.trades_requested_start_ms == 740_000
+            assert body == {"start": 920_000, "end": QUERY_START + 400, "limit": 500, "sort": -1}
 
 
 async def test_symbol_union_wallets_active_credits_and_loans() -> None:
@@ -268,7 +251,7 @@ async def test_symbol_union_wallets_active_credits_and_loans() -> None:
 async def test_anchor_attempt_symbols_are_fetched_and_declared() -> None:
     """G1: an UNKNOWN on a symbol no wallet or credit names still gets its history fetched."""
     venue = Venue()
-    window = ObservationWindow(900_000, None, 840_000, frozenset({"fEUR"}))
+    window = ObservationWindow(900_000, 840_000, frozenset({"fEUR"}))
     first, _, _ = await observe(venue, window=window)
     fetched = {path.split("/")[1:3][1] for path in venue.paths if path.endswith("/hist")}
     assert fetched == {"fEUR", "fUST"}
@@ -426,7 +409,7 @@ def _live(*ids: int, symbol: str = "fUST") -> tuple[LiveOffer, ...]:
 
 
 def _vanish_window(*ids: int, symbol: str = "fUST") -> ObservationWindow:
-    return ObservationWindow(None, 970_000, 910_000, frozenset(), _live(*ids, symbol=symbol))
+    return ObservationWindow(None, 910_000, frozenset(), _live(*ids, symbol=symbol))
 
 
 def _by_id_requests(venue: Venue) -> list[dict[str, Any]]:
@@ -505,7 +488,7 @@ async def test_vanished_ids_are_batched_per_symbol_and_counted() -> None:
     venue.active["funding/offers"] = []
     ids = list(range(1000, 1030))
     venue.history["offers"] = [_ended(i, updated=500) for i in ids]
-    window = ObservationWindow(None, 970_000, 910_000, frozenset(),
+    window = ObservationWindow(None, 910_000, frozenset(),
                                (*_live(*ids), LiveOffer("9", "fUSD")))
     first, _, _ = await observe(venue, window=window)
     assert sorted(len(body["id"]) for body in _by_id_requests(venue)) == [1, 5, 25]

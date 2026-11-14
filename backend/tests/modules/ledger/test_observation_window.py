@@ -23,7 +23,7 @@ from bfx_funding_bot.modules.ledger.tables import SubmissionAttemptJournalRow
 )
 def test_window_anchor_minimum_and_margin(attempt, previous, start) -> None:
     assert reads._window_from_anchors(attempt, previous) == ObservationWindow(
-        attempt, previous, start
+        attempt, start
     )
 
 
@@ -43,7 +43,7 @@ async def test_no_basis_still_reads_the_earliest_attempt(monkeypatch) -> None:
     )
     monkeypatch.setattr(reads, "tail_attempts", tail)
     assert await reads.observation_window(session, scope) == ObservationWindow(
-        100_000, None, 40_000, frozenset({"fUST", "fUSD"})
+        100_000, 40_000, frozenset({"fUST", "fUSD"})
     )
     tail.assert_awaited_once_with(
         session, scope.exchange_account_id, 0, limit=reads.MAX_TAIL_ATTEMPTS + 1
@@ -85,7 +85,7 @@ async def test_window_includes_only_unresolved_r6_source_attempts(monkeypatch) -
     monkeypatch.setattr(reads, "live_offer_candidates", AsyncMock(return_value=()))
     monkeypatch.setattr(reads, "attempts_by_id", sources)
     assert await reads.observation_window(session, scope) == ObservationWindow(
-        100_000, 300_000, 40_000, frozenset({"fUST"}),
+        100_000, 40_000, frozenset({"fUST"}),
     )
     unresolved.assert_awaited_once_with(session, scope, basis)
     sources.assert_awaited_once_with(session, [source])

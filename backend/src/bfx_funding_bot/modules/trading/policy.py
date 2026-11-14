@@ -109,7 +109,12 @@ class CapitalPolicy:
 
 @dataclass(frozen=True, slots=True)
 class CapitalSnapshot:
-    """Same-scope funding capital, with local commitments not added to total."""
+    """Same-scope funding capital, with local commitments not added to total.
+
+    ``cell_exposure`` is what the cell has out as offers: its resting managed offers
+    (remaining amount) plus its commitments the basis does not reflect yet. Lent
+    credits are in ``total_capital`` only.
+    """
 
     available_amount: Decimal
     unreflected_commitments: Decimal

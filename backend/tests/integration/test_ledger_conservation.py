@@ -589,8 +589,13 @@ async def test_unexplained_lending_leads_a_fact_level_block(book) -> None:  # no
     """A transient fact block must not hide a protection-grade verdict; it stays in the evidence."""
     await book.policy("fUST")
     await accept(book, _observation("1000"), at=10)
-    # A loan with no trades evidence covering it blocks the symbol at the fact level too.
-    await accept(book, _observation("900", credits=(loan("c1", "100", 900_000),)), at=1000)
+    # An active offer the venue reports with more remaining than its original amount blocks
+    # the symbol at the fact level too.
+    await accept(
+        book,
+        _observation("900", offers=(_offer("bad", "10", "20"),), credits=(loan("c1", "100"),)),
+        at=1000,
+    )
     blocked = (await book.read(now=1100)).result
     assert isinstance(blocked, Blocked) and blocked.reason == "venue_lent_above_ledger"
-    assert ("also", "trades_range_uncovered") in blocked.evidence
+    assert ("also", "invalid_active_offer") in blocked.evidence

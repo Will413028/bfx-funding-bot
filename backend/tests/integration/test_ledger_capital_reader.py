@@ -42,7 +42,6 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from bfx_funding_bot.modules.ledger import (
     Attempt,
     CapitalReadRefused,
-    Credit,
     LedgerCapitalRead,
     Observation,
     OfferHistory,
@@ -428,7 +427,7 @@ async def test_reflected_commitment_is_not_charged_twice(book) -> None:
 
 
 @pytest.mark.asyncio
-async def test_u_counts_once_in_total_and_in_no_cell(book) -> None:
+async def test_lent_credit_counts_once_in_total_and_in_no_cell(book) -> None:
     """Legacy 214-232."""
     await book.policy("fUST", reserve="0", fraction="0.70")
     await book.accept(_observation("700", credits=(_credit("c1", "300", opening=101_100),)))
@@ -441,12 +440,18 @@ async def test_u_counts_once_in_total_and_in_no_cell(book) -> None:
 
 
 @pytest.mark.asyncio
-async def test_trade_attributed_credit_is_its_cells_exposure(book) -> None:
-    """Legacy 297-321."""
+async def test_a_filled_offers_credit_leaves_its_cells_exposure(book) -> None:
+    """The cell limit bounds what a cell has resting: once its offer is lent, the credit
+    stays in total capital and the cell's headroom is whole again."""
     await book.policy("fUST", reserve="0", fraction="0.70")
     await book.accept()
     await book.attempt("200", venue_offer_id="101")
     await book.accept(_observation("800", offers=(_offer("101", "200"),)))
+    resting = _view(await book.read())
+    assert (resting.snapshot.cell_exposure, resting.budget.cell_headroom) == (
+        Decimal("200"),
+        Decimal("500"),
+    )
     await book.accept(
         _observation(
             "800",
@@ -455,50 +460,10 @@ async def test_trade_attributed_credit_is_its_cells_exposure(book) -> None:
             trades=(_trade("101", "200"),),
         )
     )
-    a30, p2 = _view(await book.read()), _view(await book.read(cell="p2"))
-    assert a30.snapshot.total_capital == p2.snapshot.total_capital == Decimal("1000")
-    assert (a30.snapshot.cell_exposure, a30.budget.cell_headroom) == (
-        Decimal("200"),
-        Decimal("500"),
-    )
-    assert (p2.snapshot.cell_exposure, p2.budget.cell_headroom) == (0, Decimal("700"))
-
-
-@pytest.mark.asyncio
-async def test_loan_turning_into_split_credits_stays_in_its_cells_exposure(book) -> None:
-    """Legacy 418-469: recent fill, then carry by (symbol, period, opening)."""
-    await book.policy("fUST", reserve="0", fraction="0.70")
-    trade = Decimal("391.4117332")
-    cash = str(Decimal("1000") - trade)
-    opened = 101_150
-    await book.accept()
-    await book.attempt(str(trade), venue_offer_id="101")
-    await book.accept(_observation(cash, offers=(_offer("101", str(trade)),)))
-    one = Decimal("161.24782943")
-
-    def lent(venue_id: str, amount: Decimal | str, created: int, kind: str = "credit") -> Credit:
-        return _credit(venue_id, str(amount), kind=kind, created=created, opening=opened)
-
-    stages = [
-        (lent("60709535", trade, opened, "loan"),),
-        (lent("463464628", one, 101_160), lent("60709642", trade - one, 101_160, "loan")),
-        (
-            lent("463464628", one, 101_160),
-            lent("463464629", one, 101_170),
-            lent("463464632", "68.91607434", 101_180),
-        ),
-    ]
-    filled = {
-        "history": (OfferHistory(_offer("101", str(trade), "0"), "executed", 5000),),
-        "trades": (_trade("101", str(trade)),),
-    }
-    for number, credits in enumerate(stages):
-        # The offer fills in the first stage; the venue then only re-cuts the same lending.
-        extra = filled if number == 0 else {}
-        await book.accept(_observation(cash, credits=credits, **extra))
-        a30, p2 = _view(await book.read()), _view(await book.read(cell="p2"))
-        assert a30.snapshot.cell_exposure == trade
-        assert p2.snapshot.cell_exposure == 0
+    for cell in ("a30", "p2"):
+        view = _view(await book.read(cell=cell))
+        assert view.snapshot.total_capital == Decimal("1000")
+        assert (view.snapshot.cell_exposure, view.budget.cell_headroom) == (0, Decimal("700"))
 
 
 @pytest.mark.asyncio
@@ -612,7 +577,7 @@ async def test_partial_fill_does_not_add_original_reservation(book) -> None:
     )
     view = _view(await book.read())
     assert view.snapshot.total_capital == Decimal("1000")
-    assert view.snapshot.cell_exposure == Decimal("200")
+    assert view.snapshot.cell_exposure == Decimal("50")  # the resting remainder only
     assert view.snapshot.unreflected_commitments == 0
 
 
@@ -825,7 +790,7 @@ async def test_terminal_history_allows_venue_clock_tolerance(book, occurred, ref
     )
     read = await book.read()
     if reflected:
-        assert _view(read).snapshot.cell_exposure == Decimal("200")
+        assert _view(read).snapshot.unreflected_commitments == 0
     else:
         assert _reason(read) == "unclassifiable_commitment"
 
