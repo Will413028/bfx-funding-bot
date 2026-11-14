@@ -121,7 +121,7 @@ class Credit:
     flags: JsonObject | int | None
     mts_created: int | None
     mts_updated: int | None
-    mts_opening: int  # the venue's trade instant; required (carry key)
+    mts_opening: int  # the venue's trade instant; required
     raw: JsonObject
 
 

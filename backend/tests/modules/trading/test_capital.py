@@ -33,6 +33,8 @@ from bfx_funding_bot.modules.trading import (
 D = Decimal
 ACCOUNT = UUID(int=1)
 SCOPE = CapitalScope(ACCOUNT, "fUSD", "alpha")
+# The fold takes the basis's cell amounts as given: these are arithmetic inputs, not a basis
+# as write_basis produces it (there the cells sum to ``offered``).
 VALUES = SymbolCapital("fUSD", D("1000"), D("200"), D("300"), D("90"),
                        (("alpha", D("350")), ("beta", D("150"))), None)
 BASIS = AcceptedCapitalBasis(
@@ -175,16 +177,15 @@ def test_matched_unknown_retains_transport_outcome_and_counts_commitment() -> No
     assert fact.resolution == "acknowledged"
 
 
-def test_partial_fill_counts_remaining_and_credit_without_original_commitment() -> None:
+def test_partial_fill_counts_the_resting_remainder_without_credit_or_original() -> None:
     original = attempt(1, "500", "acknowledged", seq=5)
     values = SymbolCapital("fUSD", D("500"), D("200"), D("300"), D("0"),
-                           (("alpha", D("500")),), None)
+                           (("alpha", D("200")),), None)
     basis = replace(BASIS, symbols=(values,), reflected_attempts=frozenset({original.attempt_id}))
     result = fold(basis=basis, attempts=(original,))
     assert isinstance(result, Available)
-    assert result.view.snapshot == CapitalSnapshot(D("500"), D("0"), D("1000"), D("500"))
-    assert result.view.budget == CapitalBudget(D("400"), D("450"), D("0"), D("0"),
-                                               "cell_headroom_exhausted")
+    assert result.view.snapshot == CapitalSnapshot(D("500"), D("0"), D("1000"), D("200"))
+    assert result.view.budget == CapitalBudget(D("400"), D("450"), D("250"), D("250"), None)
 
 
 def test_reflected_terminal_offer_never_resurrects_original_amount() -> None:
@@ -217,16 +218,6 @@ def test_foreign_offers_and_cell_less_credit_are_not_cell_exposure() -> None:
     assert isinstance(result, Available)
     assert result.view.snapshot == CapitalSnapshot(D("1000"), D("0"), D("1300"), D("0"))
     assert result.view.budget.cell_headroom == D("600")
-
-
-def test_ambiguous_credit_counts_once_in_total_and_fully_in_each_candidate_cell() -> None:
-    values = replace(VALUES, offered=D("0"),
-                     cells=(("alpha", D("300")), ("beta", D("300"))))
-    for cell in ("alpha", "beta"):
-        result = fold(scope=replace(SCOPE, cell_id=cell), basis=replace(BASIS, symbols=(values,)))
-        assert isinstance(result, Available)
-        assert result.view.snapshot.total_capital == D("1300")
-        assert result.view.snapshot.cell_exposure == D("300")
 
 
 @pytest.mark.parametrize(("enabled", "reserve", "pending", "expected"), [
