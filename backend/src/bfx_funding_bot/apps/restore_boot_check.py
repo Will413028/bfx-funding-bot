@@ -11,12 +11,12 @@ transaction:
 2. the realm stamp is readable (a ledger scope is one exchange account of that realm);
 3. the capital authority is ``ledger`` (``require_ledger_authority``);
 4. the epoch guard every bot boots through (``require_ledger_epoch``: a known writer);
-5. the ledger capital reader (``read_capital``) for every (symbol, cell) of each scope's newest
-   accepted basis, as of that scope's newest query: it must fold a basis, or say the newest
-   query is still pending (the restore point fell inside an observation cycle). A basis with
-   no cells (the account holds nothing, e.g. drained for a withdrawal) has nothing to read;
-   its scope is reported with no reads. The drill compares the restored ledger with
-   production row by row, so an empty basis there is production's own state.
+5. the ledger capital reader (``read_capital``) for every symbol of each scope's newest
+   accepted basis, as of that scope's newest query: once per cell the basis names for that
+   symbol, and once under the probe cell id ``boot-check`` when it names none (a cell row
+   exists only while that cell has an offer resting, so a fully lent symbol has none). Each
+   read must fold a basis, or say the newest query is still pending (the restore point fell
+   inside an observation cycle). Only a basis with no symbol row has nothing to read.
 
 Prints one JSON line {"boot": {...}}; exit 3 with {"error": <bounded code>} on a refusal. The
 drill runs this module of the deployed image directly (``restore_commands.ledger_verifier_command``),
@@ -32,6 +32,8 @@ from typing import Any
 
 EXIT_REFUSED = 3
 _PENDING = "snapshot_query_pending"
+# Not a configured cell: the reader folds the symbol's basis for it with no cell amount.
+PROBE_CELL_ID = "boot-check"
 
 
 class RefusedError(RuntimeError):
@@ -64,6 +66,7 @@ async def _reads(session: Any, scope: Any) -> tuple[str, list[dict[str, object]]
     from bfx_funding_bot.modules.ledger.tables import (
         AcceptedCapitalBasisCellRow,
         AcceptedCapitalBasisRow,
+        AcceptedCapitalBasisSymbolRow,
         LedgerObservationQueryRow,
         LedgerObservationRow,
     )
@@ -86,14 +89,21 @@ async def _reads(session: Any, scope: Any) -> tuple[str, list[dict[str, object]]
         select(LedgerObservationQueryRow.started_at_ms).where(*in_scope)
         .order_by(LedgerObservationQueryRow.query_revision.desc()).limit(1)
     )
-    cells = (await session.execute(
+    symbols = (await session.scalars(
+        select(AcceptedCapitalBasisSymbolRow.symbol)
+        .where(AcceptedCapitalBasisSymbolRow.basis_id == basis_id)
+    )).all()
+    cells: dict[str, list[str]] = {symbol: [] for symbol in symbols}
+    for symbol, cell_id in (await session.execute(
         select(AcceptedCapitalBasisCellRow.symbol, AcceptedCapitalBasisCellRow.cell_id)
         .where(AcceptedCapitalBasisCellRow.basis_id == basis_id)
-        .order_by(AcceptedCapitalBasisCellRow.symbol, AcceptedCapitalBasisCellRow.cell_id)
-    )).all()
+    )).all():
+        cells[symbol].append(cell_id)
     reader = build_ledger_capital_reader()
     reads: list[dict[str, object]] = []
-    for symbol, cell_id in cells:
+    for symbol, cell_id in sorted(
+            (symbol, cell_id) for symbol, named in cells.items()
+            for cell_id in named or [PROBE_CELL_ID]):
         capital_scope = CapitalScope(scope.exchange_account_id, symbol, cell_id)
         try:
             read = await reader.read_capital(session, capital_scope, now_ms=now_ms,
