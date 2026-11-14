@@ -270,16 +270,63 @@ def test_missing_symbol_does_not_mean_zero_capital() -> None:
 
 @pytest.mark.parametrize("source", ["basis", "policy", "attempt", "uncertainty"])
 def test_cross_scope_inputs_fail_closed(source: str) -> None:
+    # The reason is asserted, not only the refusal: protection looks the reason up to decide
+    # between a halt and a retry, and a reason it does not know is retried as transient.
     changes = {"account_id": UUID(int=99)}
     if source == "basis":
         result = fold(basis=replace(BASIS, **changes))
+        expected = Blocked("snapshot_evidence_conflict", (("scope", "accepted"),))
     elif source == "policy":
         result = fold(policy=replace(POLICY, **changes))
+        expected = Blocked("inconsistent_policy_pointer", (("scope", "policy"),))
     elif source == "attempt":
         result = fold(attempts=(replace(attempt(1, "100"), scope=replace(SCOPE, **changes)),))
+        expected = Blocked("attempt_intent_scope_conflict", (("attempt", str(UUID(int=101))),))
     else:
         result = fold(uncertainties=(replace(uncertainty(), **changes),))
-    assert isinstance(result, Blocked)
+        expected = Blocked("uncertainty_scope_conflict", (("id", str(UUID(int=500))),))
+    assert result == expected
+
+
+def test_a_symbol_listed_twice_in_the_basis_is_blocked() -> None:
+    twice = replace(BASIS, symbols=(VALUES, replace(VALUES, available=D("5"))))
+    assert fold(basis=twice) == Blocked("snapshot_conflicting_identity", ())
+
+
+@pytest.mark.parametrize("skipped", ["accounted", "other_symbol", "rejected", "not_sent",
+                                     "resolved_not_sent"])
+def test_an_attempt_the_fold_skips_does_not_end_the_tail(skipped: str) -> None:
+    basis = BASIS
+    if skipped == "accounted":
+        first = attempt(1, "900", "acknowledged", seq=5)
+        basis = replace(BASIS, reflected_attempts=frozenset({first.attempt_id}))
+    elif skipped == "other_symbol":
+        first = attempt(1, "900", symbol="fUST")
+    elif skipped == "resolved_not_sent":
+        first = replace(attempt(1, "900", "unknown"), resolution="not_sent")
+    else:
+        first = attempt(1, "900", "rejected" if skipped == "rejected" else "not_sent")
+    counted = fold(basis=basis, attempts=(first, attempt(2, "100")))
+    assert isinstance(counted, Available)
+    assert counted.view.snapshot.unreflected_commitments == D("100")
+    assert counted.view.snapshot.cell_exposure == D("450")
+    blocked = fold(basis=basis, attempts=(first, attempt(2, "100", "unknown")))
+    assert blocked == Blocked("execution_unknown", (("attempt", str(UUID(int=102))),))
+
+
+@pytest.mark.parametrize("outcome", ["pending", "acknowledged", "rejected", "not_sent"])
+@pytest.mark.parametrize("resolution", ["acknowledged", "not_sent"])
+def test_only_an_unknown_attempt_carries_a_resolution(outcome: AttemptOutcome,
+                                                      resolution: str) -> None:
+    changes: dict[str, Any] = {"resolution": resolution}
+    with pytest.raises(ValueError, match="resolution requires"):
+        replace(attempt(1, "100", outcome), **changes)
+
+
+def test_a_resolution_is_acknowledged_or_not_sent() -> None:
+    changes: dict[str, Any] = {"resolution": "bogus"}
+    with pytest.raises(ValueError, match="resolution requires"):
+        replace(attempt(1, "100", "unknown"), **changes)
 
 
 def test_wrong_policy_symbol_is_blocked() -> None:
