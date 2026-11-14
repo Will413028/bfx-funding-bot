@@ -116,6 +116,12 @@ CAPITAL_BLOCK_TRIGGERS: dict[str, str] = {
         # another scope -- the same integrity class as the legacy codes above.
         "attempt_evidence_conflict",
         "uncertainty_scope_conflict",
+        # The accepted basis contradicts the account, the command clock or its own stored
+        # block, and a policy head points at a revision that is missing or another scope's.
+        # Both are read in one snapshot or under the scope lock, so neither is a read racing
+        # a writer: the stored rows disagree, and the next read finds them the same.
+        "snapshot_evidence_conflict",
+        "inconsistent_policy_pointer",
     ), IDENTITY_CONFLICT),
     # Ledger conservation (S1-3e5c): the accepted basis stored lending that no
     # observed offer and no foreign execution explains.
