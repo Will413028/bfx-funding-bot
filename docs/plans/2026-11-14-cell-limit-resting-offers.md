@@ -63,6 +63,7 @@
   - 處理模擬環境的舊歸屬列（P12）。
 - 延後：
   - 以 credit 自己的 `period` 計的天期上限（ADR Decision 6）。觸發條件：出現天期不同的 cell。
+  - basis 的 `digest` 沒有任何程式重算它（P9）。要不要補「由觀測列重算並比對」的檢查，或之後刪掉欄位。觸發條件：需要稽核某份 basis 是否可由它的觀測重算，或下一次改 basis payload 的形狀。
 
 ## 步驟
 
@@ -140,7 +141,7 @@
   - 完成定義逐項核對（上面的清單，逐步驟）。
   - 獨立設計審查：對 `dev` 上步驟 1–4 的累積 diff 跑 design-review，檢查有沒有沒重新評估就沿用的機制、繞著既有結構的補丁、留成 pending 的項目。
   - ADR 的 Result 段換成實際結果（inventory D02），包含：`schema_version` 升版本身不需要 migration（P9）、兩個欄位以 migration 刪除與 v1 digest 不能重算（D1、P14）、D2–D4 的結論、`venue_observation.py` 的 trades 起點（P13）。在 `docs/adr/2026-10-02-ledger-s1-port-and-wire-contracts.md` 第 83 行的 positions wire 契約標註 `unattributedLent` 由本 ADR 取代（inventory D04）。
-  - `check_inventory.py` 是只在本階段有意義的一次性檢查，留在附件，不接進 CI；長期守住新行為的是新增的 gate mutant M19（PR 上由 `capital-rules.yml` 的路徑觸發，另有每晚排程）與測試。
+  - `check_inventory.py` 是只在本階段有意義的一次性檢查，留在附件，不接進 CI；擋住回歸的是 CI integration 裡的測試（required check），gate mutant M19 證明那條測試仍擋得住（`capital-rules.yml` 在 PR 上由路徑觸發、另有每晚排程，不是 required check）。
   - 延後項（上面「延後」一條）附觸發條件搬回主清單。
   - 需要人做的事：分支 `fix/basis-cell-attribution` 與它的 worktree 是否刪除（刪遠端分支要 owner 同意）；本機個人脈絡檔「進行中的計畫」那一行更新。
   - 驗收：`python3 docs/plans/2026-11-14-cell-limit-resting-offers/check_inventory.py`；設計審查的報告與處理結果寫在進度表；ADR 的 Result 段不再有「尚未實作」。
@@ -169,8 +170,22 @@
   - A：每個 symbol 列至少讀一次，沒有 cell 列時用固定的探測 cell id `boot-check`——開機檢查在常態下仍會實際走一次資金讀取；報告的鍵不變（`cell_id` 是字串），目標版 drill 解析上一版與新版 image 的報告都不必改程式；報告裡會出現一個不是真實 cell 的 id；要改一條既有測試與 `ledger_digest.py` 的註解（後者讓這次發版在部署前多跑一次還原測試）。（建議）
   - B：維持現狀，沒有 cell 列就不讀——不改程式；但開機檢查在常態下不再驗證資金讀取，演練只剩 schema、realm、authority 與逐列雜湊。
   - 結論：A，每個 symbol 至少讀一次，探測 cell id 為 `boot-check`。
+  - 實作時的收斂（2026-11-14，步驟 2 的 `/code-review`）：探測只對有 capital policy head 的 symbol 做。沒有 cell 列也沒有 policy 的錢包幣別（例如零頭）不讀：reader 先回 policy 的 block 才看 query，還原點落在觀測週期中時，這種幣別會讓健康的副本被判成 `boot_capital_read_failed`。有測試與 mutation（進度表）。
 
-拍板順序：四題都在 2026-11-14 由 Will 一次拍板（D1：C；D2：A；D3：A；D4：A），沒有未決的題目。
+- **D5 零成交的 terminal history 列要不要納入 provenance 矛盾檢查**（狀態：未決；擋住步驟：無，步驟 2 照 D3 的文字只查有成交的列）
+  - 背景：步驟 2 的設計審查與 `/code-review` 都指出，D3 的理由是「`_reflected` 會用 terminal 列把 attempt 判成已反映」，而 `_reflected` 不看成交量；被取消、零成交的 terminal 列同樣能讓兩個 attempt 都被判成已反映，卻不在 D3 列的對象裡。只在「offer 在兩份 basis 之間掛出又取消、而且有兩個 attempt 都宣稱它」時才有差別（讀程式，未實測）。
+  - A：對象改成每一筆 terminal history 列——與 D3 的理由一致；比 D3 再多擋一類。（建議）
+  - B：維持只查有成交的列，在程式註解寫明零成交的列不查與原因。
+- **D6 `credit_provenance_conflict` 要不要列為保護級的 block**（狀態：未決；擋住步驟：無）
+  - 背景：同一類矛盾在 offer 還掛著時是 `offer_provenance_conflict`，列在 `execution/safety/protection.py` 的 `CAPITAL_BLOCK_TRIGGERS`（`IDENTITY_CONFLICT`：重試解不了，停下）。`credit_provenance_conflict` 不在表裡，改動前後都一樣：它只擋住該幣別的支出，terminal 列或 trade 滑出查詢範圍後 block 自己消失，兩個 attempt 仍被記成已反映（最後一句是兩位審查者讀程式的推論，未實測）。D3 把對象擴大到每一筆 trade，等於擴大這種會自己消失的暫停。
+  - A：加進 `IDENTITY_CONFLICT`，與掛著的 offer 同一種處置——行為變更，要補測試與 runbook，並確認停下之後的自動恢復路徑。（建議；恢復路徑尚未查）
+  - B：維持暫時性，在 D3 與程式註解寫明是刻意的。
+- **D7 同幣別的 cell 都沒有掛單時，分配固定先給名稱排序在前的 cell**（狀態：未決；擋住步驟：無）
+  - 背景：`allocate_capital` 依 `cell_exposure` 由小到大分配，同值時依名稱。credit 不再計入 cell 之後，錢全借出去再還款時每個 cell 的 `cell_exposure` 都是 0，名稱在前的 cell 每次先拿到 `min(spendable, cell_limit)`（最多 70%），其餘才給下一個。以前借出的存量會把較重的 cell 排到後面。ADR 的 Rationale 接受「資金全照其中一個訊號的利率借出」，但沒有寫到這個固定偏向；沒有測試釘住同值的情況。
+  - A：接受，補一條 sizing 測試釘住同值時的順序，寫進步驟 4 的架構文件。（建議）
+  - B：同值時改用別的規則（例如輪流，或依上一次成交時間），需要另外的設計。
+
+拍板順序：D1–D4 在 2026-11-14 由 Will 一次拍板（D1：C；D2：A；D3：A；D4：A）。D5–D7 是步驟 2 的審查冒出來的，都不擋後續步驟，可以一起拍板；選 A 的題目各自另開小 PR，在步驟 5 發版前併入。
 
 ## 進度
 
@@ -179,7 +194,7 @@
 | 步驟 | 狀態 | 已跑的驗收 | 未跑的驗收與原因 | commit |
 |---|---|---|---|---|
 | 1 讀取鏈、API 與營運 UI 拿掉「未歸屬」 | 完成 | 2026-11-14：消費端搜尋只剩 `basis.py`、`tables.py`、`modules/live_validation/`，文案鍵 0 行；本機 `mypy`、`ruff`、`lint-imports --no-cache`（26 kept）、三個受影響的 integration 檔（53 passed）、`pnpm lint`、`pnpm test`（167 passed）、`quality_ratchet.py`；本機單元 5383 passed、1 failed（`test_tick_candles.py::test_a_venue_that_never_answers_does_not_stall_the_tick`，單獨跑通過，CI 的 unit job 通過）；PR #400 的 CI 與 Security 全綠（unit、integration、Frontend、e2e smoke、契約檢查、Quality ratchet、Capital mutation gate）；`test_ledger_positions_offers.py` 檔頭的 mutation（`lent = credits + offered`）在複本實跑，被 `test_positions_use_only_the_latest_basis` 擋下；`/code-review`：findings 7（blocking 0），fixed 3、recorded 2、rejected 2、raised 0；`tests_executed` 5862→5860（兩條 `Removed-Test:`） | 無 | `e87b106d`（PR #400） |
-| 2 basis 不再把 credit 歸屬到 cell | 未開始 | | | |
+| 2 basis 不再把 credit 歸屬到 cell | 程式完成待驗收 | 2026-11-14，分支 `feat/basis-resting-offers-only`：`check_inventory.py`（`67 rows, 41 files named by the pattern, 0 errors`）；驗收的 `rg` 在 `basis.py` 0 行；本機 `ruff`、`mypy`（326 檔）、`lint-imports --no-cache`（26 kept）、`quality_ratchet.py`；單元全過；受影響的 27 個 integration 檔（非 e2e）全過，含 `test_ledger_conservation.py` 整檔（P4 成立）；`capital_mutation_gate --include-integration`：`All 19 mutants killed`（M19 被 `test_lent_credit_counts_in_the_symbol_and_in_no_cell` 擋下）。複本裡的 mutation（`red-proof`，每條 base pass、canary fail、mutant killed）：credit 加回 cell → `test_lent_credit_counts_in_the_symbol_and_in_no_cell`；加回 `trades_range_uncovered` → `test_a_credit_opening_outside_the_trades_range_does_not_block[40001-100000-credit]`；拿掉 D3 的檢查 → `test_an_ended_offer_with_contradictory_provenance_blocks_its_symbol[history]`，只拿掉對 trade 的檢查 → 同一條的 `[trade]`；開機檢查拿掉探測 → `test_boot_check_reads_a_symbol_whose_capital_is_all_lent`；探測不看 policy → `test_boot_check_does_not_read_a_wallet_symbol_that_cannot_lend`；trades 起點推回 opening → `test_trades_share_the_history_range_whatever_the_credit_openings`。修改前的版本（`de0f420a` 疊上新測試）：`test_a_fully_lent_offer_leaves_its_cell_empty_and_writes_no_credit_cell` 失敗。v1 之後接 v2 的逐列雜湊：`test_a_basis_without_credit_cells_after_one_with_them_matches`。`tests_executed` 5860→5858（刪 9 條、增 7 條，`Removed-Test:` 在 commit）。審查：開工時設計審查 findings 6（blocking 0），fixed 1、recorded 3、raised 2（D5、D6）、rejected 0；完成前設計審查 findings 4（blocking 0），fixed 1、recorded 2、raised 1（D6，同上）、rejected 0；diff 視角 findings 4（blocking 0），fixed 4、recorded 0、raised 0、rejected 0；`/code-review` findings 7（blocking 0），fixed 2、recorded 1、raised 3（D5、D6、D7）、rejected 1（改 reason 字串：D3 明定不變） | `alembic check`：本機未跑（worktree 沒有資料庫設定；這一步沒有改 `tables.py` 與 `alembic/`）；完整 integration、e2e、Security 與 PR 上的 Capital mutation gate：等 CI | 見 PR |
 | 3 刪掉 `unattributed_credits` 與 `attribution_basis` 兩欄 | 未開始 | | | |
 | 4 架構文件改寫 | 未開始 | | | |
 | 5 發版與正式環境驗證 | 未開始 | | | |
