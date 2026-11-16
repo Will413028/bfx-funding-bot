@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -100,10 +101,40 @@ class TemplateDatabases:
             self._admin(f'CREATE DATABASE "{name}"' + (f' TEMPLATE "{base}"' if base else ""))
             try:
                 self._built[name] = build(database_url(self._url, name))
+                self._refuse_open_connections(name)
             except BaseException:
+                self._built.pop(name, None)
                 self._admin(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
                 raise
         return name
+
+    def _refuse_open_connections(self, name: str, *, wait_s: float = 5.0) -> None:
+        """``CREATE DATABASE ... TEMPLATE`` refuses a source anyone is connected to. A build that
+        leaves an engine undisposed keeps a pooled connection open until the garbage collector
+        happens to free it, so every clone of the template would fail at random
+        (``ObjectInUse``). Refuse the build here, every time, naming the leak.
+
+        A backend exits shortly after its client disconnects; like ``CREATE DATABASE`` (which
+        retries for 5 s), wait that long before calling a connection leaked."""
+        deadline = time.monotonic() + wait_s
+        engine = create_engine(database_url(self._url, "postgres"), isolation_level="AUTOCOMMIT")
+        try:
+            with engine.connect() as conn:
+                while True:
+                    leaked = conn.exec_driver_sql(
+                        "SELECT count(*) FROM pg_stat_activity "
+                        "WHERE datname = %s AND backend_type = 'client backend'", (name,)
+                    ).scalar_one()
+                    if not leaked or time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.1)
+        finally:
+            engine.dispose()
+        if leaked:
+            raise RuntimeError(
+                f"the build of template {name!r} left {leaked} connection(s) open to it; "
+                "dispose every engine the build creates"
+            )
 
     def built(self, name: str) -> object:
         return self._built[name]
