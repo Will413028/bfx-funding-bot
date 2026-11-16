@@ -1,14 +1,17 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from sqlalchemy import CheckConstraint, Column, Table, event
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.types import JSON
 
@@ -23,6 +26,18 @@ class Base(DeclarativeBase):
     with Alembic, alembic/env.py imports each module's tables file
     (their import side-effects populate Base.metadata).
     """
+
+
+@compiles(PG_UUID, "sqlite")
+def _sqlite_uuid(element: PG_UUID[Any], compiler: Any, **kw: Any) -> str:
+    """The PostgreSQL ``UUID`` column on sqlite (unit-test schema only) as ``CHAR(32)``.
+
+    Left alone it renders as ``UUID``, a type name sqlite gives NUMERIC affinity, so a stored
+    hex that reads as a number (``...123e456...`` with only digits around the ``e``) came back
+    as a float and broke the UUID result processor at random (CI run 43468867597). ``CHAR``
+    gives TEXT affinity, as ``sqlalchemy.Uuid`` already renders it.
+    """
+    return "CHAR(32)"
 
 
 # The one JSON column type: Python ``None`` is SQL NULL, never the JSON literal ``null`` (the
