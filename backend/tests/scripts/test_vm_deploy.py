@@ -3137,7 +3137,12 @@ def test_release_yml_attests_exactly_the_digest_the_deployer_verifies() -> None:
     release = ci["jobs"]["release"]
     assert release["uses"] == f"./{bfx.RELEASE_WORKFLOW}"
     assert release["if"] == "github.event_name == 'push' && github.ref == 'refs/heads/main'"
-    assert set(release["needs"]) == set(ci["jobs"]) - {"release", "migration_lint", "gate"}
+    # image_os_updates checks the image release pushed, so it runs after it.
+    assert set(release["needs"]) == set(ci["jobs"]) - {
+        "release", "migration_lint", "gate", "image_os_updates"}
+    assert ci["jobs"]["image_os_updates"]["needs"] == ["release"]
+    # A red image check means "bump the base image", not "this commit is wrong": not gated.
+    assert set(ci["jobs"]["gate"]["needs"]) == set(ci["jobs"]) - {"gate", "image_os_updates"}
     assert release["permissions"] == job["permissions"]
 
 

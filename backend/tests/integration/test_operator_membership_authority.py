@@ -49,7 +49,12 @@ _NODE = "1234567890"
 
 def _build(target: str):
     def build(url: str) -> None:
-        _reset(create_engine(url))
+        engine = create_engine(url)
+        try:
+            _reset(engine)
+        finally:
+            # An open pooled connection makes every clone of the template fail (ObjectInUse).
+            engine.dispose()
         alembic(url, "upgrade", target)
         stamp_realm(url, "ci")
     return build

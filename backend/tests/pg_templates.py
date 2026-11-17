@@ -16,13 +16,14 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
 from uuid import uuid4
 
-from sqlalchemy import create_engine
+from sqlalchemy import Connection, create_engine
 from sqlalchemy.engine import make_url
 
 ALEMBIC_INI = Path(__file__).resolve().parents[1] / "alembic.ini"
@@ -77,13 +78,18 @@ class TemplateDatabases:
         self._url = url
         self._built: dict[str, object] = {}
 
-    def _admin(self, sql: str) -> None:
+    @contextmanager
+    def _admin_connection(self) -> Iterator[Connection]:
         engine = create_engine(database_url(self._url, "postgres"), isolation_level="AUTOCOMMIT")
         try:
             with engine.connect() as conn:
-                conn.exec_driver_sql(sql)
+                yield conn
         finally:
             engine.dispose()
+
+    def _admin(self, sql: str) -> None:
+        with self._admin_connection() as conn:
+            conn.exec_driver_sql(sql)
 
     def template(
         self, name: str, build: Callable[[str], object] | None = None, *, base: str | None = None
@@ -100,10 +106,59 @@ class TemplateDatabases:
             self._admin(f'CREATE DATABASE "{name}"' + (f' TEMPLATE "{base}"' if base else ""))
             try:
                 self._built[name] = build(database_url(self._url, name))
+                self._refuse_open_connections(name)
             except BaseException:
+                self._built.pop(name, None)
                 self._admin(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
                 raise
         return name
+
+    def _refuse_open_connections(self, name: str, *, wait_s: float = 5.0) -> None:
+        """``CREATE DATABASE ... TEMPLATE`` refuses a source anyone is connected to. A build that
+        leaves an engine undisposed keeps a pooled connection open until the garbage collector
+        happens to free it, so every clone of the template would fail at random
+        (``ObjectInUse``). Refuse the build here, every time, naming the leak.
+
+        A backend exits shortly after its client disconnects; like ``CREATE DATABASE`` (which
+        retries for 5 s), wait that long before calling a connection leaked.
+
+        The count is every client backend on ``name``, not only the build's: pg_stat_activity
+        cannot tell which client opened a backend. That is exact here because the cluster is
+        private to this pytest process (tests/pg_local.py) and ``name`` was created moments ago
+        for this build, so nothing else knows to connect to it; on a shared cluster a stranger's
+        connection would be reported as the build's leak."""
+        leaked = self._open_connections(name, wait_s)
+        if leaked:
+            raise RuntimeError(
+                f"the build of template {name!r} left {leaked} connection(s) open to it; "
+                "dispose every engine the build creates"
+            )
+
+    def _open_connections(self, database: str, wait_s: float = 5.0) -> int:
+        """Client backends on ``database``, after waiting up to ``wait_s`` for them to exit."""
+        deadline = time.monotonic() + wait_s
+        with self._admin_connection() as conn:
+            while True:
+                count: int = conn.exec_driver_sql(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = %s AND backend_type = 'client backend'", (database,)
+                ).scalar_one()
+                if not count or time.monotonic() >= deadline:
+                    return count
+                time.sleep(0.1)
+
+    def _copy(self, template: str, database: str) -> None:
+        """``CREATE DATABASE database TEMPLATE template``, refusing a template someone is still
+        connected to with a message naming it, instead of PostgreSQL's ``ObjectInUse``. A
+        connection is not terminated: whoever holds it (a test connecting to the template
+        instead of its clone) is the bug, and would otherwise write to every later clone."""
+        held = self._open_connections(template)
+        if held:
+            raise RuntimeError(
+                f"cannot copy template {template!r}: {held} connection(s) are open to it; "
+                "connect to a clone, never to the template"
+            )
+        self._admin(f'CREATE DATABASE "{database}" TEMPLATE "{template}"')
 
     def built(self, name: str) -> object:
         return self._built[name]
@@ -111,13 +166,13 @@ class TemplateDatabases:
     def clone(self, template: str, database: str | None = None) -> str:
         """A fresh copy of ``template``; returns its URL."""
         database = database or f"{template[:40]}_{uuid4().hex[:12]}"
-        self._admin(f'CREATE DATABASE "{database}" TEMPLATE "{template}"')
+        self._copy(template, database)
         return database_url(self._url, database)
 
     def recreate(self, database: str, template: str) -> None:
         """Replace ``database`` (keeping its name, so its URL) with a copy of ``template``."""
         self._admin(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')
-        self._admin(f'CREATE DATABASE "{database}" TEMPLATE "{template}"')
+        self._copy(template, database)
 
     def drop(self, url: str) -> None:
         self._admin(f'DROP DATABASE IF EXISTS "{make_url(url).database}" WITH (FORCE)')
