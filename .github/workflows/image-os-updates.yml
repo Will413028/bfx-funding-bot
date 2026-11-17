@@ -27,7 +27,8 @@ permissions:
 
 jobs:
   image_os_updates:
-    name: Image OS security updates
+    # Callers name themselves (Release / Scheduled image OS updates); this reads `<caller> / check`.
+    name: check
     # Native arm64: the image is linux/arm64 only.
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
@@ -50,9 +51,10 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Pull the image
         run: |
-          case "$IMAGE_TAG" in main|sha-[0-9a-f]*) ;; *) echo "unexpected tag: $IMAGE_TAG"; exit 1 ;; esac
-          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}-backend:${IMAGE_TAG}" >> "$GITHUB_ENV"
-          docker pull --quiet "ghcr.io/${GITHUB_REPOSITORY,,}-backend:${IMAGE_TAG}"  # $IMAGE is set for the next steps
+          [[ $IMAGE_TAG =~ ^(main|sha-[0-9a-f]{40})$ ]] || { echo "unexpected tag: $IMAGE_TAG"; exit 1; }
+          image="ghcr.io/${GITHUB_REPOSITORY,,}-backend:${IMAGE_TAG}"
+          docker pull --quiet "$image"
+          echo "IMAGE=$image" >> "$GITHUB_ENV"  # for the next steps
       - name: Debian security updates the image does not have
         run: |
           docker run --rm --user 0 --entrypoint sh "$IMAGE" \

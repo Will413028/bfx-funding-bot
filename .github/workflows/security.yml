@@ -107,7 +107,7 @@ jobs:
     # The released image's OS layer: .github/workflows/image-os-updates.yml. Here only on the
     # weekly schedule and on demand, on the newest release; a main push checks the image its
     # release just pushed, from ci.yml after `release` (here it raced the release).
-    name: Image OS security updates
+    name: Scheduled image OS updates
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: read
