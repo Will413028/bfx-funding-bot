@@ -12,12 +12,22 @@ from sqlalchemy import Column, MetaData, Table, create_engine, select
 
 from bfx_funding_bot.modules.accounts.rotation_tables import CredentialRotationRecipientRow
 
+# The override under test, imported here so the test does not depend on conftest import order.
+from tests.sqlite_types import sqlite_uuid
+
 # The column type the failing read went through (``PG_UUID(as_uuid=True)``).
 RECIPIENT_ID = CredentialRotationRecipientRow.__table__.c.recipient_id.type
 
 # Hex that sqlite would read as a number: digits around one ``e``, and all digits.
 NUMERIC_LOOKING = [UUID("12345678901234567890123456e12345"),
                    UUID("12345678901234567890123456789012")]
+
+
+def test_the_override_is_registered_for_sqlite() -> None:
+    from sqlalchemy.dialects import sqlite
+
+    assert sqlite_uuid is not None
+    assert RECIPIENT_ID.compile(dialect=sqlite.dialect()) == "CHAR(32)"
 
 
 @pytest.mark.parametrize("value", NUMERIC_LOOKING, ids=str)

@@ -21,7 +21,10 @@ from sqlalchemy.pool import StaticPool
 # Registers the whole schema on Base.metadata before any test module is collected, so a
 # create_all never sees a table whose foreign-key target another module owns go missing.
 import bfx_funding_bot.apps.schema  # noqa: F401
-from tests import pg_local
+from tests import pg_local, sqlite_types
+
+# Importing it registers the sqlite rendering of PG UUID columns (CHAR(32)) for every unit test.
+SQLITE_UUID_RENDERING = sqlite_types.sqlite_uuid
 
 # Property-test budgets (the `property` marker in pyproject.toml) live only in profiles:
 # CI runs Hypothesis's default profile (100 examples), the nightly workflow passes
