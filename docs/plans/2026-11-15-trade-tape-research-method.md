@@ -18,7 +18,7 @@
 
 ## 前提（核對日期見各條）
 
-- 會改到的既有部署是否在線：**在線**（VM，`bfx-app` 與每週 `bfx-weekly-report`）。會碰到正式環境的是步驟 2 的成交紀錄目錄、R2 同步與每週工作的 compose 改動：回滾＝revert compose 與 unit 檔、刪除成交紀錄目錄；不動 DB schema，沒有相容性窗口需求，因為 live bot 不讀這些東西（見不變量）。
+- 會改到的既有部署是否在線：**在線**（VM，`bfx-app` 與每週 `bfx-weekly-report`）。會碰到正式環境的是步驟 2 的成交紀錄目錄與每週工作的 compose 改動：回滾＝revert compose 與 unit 檔、刪除成交紀錄目錄；不動 DB schema，沒有相容性窗口需求，因為 live bot 不讀這些東西（見不變量）。
 - 公開 `GET /v2/trades/f{SYM}/hist` 回傳全市場成交 `[ID, MTS, AMOUNT, RATE, PERIOD]`，fUSD／fUST 有 2022-01 起的完整資料，沒有一天無成交（步驟 1 實測，2026-11-20；已確認）。
 - AMOUNT 正負號＝主動成交方：負＝借方主動吃放貸掛單，正＝放貸方主動吃借方掛單（4 筆自己成交對照，2026-11-15；已確認，樣本小）。規則在 `.claude/rules/bitfinex-venue.md`（PR #418，已合併）。
 - 撮合規則：offer 期限必須 ≥ bid 期限才能撮合；固定利率單不和 FRR 單撮合；價格優先、同價先到先撮（[Bitfinex support](https://support.bitfinex.com/hc/en-us/articles/115003428165-Margin-Funding-on-Bitfinex)，2026-11-20 讀；已確認）。
@@ -49,10 +49,11 @@
 
 ## 範圍
 
-- 做：成交紀錄每日檔案的回補與每週增量收集（fUSD、fUST），R2 同步依 D5；replay 引擎（相容期限、穿價成交、部分成交、同價時的排隊模型、保守與樂觀邊界、成交時間與閒置時間）；用自己成交驗證 replay；runner 全面改走 replay，刪除期望值記帳、linear 與 K 線 learner；決策空間搜尋 runner；每週工作接上。
+- 做：成交紀錄每日檔案的回補與每週增量收集（fUSD、fUST），不另存 R2（D5）；replay 引擎（相容期限、穿價成交、部分成交、同價時的排隊模型、保守與樂觀邊界、成交時間與閒置時間）；用自己成交驗證 replay；runner 全面改走 replay，刪除期望值記帳、linear 與 K 線 learner；決策空間搜尋 runner；每週工作接上。
 - 不做：live money path 使用成交模型（`OPTIMIZER_LIVE`）；fUSD／fUST 以外的幣；bandit 資金分配；Parquet／DuckDB（要新增依賴，見延後）。
 - 延後：
   - 成交時間的存活模型，取代 live 的 book 查表（觸發：要討論開 `OPTIMIZER_LIVE`）。
+  - 成交紀錄另存一份到 R2（D5 的 B／C；觸發：Bitfinex 縮短公開歷史的可查範圍，或研究需要在 VM 重建後一天內恢復）。
   - 改成 Parquet + DuckDB（觸發：步驟 1b 或步驟 3 量到讀檔是 replay 的主要耗時，且超過每週工作預算）。
   - 用 live 成交做校準的正式驗收門檻（觸發：恢復放貸且自己的成交 ≥ D4 的樣本下限）。
   - bandit 資金分配（觸發：本金放大到 cap 加碼 gate 通過）。
@@ -80,7 +81,7 @@
 
 - [ ] **2. 成交紀錄每日檔案與收集**（被擋於：步驟 1b）
   - 檔案：新增 `backend/scripts/ingest_public_trades.py` 與其測試；修改 `deploy/vm/ops/docker-compose.weekly-report.yml`、`deploy/vm/ops/compose_policy.py`（新 service 的可寫掛載）、`deploy/vm/ops/bfx_weekly_report.py`（掛載存在檢查）、`deploy/vm/systemd/bfx-weekly-report.service`、`backend/tests/scripts/test_vm_weekly_report.py` 與 compose policy 的測試。
-  - 範圍：`backend/scripts/ingest_public_trades.py`：輸出 `<root>/<symbol>/<YYYY-MM-DD>.csv.gz`（欄位 `id,mts,amount,rate,period`，amount 帶正負號），一天結束後才寫入該日檔；從目錄現況推導要補哪些日子，冪等（重抓一天，筆數與內容雜湊相同就不動，不同就報錯不覆蓋），可中斷續跑；續抓游標用 MTS、同一 MTS 依 id 去重；20 秒間隔、第一次 429 就停、通用 UA。R2 同步依 D5（未決，不擋本步其餘部分）。收集跑在每週 compose 的另一個 service（只有它以可寫掛載這個目錄），在研究 service 之前執行；研究 service 以唯讀掛載同一目錄；兩者都沿用唯讀 rootfs，`compose_policy.py --kind weekly-report` 增加這個掛載的允許規則。
+  - 範圍：`backend/scripts/ingest_public_trades.py`：輸出 `<root>/<symbol>/<YYYY-MM-DD>.csv.gz`（欄位 `id,mts,amount,rate,period`，amount 帶正負號），一天結束後才寫入該日檔；從目錄現況推導要補哪些日子，冪等（重抓一天，筆數與內容雜湊相同就不動，不同就報錯不覆蓋），可中斷續跑；續抓游標用 MTS、同一 MTS 依 id 去重；20 秒間隔、第一次 429 就停、通用 UA。不另存 R2（D5＝A）：VM 上的日檔是唯一副本，VM 毀損時從 API 重抓。收集跑在每週 compose 的另一個 service（只有它以可寫掛載這個目錄），在研究 service 之前執行；研究 service 以唯讀掛載同一目錄；兩者都沿用唯讀 rootfs，`compose_policy.py --kind weekly-report` 增加這個掛載的允許規則。
   - 消費端：`rg -ln "weekly-report|compose_policy|TimeoutStartSec|reports_mount" deploy backend/tests docs/runbooks`（每週工作的結構與預算）；新名字 `rg -n "ingest_public_trades|tape_root" backend deploy`。
   - 不能動：DB schema、`bfx_research` 權限、既有 offsite 備份內容。
   - 驗收：compose policy 測試：研究 service 對成交紀錄目錄是唯讀，把它改成可寫時測試要失敗；單元測試（續抓起點從目錄推導、重跑不重寫已存在的日檔、內容不同時報錯、429 即停、同 MTS 去重、正負號原樣保存——把 `abs()` 加回去測試要失敗、未結束的當日不寫檔）；compose 各步 timeout 總和＋300 ≤ `TimeoutStartSec`；每週增量步驟 timeout＝794 秒×3≈2,400 秒，`TimeoutStartSec` 調到新合計＋300 秒（至少 7,800），unit 檔預算註解同步。
@@ -130,7 +131,7 @@
 
 ## 決定
 
-- **D1 成交紀錄存哪裡**（狀態：已決 2026-11-20，Will）：每日 gzip CSV 檔，放 VM 並同步 R2，不進 Postgres。ADR 2026-11-20 D2。
+- **D1 成交紀錄存哪裡**（狀態：已決 2026-11-20，Will）：每日 gzip CSV 檔，放 VM，不進 Postgres；不另存 R2（D5）。ADR 2026-11-20 D2。
 - **D2 回測怎麼判定成交**（狀態：已決 2026-11-20，Will）：逐筆 replay，取代查表成交機率 × 利率；原 D2「排隊量從哪來」只剩同價成交的排隊模型，併入步驟 3。ADR 2026-11-20 D1。
 - **D3 linear 時代的研究結論怎麼處理**（狀態：已決 2026-11-15，Will）：registry 全部標「待重跑」，程式刪 linear；DSR trials 累計保留。期望值記帳時代的結果比照處理（2026-11-20 隨 D2 擴大）。
 - **D4 replay 驗證的判準**（狀態：未決；擋住步驟：4、7）
@@ -138,14 +139,14 @@
   - B：只看邊界涵蓋率——簡單；代價是不檢驗排隊模型。
   - 兩案都要預登記樣本下限（建議：每個期限桶 ≥30 筆自己的成交）。
 
-- **D5 成交紀錄要不要另存一份到 R2**（狀態：未決；擋住步驟：2 的 R2 部分；2026-11-20 第 2 輪計畫審查提出）
+- **D5 成交紀錄要不要另存一份到 R2**（狀態：已決 2026-11-20，Will：A，不另存；2026-11-20 第 2 輪計畫審查提出）
   - 事實：既有 offsite 工具是 pgBackRest，只備份資料庫，不能上傳一般檔案；每週容器不帶任何秘密；標準函式庫做不到 S3 簽章。成交紀錄可以從 Bitfinex 公開 API 重抓（完整回補約 3.5 天）。
   - A：不另存，VM 上的日檔就是唯一副本；VM 毀損時從 API 重抓。不新增依賴、不碰憑證。代價：重建要 3.5 天；若 Bitfinex 某天不再提供舊歷史，就再也拿不回來。（建議；延後觸發：Bitfinex 縮短歷史可查範圍，或研究需要在 VM 重建後一天內恢復。）
   - B：主機上的 systemd unit 用 VM 已有的 CLI 上傳，另發一把只限新前綴的 R2 token（Will 設定）。代價：新秘密檔、新 unit、與 DR bucket 共用帳戶。
   - C：研究容器內用 Python 上傳，要新增 S3 客戶端依賴（需 owner 同意）。
-  - 選 A 的話，ADR 2026-11-20 B1 的「同步到 R2」要改寫。
+  - 結論：A；ADR 2026-11-20 B1 已同步改寫，另存 R2 列入延後並附觸發條件。
 
-拍板順序：D1、D2、D3 已拍；D5 可現在拍；D4 等步驟 3。
+拍板順序：D1、D2、D3、D5 已拍；D4 等步驟 3。
 
 ## 進度
 
