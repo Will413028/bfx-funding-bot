@@ -35,7 +35,7 @@ prior state：回測引擎每根 candle 以 `gross_rate = decision.rate × fill_
 
 **B. 成交紀錄存哪裡**
 
-- **B1（選用，業界基準）不可變的每日檔案**：`tape/<symbol>/<YYYY-MM-DD>.csv.gz`，放在 VM，研究容器唯讀掛載；要不要另存一份到 R2 未決（計畫 D5：既有 offsite 工具 pgBackRest 不能上傳一般檔案，資料又能從公開 API 重抓）。原始逐筆資料放在獨立於交易資料庫的資料區，Tardis.dev 也以每日 gzip CSV 發布。全量 1.27 GB（實測 gzip）；pandas 與標準函式庫可讀，不新增依賴。
+- **B1（選用，業界基準）不可變的每日檔案**：`tape/<symbol>/<YYYY-MM-DD>.csv.gz`，放在 VM，研究容器唯讀掛載；不另存到 R2（owner 2026-11-20，計畫 D5）：既有 offsite 工具 pgBackRest 不能上傳一般檔案，資料可從公開 API 重抓（完整約 3.5 天）。原始逐筆資料放在獨立於交易資料庫的資料區，Tardis.dev 也以每日 gzip CSV 發布。全量 1.27 GB（實測 gzip）；pandas 與標準函式庫可讀，不新增依賴。
 - B2 Postgres 新表：約 19.5 GB（每列 137 B 實測後外推），是現有 DB 的 6 倍，每次部署的備份與還原測試都要多處理這些資料。
 - B3 Parquet + DuckDB：分析最快，要新增兩個依賴。
 
@@ -62,6 +62,7 @@ prior state：回測引擎每根 candle 以 `gross_rate = decision.rate × fill_
 - 公開紀錄被證實不完整（例如漏掉某類成交），且無法補齊 → A1 的保守邊界失去意義，重新評估。
 - 我方金額相對成交量不可忽略 → A1 要加入市場衝擊模型。
 - replay 讀檔成為瓶頸 → B1 升級為 B3（新增依賴需 owner 同意）。
+- Bitfinex 縮短公開歷史的可查範圍，或研究需要在 VM 重建後一天內恢復 → 成交紀錄改為另存一份到 R2。
 
 ## Followup
 
