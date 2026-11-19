@@ -134,6 +134,10 @@ def _q(hist: Counter[int], p: float) -> int:
     return max(hist)
 
 
+def _iso(ms: int) -> str | None:
+    return datetime.fromtimestamp(ms / 1000, UTC).isoformat() if ms else None
+
+
 def summarize(out: Path) -> dict:
     """One streaming pass per symbol; memory does not grow with row count.
 
@@ -203,7 +207,6 @@ def summarize(out: Path) -> dict:
             for i in range(span)
         ]
         p30 = sorted(p30_daily.get(d, 0) for d in all_days)
-        iso = lambda ms: datetime.fromtimestamp(ms / 1000, UTC).isoformat() if ms else None  # noqa: E731
         result[sym] = {
             "rows": rows,
             "duplicate_ids_dropped": dupes,
@@ -230,7 +233,7 @@ def summarize(out: Path) -> dict:
             },
             "p30_longest_gap": {
                 "hours": round(max_p30_gap[0] / 3.6e6, 2),
-                "starts": iso(max_p30_gap[1]),
+                "starts": _iso(max_p30_gap[1]),
             },
             "gap_seconds": {
                 "p50": _q(gap_hist, 0.5),
@@ -240,7 +243,7 @@ def summarize(out: Path) -> dict:
             }
             if gap_hist
             else None,
-            "longest_gap": {"hours": round(max_gap[0] / 3.6e6, 2), "starts": iso(max_gap[1])},
+            "longest_gap": {"hours": round(max_gap[0] / 3.6e6, 2), "starts": _iso(max_gap[1])},
             "id_inversions_vs_time_order": inversions,
             "csv_bytes": path.stat().st_size,
         }
