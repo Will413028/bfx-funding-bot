@@ -2,40 +2,42 @@
 
 產生方式：唯讀盤點，指令列在文末。每一列有「去向」；收尾時不得有空格。
 
+去向依 ADR `docs/adr/2026-11-20-research-fills-by-trade-tape-replay-tape-as-daily-files.md` 於 2026-11-20 改寫：研究回測改為成交紀錄 replay，研究端不再用查表成交機率。
+
 ## 成交模型實作與選擇點
 
 | 項目 | 位置 | 現況 | 去向 |
 |---|---|---|---|
-| `fill_model` Literal（`empirical`／`linear-baseline`） | `backend/src/bfx_funding_bot/modules/backtest/config.py:26` | 預設 `empirical` | 只留 `empirical`（步驟 5） |
+| `fill_model` Literal（`empirical`／`linear-baseline`） | `backend/src/bfx_funding_bot/modules/backtest/config.py:26` | 預設 `empirical` | 刪除；研究回測只有 replay（步驟 5） |
 | `fill_alpha` | `config.py:22`，用在 `engine.py:148`、`period_structure.py:272,329` | linear 斜率 | 刪除（步驟 5） |
 | `compute_fill_prob` | `config.py:51-65` | `max(0, 1 - alpha*spread)` | 刪除（步驟 5） |
-| `EMPIRICAL_SOURCES`（`{"candle","book"}`） | `backtest/engine.py:25-28,74,90`；`ARCHITECTURE.md:361` | source 白名單 | 加 `tape`（步驟 3）、移除 `candle`（步驟 5） |
-| engine 分派 | `backtest/engine.py:124-148,162-165` | empirical 缺模型時 raise `BacktestIncomplete` | 保留；刪 linear 分支（步驟 5） |
-| `FillRateModel` | `lending/tracking/model.py:59`（`estimate_fill` :117） | stats＋artifact 內插 | 保留，介面不變；新增 `source="tape"`（步驟 3） |
-| `FillRateLearner`（K 線） | `lending/tracking/fill_rate.py:52`；`scripts/learn_fill_rate.py` | 從 K 線學 | 刪除（步驟 5；tape 取代，K 線無法看到成交） |
-| `BookReplayLearner` | `lending/tracking/book_replay.py:45`；`scripts/learn_book_fill_rate.py` | 每週產出 artifact（VM 24 份，2026-09-27..11-09） | 保留，當 tape 模型的排隊折扣與對照（步驟 3、4） |
-| `queue_fill` helpers | `lending/tracking/queue_fill.py:19,28` | book 排隊 | 保留 |
-| `fill_rate_model_artifacts`／`fill_rate_stats` | `lending/tracking/tables.py:23,49` | 存 artifact 與 stats | 保留；`source` 加 `tape` |
-| period_structure 報告字樣 | `backtest/period_structure.py:278` | 寫死 linear 說明 | 改為印實際 model source（步驟 5） |
-| band_sweep 寫死 fill=1 | `backtest/band_sweep.py:301,308` | 報告寫 mean fill = 1.0 | 改走 empirical（步驟 5） |
+| `EMPIRICAL_SOURCES`（`{"candle","book"}`） | `backtest/engine.py:25-28,74,90`；`ARCHITECTURE.md:361` | source 白名單 | 刪除，研究引擎不再讀 fill artifact（步驟 5） |
+| engine 分派 | `backtest/engine.py:124-148,162-165` | empirical 缺模型時 raise `BacktestIncomplete` | 改寫：`_apply_friction` 的期望值記帳換成 replay 的實際成交（步驟 3）；linear 與 empirical 分支一起刪（步驟 5）；`market_series_gap` 的 fail-closed 語意保留為「成交紀錄缺日」 |
+| `FillRateModel` | `lending/tracking/model.py:59`（`estimate_fill` :117） | stats＋artifact 內插 | 保留，只給 `OPTIMIZER_LIVE` 未啟用路徑；不新增 tape source |
+| `FillRateLearner`（K 線） | `lending/tracking/fill_rate.py:52`；`scripts/learn_fill_rate.py` | 從 K 線學 | 刪除（步驟 5；replay 取代） |
+| `BookReplayLearner` | `lending/tracking/book_replay.py:45`；`scripts/learn_book_fill_rate.py` | 每週產出 artifact（VM 24 份，2026-09-27..11-09） | 保留，只給 `OPTIMIZER_LIVE` 的 artifact；研究端不用 |
+| `queue_fill` helpers | `lending/tracking/queue_fill.py:19,28` | book 排隊 | 保留；replay 同價成交的排隊模型可重用（步驟 3 決定是否共用） |
+| `fill_rate_model_artifacts`／`fill_rate_stats` | `lending/tracking/tables.py:23,49` | 存 artifact 與 stats | 保留，不加 source |
+| period_structure 報告字樣 | `backtest/period_structure.py:278` | 寫死 linear 說明 | 改為印 replay 與邊界（步驟 5） |
+| band_sweep 寫死 fill=1 | `backtest/band_sweep.py:301,308` | 報告寫 mean fill = 1.0 | 改走 replay（步驟 5） |
 | simulated_venue market_replay | `simulated_venue/_internal/market_replay.py` | 模擬交易所的成交路徑，非研究用 | 不動（不在範圍；live parity 用） |
 
 ## 研究 runner（`backend/scripts/`）
 
 | runner | 現況成交模型 | 去向 |
 |---|---|---|
-| `run_backtest` :80 | linear | 改 empirical（步驟 5） |
-| `run_oos_profitability` :60,:242 | linear | 改 empirical（步驟 5） |
-| `run_adaptive_band_sweep` :80 | linear＋報告 fill=1 | 改 empirical（步驟 5） |
-| `run_distortion_sensitivity` :118 | linear | 改 empirical（步驟 5） |
+| `run_backtest` :80 | linear | 改 replay（步驟 5） |
+| `run_oos_profitability` :60,:242 | linear | 改 replay（步驟 5） |
+| `run_adaptive_band_sweep` :80 | linear＋報告 fill=1 | 改 replay（步驟 5） |
+| `run_distortion_sensitivity` :118 | linear | 改 replay（步驟 5） |
 | `run_phase3b_wfo_matrix` :55,:131 | linear | 刪除（步驟 5；一次性研究，結果已在報告） |
 | `run_phase4_3_locf_wfo_matrix` :63 | linear | 刪除（同上） |
-| `run_frr_floor_backtest` :518 | 只有 linear | 改 empirical（步驟 5） |
-| `run_period_structure_backtest` :326 | linear 預設，`--fill-model book` | 只留 empirical，`--fill-source tape\|book`（步驟 5） |
+| `run_frr_floor_backtest` :518 | 只有 linear | 改 replay（步驟 5） |
+| `run_period_structure_backtest` :326 | linear 預設，`--fill-model book` | 改走 replay，刪 `--fill-model`（步驟 5） |
 | `explore_mr_param_sensitivity` :40 | linear | 刪除（一次性探索） |
-| `derive_cells` :43-44 | 傳空 `FillRateModel` 不使用 | 改用 tape 模型（步驟 5） |
+| `derive_cells` :43-44 | 傳空 `FillRateModel` 不使用 | 拿掉這個參數（步驟 5） |
 | `learn_fill_rate` | K 線 learner | 刪除（步驟 5） |
-| `learn_book_fill_rate` | book learner | 保留 |
+| `learn_book_fill_rate` | book learner | 保留（live artifact） |
 | 其他 7 支（g2／g3／threshold／signal_eda／attribution／eda_phase3b／diff_research_report） | 不用成交模型 | 不動 |
 
 ## Live money path（不變量依據）
@@ -51,7 +53,7 @@
 
 ## 每週研究工作
 
-`deploy/vm/ops/docker-compose.weekly-report.yml:74-89` 共 13 步；成交相關：`learn_book_fill_rate`（:84）、period-structure book（:85）、period-structure linear（:86）、`run_oos_profitability`（:87）。去向：:86 刪除、:87 改 empirical、新增 tape 增量收集與 `learn_tape_fill_rate`（步驟 2、3、5）。
+`deploy/vm/ops/docker-compose.weekly-report.yml:74-89` 共 13 步；成交相關：`learn_book_fill_rate`（:84）、period-structure book（:85）、period-structure linear（:86）、`run_oos_profitability`（:87）。去向：:84 保留（live artifact）、:85 改 replay、:86 刪除、:87 改 replay、新增成交紀錄每日增量收集（步驟 2、5、7）。
 
 ## 測試
 

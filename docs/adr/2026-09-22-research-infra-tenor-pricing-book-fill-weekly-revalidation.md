@@ -7,6 +7,8 @@ tags: [bfx-funding-bot, decision, backtest, fill-model, live-validation, automat
 
 # 研究基礎建設 C/D/E：tenor 定價、book-replay fill、weekly 重驗
 
+> 2026-11-20：B1（決策當下全額計入）與 C（研究回測的 fill 證據來源）被 [2026-11-20-research-fills-by-trade-tape-replay-tape-as-daily-files](2026-11-20-research-fills-by-trade-tape-replay-tape-as-daily-files.md) 取代：研究回測改以成交紀錄逐筆 replay。A（tenor 定價）與 E（weekly 重驗）不受影響。
+
 ## Context
 
 2026-09-22 策略系統 review（研究報告 2026-09-22-strategy-system-review，原文不在本 repo）的兩個核心發現：所有部署策略硬編碼 2 天期而 FRR 溢價來自期限結構（F2）；linear fill 模型在 quote=close 時恆為 1，backtest 分不出任何執行或期限差異（F3，[2026-07-06-profit-review-execution-layer-first](2026-07-06-profit-review-execution-layer-first.md) R1 早已點名這個循環）。Will 接受依 D → C → E 順序實作。prior state：[2026-08-23-funding-strategy-execution-integrity](2026-08-23-funding-strategy-execution-integrity.md) D3 已規定 empirical fill 只能是有 scope/hash 的 artifact、linear 只可由明示離線指令使用；本 ADR 在那個契約上擴充，不改它。
