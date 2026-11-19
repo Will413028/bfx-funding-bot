@@ -19,11 +19,11 @@
 - 公開 `GET /v2/trades/f{SYM}/hist` 回傳全市場成交 `[ID, MTS, AMOUNT, RATE, PERIOD]`，fUST 有 2022-01 起的資料（實測，2026-11-15；已確認）。
 - AMOUNT 正負號＝主動成交方：負＝借方主動吃放貸掛單，正＝放貸方主動吃借方掛單（4 筆自己成交以 offer 掛出到成交時間差對照，2026-11-15；已確認，樣本小）。私有 `auth/r/funding/trades` 的 AMOUNT 恆正、MAKER 恆 null（實測，已確認）。規則寫在 `.claude/rules/bitfinex-venue.md` 的 PR #418（未合併；擋住步驟 3）。
 - 私有 funding trades 的 trade id 與公開成交紀錄的 ID 是同一個值：自己的 434229991、434203048、434032545、433811878 在公開 `/v2/trades/fUST/hist` 以 ID 直接找到（實測 2026-11-15；已確認），所以剔除自己成交可用 trade id join。
-- 公開成交紀錄的 trade id 是跨 symbol 共用的全域序號（推論，未實測；步驟 1 驗），同 symbol 相鄰 id 跳號不代表漏資料。
-- 密度：fUST 2022-01..2024-08 抽 6 天，每天 4.8k–32k 筆，p30 每天 0–414 筆，負號 93–99%（實測，已確認）。fUSD 未抽到（撞 429；未確認）。
-- `api-pub.bitfinex.com` 對 Python 預設 UA 回 403，需通用 UA；分頁連打約 30 次後 429（實測）。
+- 公開成交紀錄的 trade id 是跨 symbol 共用的全域序號，同 symbol 相鄰 id 跳號不代表漏資料（步驟 1 實測 2026-11-20：抽 59 天，fUSD／fUST 共用 id 0、每天交錯 ≥1,138 次；已確認）。同 symbol 依時間排序時 4.6–7.2% 的 id 往回跳，所以續抓游標用 MTS、不用 id（已確認）。
+- 密度（步驟 1 全量，2022-01-01..2026-11-15；已確認）：fUSD 1.03 億列、fUST 3,957 萬列；p30 每日中位數 fUSD 600、fUST 77，fUST 有 72 天沒有 p30 成交、最長 7.9 天；兩幣都沒有一整天無成交。細節見 `spike/report.md`。
+- `api-pub.bitfinex.com` 對 Python 預設 UA 回 403，需通用 UA（實測）。頻率限制：間隔 2.2 秒時 1,400 次請求被拒 380 次，15 秒時 1,950 次被拒 5 次，20 秒時 10,590 次被拒 0 次（步驟 1 實測；已確認）。超限時整個 IP 封鎖 60 秒，文件沒說是否波及私有 API；VM 與 live bot 共用出口 IP，所以 VM 上一律 20 秒間隔、第一次 429 就停（Bitfinex 文件 2026-11-19 讀；封鎖範圍未確認）。
 - 每週研究工作現有各步 timeout 合計 5100 秒，`TimeoutStartSec=5400` 只剩 300 秒（`deploy/vm/systemd/bfx-weekly-report.service:20-25` 註解；已確認 2026-11-15），新增步驟預期必須調高 `TimeoutStartSec`。
-- VM 磁碟剩 114G，DB 3.1 GB（實測 2026-11-15）。
+- VM 磁碟剩 144G（`df -h /`，2026-11-19），DB 3.1 GB（2026-11-15）；成交紀錄全量進 Postgres 約 19.5 GB（每列 137 B 用合成資料實測，乘上總列數為推論；步驟 1）。
 - book 成交模型每週已產出（`fill_rate_model_artifacts` source=book 24 份，2026-09-27..11-09），但 book 快照只從 2026-07-19 起（實測）。
 - 已報告的研究數字（期限回測 2026-09-22、OOS）用 `linear-baseline`（`backtest/period_structure.py:278`；已確認）。
 
@@ -51,7 +51,7 @@
 
 ## 步驟
 
-- [ ] **1. Spike：完整成交紀錄量測**（被擋於：無）
+- [x] **1. Spike：完整成交紀錄量測**（被擋於：無）——完成 2026-11-20，結果見 `spike/report.md`；照 Will 2026-11-15 的指示改在 VM 上抓，不在筆電抓
   - 範圍：唯讀腳本，fUSD 與 fUST 都從 2022-01-01 完整分頁抓到本機暫存目錄（資料不進 repo、不寫 DB）。輸出：每日筆數、各天期分桶筆數、正負號比例、時間空窗（同 symbol 相鄰成交間隔的分佈與最長空窗）、全域 id 序號假設的驗證（兩個 symbol 的 id 是否交錯）、總列數與估計 DB 大小、完整抓取耗時、一週增量的抓取秒數、429 次數。
   - 檔案：新增 `2026-11-15-trade-tape-research-method/spike/fetch_tape.py` 與 `spike/report.md`（commit）；抓下的資料不 commit。
   - 消費端：無（spike）。
@@ -60,12 +60,13 @@
   - 停止條件：任何 symbol 有超過 7 天沒有任何成交的空窗 → 回報，D1／D2 重評。
 
 - [ ] **2. 成交紀錄表與收集**（被擋於：D1、步驟 1）
+  - 步驟 1 給的數字：完整回補用 20 秒間隔約 3.5 天，必須可續跑；續抓游標用 MTS，同一 MTS 依 id 去重；在 VM 上一律 `--stop-on-429` 等價行為（第一次 429 就停，不重試）。
   - 範圍：新表（D1 決定形式；預設 `funding_public_trades`：symbol、trade_id、mts、amount（帶正負號）、rate、period，主鍵 (symbol, trade_id)，索引 (symbol, period, mts)）；migration 同時授權 `bfx_research` SELECT/INSERT 並更新鏡像測試；`scripts/ingest_public_trades.py`：從 DB 現況推導續抓起點，冪等（`ON CONFLICT DO NOTHING`），可中斷續跑，節流與 429 退避，通用 UA；每週工作在 `ingest_funding_stats` 之後加一步增量收集。
   - 消費端：`rg -n "funding_public_trades|ingest_public_trades" backend deploy`（新增，無既有消費端）；權限鏡像 `tests/integration/test_research_privilege_allowlist.py`。
   - 不能動：既有表與 `bfx_research` 其他權限。
   - 驗收：單元測試（分頁續抓起點、重跑不重複、429 退避、正負號原樣保存——把 `abs()` 加回去測試要失敗）；integration（migration up/down、權限 allowlist）由 CI 跑；`alembic check` 無 drift。
-  - 停止條件：步驟 1 估計大小超過 VM 剩餘磁碟 10% → 回報 D1。
-  - 每週增量步驟的 `timeout` 依步驟 1 的「一週增量秒數」×3 設定，同一個 PR 把 `TimeoutStartSec` 調到新合計＋300 秒餘裕，並同步改 unit 檔的預算註解；驗收核對 compose 各步 timeout 總和＋300 ≤ `TimeoutStartSec`。
+  - 停止條件：步驟 1 估計大小超過 VM 剩餘磁碟 10% → 回報 D1。（已觸發：19.5 GB／144 GB ≈ 13.5%，D1 重評中，步驟 2 等 D1。）
+  - 每週增量步驟的 `timeout` 依步驟 1 的「一週增量秒數」（794 秒）×3 ≈ 2,400 秒設定，同一個 PR 把 `TimeoutStartSec` 調到新合計＋300 秒餘裕，並同步改 unit 檔的預算註解；驗收核對 compose 各步 timeout 總和＋300 ≤ `TimeoutStartSec`。
   - 需要人做的事：發版（`dev`→`main` PR 合併＝部署，需 Will 核准）；發版後在 VM 用 weekly-report 的 compose（`bfx_research` role，`/opt/bfx/runtime/research.env`）以 `docker compose -f deploy/vm/ops/docker-compose.weekly-report.yml run --rm <service> python -m scripts.ingest_public_trades --from 2022-01-01` 跑完整回補；中斷後重跑同一指令，從 DB 現況續抓。
   - 完成後的狀態：回補完成前，步驟 3 只能用部分歷史。
 
@@ -107,10 +108,10 @@
 
 ## 決定
 
-- **D1 成交紀錄存哪裡**（狀態：未決；擋住步驟：2；需要的事實：步驟 1 的總列數與大小）
+- **D1 成交紀錄存哪裡**（狀態：未決；擋住步驟：2；步驟 1 的事實：1.43 億列，進 Postgres 約 19.5 GB，是現有 DB 3.1 GB 的 6 倍、VM 剩餘磁碟的 13.5%，觸發步驟 2 停止條件；部署前的備份與 restore test、R2 備份會一起變大）
   - A：Postgres 新表，走既有研究 role、備份與 migration——與其他研究資料同一套權限與查詢方式；代價是 DB 與 R2 備份變大（估數 GB 量級，待步驟 1）。（建議）
   - B：Parquet 檔放 VM 與 R2——大量歷史掃描較快、DB 不膨脹；代價是另一套存取與權限、研究容器要掛檔案、與現有 `FillRateModel` 從 DB 載入的路徑不同。
-- **D2 排隊量從哪來**（狀態：未決；擋住步驟：3；需要的事實：步驟 1 的 p30 密度）
+- **D2 排隊量從哪來**（狀態：未決；擋住步驟：3；步驟 1 的事實：p30 每日中位數 fUSD 600／fUST 77，fUST 有 72 天沒有 p30 成交、最長 7.9 天）
   - A：純 trade-through＋固定排隊比例參數，2026-07-19 之後用 book 快照校正該參數——全歷史都能用；代價是 2026-07 前排隊量是假設。（建議）
   - B：只用有 book 快照的期間（2026-07-19 起）做完整排隊模擬——最精確；代價是只有 4 個月歷史，回答不了 2022 起的期限問題。
   - C：參數化成交強度 λ(δ)=A·e^{−kδ}（做市文獻），稀疏桶用它平滑——樣本少時穩；代價是函數形式假設。可與 A 併用於 p30。
@@ -123,7 +124,7 @@
   - B：只用自己成交——最直接；代價是目前 64 筆，檢定力不足，且在達樣本下限前步驟 5 無法放行。
   - 兩案都要預登記 (b) 的樣本下限（建議：每個天期桶 ≥30 筆自己的成交）。
 
-拍板順序：D3 已拍（A）；D1、D2 等步驟 1 的數字；D4 等步驟 3。
+拍板順序：D3 已拍（A）；D1、D2 的事實已由步驟 1 給出（2026-11-20），可以拍板；D4 等步驟 3。
 
 ## 進度
 
@@ -131,7 +132,7 @@
 
 | 步驟 | 狀態 | 已跑的驗收 | 未跑的驗收與原因 | commit |
 |---|---|---|---|---|
-| 1 Spike 完整量測 | 未開始 | | | |
+| 1 Spike 完整量測 | 完成 | 全量抓取兩幣、`--summarize`、一週增量量測、PG18 每列大小；基線（`feaa9743`）：單元 5415 passed、mypy、ruff、quality ratchet 全綠 | 無 | 本 PR |
 | 2 表與收集 | 未開始 | | | |
 | 3 tape learner | 未開始 | | | |
 | 4 校準報告 | 未開始 | | | |
