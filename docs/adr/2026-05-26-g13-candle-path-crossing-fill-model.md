@@ -1,7 +1,7 @@
 ---
 title: G13 回測 fill model 改用 funding trade candle 的 path-crossing 實證模型，而非 order-book queue 或自有成交回饋
 date: 2026-05-26
-status: active
+status: "superseded-by: [2026-11-20-research-fills-by-trade-tape-replay-tape-as-daily-files](2026-11-20-research-fills-by-trade-tape-replay-tape-as-daily-files.md)"
 tags: [bfx-funding-bot, decision, backtesting, fill-model, bitfinex]
 related-commits:
   - 082a3ac                # spec
