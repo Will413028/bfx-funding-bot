@@ -59,6 +59,9 @@ DAY_MS = 86_400_000
 # A day is fetched only this long after it ended, so late-published trades are in.
 SETTLE_MS = 3_600_000
 TRANSIENT_RETRIES = 3
+# Consecutive failed days that end the run: a block that does not arrive as HTTP 429
+# (a WAF 403, an error body) must not keep hitting the shared IP for the whole timeout.
+MAX_CONSECUTIVE_FAILURES = 3
 
 Row = tuple[int, int, float, float, int]
 Fetch = Callable[[str, int, int], list[list[float | int]]]
@@ -189,8 +192,8 @@ def write_day(path: Path, rows: list[Row]) -> None:
     if path.exists():
         raise FileExistsError(path)
     temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_bytes(encode(rows))
     try:
+        temporary.write_bytes(encode(rows))
         os.link(temporary, path)  # fails if the day appeared meanwhile; never replaces
     finally:
         temporary.unlink()
@@ -234,6 +237,7 @@ def collect(root: Path, symbols: Sequence[str], *, start: date, fetch: Fetch,
         queues.append((symbol, sorted(missing_days(root, symbol, start, now_ms()), reverse=True)))
     order = [(symbol, days[i]) for i in range(max((len(d) for _, d in queues), default=0))
              for symbol, days in queues if i < len(days)]
+    streak = 0
     for index, (symbol, day) in enumerate(order):
         if index:
             sleep(pace_s)
@@ -242,7 +246,12 @@ def collect(root: Path, symbols: Sequence[str], *, start: date, fetch: Fetch,
         except DAY_ERRORS as exc:
             result.failed.append(f"{symbol} {day}: {exc.__class__.__name__}: {exc}")
             log(f"{symbol} {day} FAILED {exc.__class__.__name__}: {exc}")
+            streak += 1
+            if streak >= MAX_CONSECUTIVE_FAILURES:
+                log(f"{streak} days failed in a row: stopping (possible block on the shared IP)")
+                break
             continue
+        streak = 0
         write_day(day_path(root, symbol, day), rows)
         result.written[symbol] += 1
         log(f"{symbol} {day} rows={len(rows)}")
@@ -340,12 +349,15 @@ def http_fetch(symbol: str, start_ms: int, end_ms: int) -> list[list[float | int
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
                 payload = json.load(response)
+            if isinstance(payload, list) and payload[:1] == ["error"] \
+                    and "ratelimit" in str(payload).lower():
+                raise RateLimitedError(f"{symbol}: {str(payload)[:120]}")
             if not isinstance(payload, list) or (payload and payload[0] == "error"):
                 raise PayloadError(f"{symbol}: {str(payload)[:120]}")
             return payload
         except urllib.error.HTTPError as exc:
-            if exc.code == 429:
-                raise RateLimitedError(url) from None
+            if exc.code in (403, 429):  # 403: a WAF/IP block, same stop as a 429
+                raise RateLimitedError(f"HTTP {exc.code} {url}") from None
             if exc.code < 500 or attempt == TRANSIENT_RETRIES:
                 raise PayloadError(f"{symbol}: HTTP {exc.code}") from None
         except (urllib.error.URLError, TimeoutError):

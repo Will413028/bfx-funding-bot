@@ -323,3 +323,51 @@ def test_import_keeps_existing_files_and_refuses_bad_sources(tmp_path: Path) -> 
     truncated = [*_csv([trade(1, D1)]), "\n", f"12345,{ms(D1)}"]
     with pytest.raises(ValueError, match="malformed line 4"):
         tape.import_csv(tmp_path / "y", "fUST", truncated, now_ms=NOW, log=lambda _m: None)
+
+
+def test_consecutive_failed_days_stop_the_run(tmp_path: Path) -> None:
+    days = [D1 + timedelta(days=i) for i in range(6)]
+    now = at(days[-1] + timedelta(days=1), 12)
+    blocked: dict[int, Exception] = {ms(d): tape.PayloadError("blocked") for d in days}
+    venue = FakeVenue(daily(*days), fail=blocked)
+    result = run(tmp_path, venue, now=now)
+    assert len(venue.calls) == tape.MAX_CONSECUTIVE_FAILURES
+    assert len(result.failed) == tape.MAX_CONSECUTIVE_FAILURES
+
+
+def test_a_success_resets_the_failure_streak(tmp_path: Path) -> None:
+    days = [D1 + timedelta(days=i) for i in range(5)]
+    now = at(days[-1] + timedelta(days=1), 12)
+    # newest first: fail, fail, ok, fail, fail -> never three in a row
+    failing: dict[int, Exception] = {ms(d): tape.PayloadError("x") for d in (days[4], days[3], days[1], days[0])}
+    result = run(tmp_path, FakeVenue(daily(*days), fail=failing), now=now)
+    assert result.written == {"fUST": 1} and len(result.failed) == 4
+
+
+@pytest.mark.parametrize("code", [403, 429])
+def test_http_fetch_stops_on_a_block(monkeypatch: pytest.MonkeyPatch, code: int) -> None:
+    import urllib.error
+
+    def urlopen(request: object, timeout: float) -> object:
+        raise urllib.error.HTTPError("u", code, "blocked", Message(), None)
+
+    monkeypatch.setattr("urllib.request.urlopen", urlopen)
+    monkeypatch.setattr("time.sleep", lambda _s: pytest.fail("slept after a block"))
+    with pytest.raises(tape.RateLimitedError):
+        tape.http_fetch("fUST", 0, 1)
+
+
+def test_a_ratelimit_error_body_is_a_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    import io
+
+    class Response(io.BytesIO):
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_a: object) -> None:
+            return None
+
+    monkeypatch.setattr("urllib.request.urlopen",
+                        lambda *_a, **_k: Response(b'["error", 11010, "ratelimit: error"]'))
+    with pytest.raises(tape.RateLimitedError):
+        tape.http_fetch("fUST", 0, 1)
