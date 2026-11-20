@@ -16,7 +16,7 @@ It reports; it does not gate. A surviving mutant is a line the mirrored unit tes
 change, which is a question for the reviewer, not a verdict: the mutant may be equivalent, or
 an integration test may be what defends it (those are not run here). The exit code is 0 unless
 the script itself fails; a source it could not judge is named in the summary with the reason
-(its unit tests do not run it, or more than ``--max-mutants`` mutants would have to run). A
+(its unit tests do not run it). Past ``--max-mutants`` the rest are listed as not run. A
 mutant in code no unit test runs is counted apart, not as a survivor: nothing was tried on it.
 
 Usage (from ``backend/``):
@@ -64,6 +64,7 @@ class Judged:
     skipped: str = ""                       # why it was not judged; empty when it was
     unjudged: int = 0                       # mutants that timed out or crashed: neither killed nor survived
     not_run: int = 0                        # mutants in code no selected test runs; not in ``mutants``
+    over_limit: int = 0                     # mutants past ``--max-mutants``, never run; not in ``mutants``
     diffs: dict[str, str] = field(default_factory=dict)
 
 
@@ -164,13 +165,15 @@ def judge(source: Path, functions: Sequence[str], out_dir: Path, jobs: int,
     not_run = set(report["not_reached"])     # the matrix counts these as survived
     survived = tuple(mutant for mutant in report["survived"] if mutant not in not_run)
     unjudged = len(report["timed_out"]) + len(report["crashed"])    # not counted in "mutants"
-    if not_run and len(not_run) == int(report["mutants"]) and not unjudged:
+    over_limit = len(report.get("over_limit", []))                    # nor are these
+    if not_run and len(not_run) == int(report["mutants"]) and not unjudged and not over_limit:
         return Judged(source, tuple(report["functions"]), tests, not_run=len(not_run),
                       skipped=f"the unit tests under {tests} run none of these functions "
                               "(an integration test may)")
     return Judged(source, tuple(report["functions"]), tests, survived,
                   int(report["killed"]), int(report["mutants"]) - len(not_run),
-                  diffs=dict(report["survivor_diffs"]), not_run=len(not_run), unjudged=unjudged)
+                  diffs=dict(report["survivor_diffs"]), not_run=len(not_run), unjudged=unjudged,
+                  over_limit=over_limit)
 
 
 def _cell(text: str) -> str:
@@ -200,6 +203,7 @@ def render(judged: Sequence[Judged], not_started: Sequence[Path], base: str) -> 
             total = item.mutants + item.unjudged
             hung = f" ({item.unjudged} timed out or crashed)" if item.unjudged else ""
             hung += f" ({item.not_run} more in code these tests do not run)" if item.not_run else ""
+            hung += f" ({item.over_limit} more over the limit, not run)" if item.over_limit else ""
             lines.append(f"| `{item.source}` | {names} | `{item.tests}` | {item.killed}/{total}{hung} "
                          f"| {len(item.survived)} |")
     for path in not_started:
@@ -228,7 +232,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--budget-seconds", type=float, default=900.0,
                         help="start no further file once this much time has passed (default 900)")
     parser.add_argument("--max-mutants", type=int, default=400,
-                        help="do not judge a file with more mutants to run than this (default 400)")
+                        help="run at most this many mutants per file; the rest are listed as not run (default 400)")
     args = parser.parse_args(argv)
     out_dir = args.out_dir or args.summary.parent
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -255,7 +259,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _write_json(out_dir: Path, judged: Sequence[Judged], not_started: Sequence[Path]) -> None:
     (out_dir / "mutation-changed.json").write_text(json.dumps(
         [{"source": str(j.source), "functions": list(j.functions), "tests": str(j.tests) if j.tests else None,
-          "killed": j.killed, "mutants": j.mutants, "unjudged": j.unjudged, "not_run": j.not_run,
+          "killed": j.killed, "mutants": j.mutants, "unjudged": j.unjudged, "not_run": j.not_run, "over_limit": j.over_limit,
           "survived": list(j.survived),
           "skipped": j.skipped}
          for j in judged] + [{"source": str(p), "skipped": "time budget"} for p in not_started],

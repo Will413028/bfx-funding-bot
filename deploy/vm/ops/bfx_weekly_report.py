@@ -23,9 +23,15 @@ One run:
      is never read, and a missing research.env stops the run;
   4. the reports directory must already exist (a real directory, not a
      symlink): Compose 2.x and v5 disagree on how an unset create_host_path
-     reads, so the runner, not Docker, guarantees nothing gets created;
-  5. `docker compose -p bfx-weekly-report -f <that file> run --rm weekly-report`,
-     output streamed to the journal. systemd's TimeoutStartSec bounds the run;
+     reads, so the runner, not Docker, guarantees nothing gets created. The
+     trade tape directory is created by the runner itself when missing (owned by
+     the image's uid 1000, mode 0775), so a release does not wait on a manual
+     step; a symlink there stops the run;
+  5. `docker compose -p bfx-weekly-report -f <that file> run --rm tape-ingest`
+     (the trade tape's daily files; its step is fail-soft inside the container
+     and a non-zero exit here only logs a warning), then the same with
+     `weekly-report`, output streamed to the journal. systemd's TimeoutStartSec
+     bounds the run;
   6. on exit 0, the heartbeat /var/lib/bfx-ops/weekly-report-heartbeat.json, which
      bfx-backup-check reads while bfx-weekly-report.timer is enabled. A failed run
      leaves the old heartbeat (and alerts through OnFailure=bfx-alert@).
@@ -76,6 +82,17 @@ SECRET_KEYS = ("DATABASE_URL", "BFX_EXCHANGE_ACCOUNT_ID")
 SECRET_FILE = "research.env"
 # The bind source in docker-compose.weekly-report.yml (compose_policy.WEEKLY_REPORTS).
 REPORTS_DIR = Path("/home/ubuntu/bfx/reports")
+# The tape-ingest bind source (compose_policy.WEEKLY_TAPE); runs before SERVICE.
+TAPE_DIR = Path("/home/ubuntu/bfx/tape")
+TAPE_SERVICE = "tape-ingest"
+TAPE_OWNER = (1000, 1001)  # image appuser, ubuntu group (as the reports directory)
+
+
+def ensure_tape_dir(path: Path) -> None:
+    """Create the tape directory for uid 1000 if it is missing (root only)."""
+    path.mkdir(mode=0o775)
+    os.chown(path, *TAPE_OWNER)
+    path.chmod(0o775)  # mkdir's mode is masked by UMask=0077
 # Read by bfx_backup_check.py --weekly-heartbeat; StateDirectory of both units.
 HEARTBEAT = Path("/var/lib/bfx-ops/weekly-report-heartbeat.json")
 
@@ -95,17 +112,23 @@ class Plan:
     # bfx_public_site.py runs its own one-shot build through the same plan.
     project: str = PROJECT
     service: str = SERVICE
+    # Run first, each to completion; a failure is logged and the run goes on.
+    pre_services: tuple[str, ...] = ()
+
+    def argv_for(self, service: str) -> list[str]:
+        return ["docker", "compose", "-p", self.project, "-f", str(self.compose_file),
+                "run", "--rm", service]
 
     @property
     def argv(self) -> list[str]:
-        return ["docker", "compose", "-p", self.project, "-f", str(self.compose_file),
-                "run", "--rm", self.service]
+        return self.argv_for(self.service)
 
     def describe(self) -> dict[str, object]:
         return {"compose_file": str(self.compose_file), "tooling_revision": self.tooling_revision,
                 "deployed_revision": self.deployed_revision, "backend_image": self.backend_image,
                 "steps_match_deployed_release": self.tooling_revision == self.deployed_revision,
                 "env_keys": sorted(k for k in self.env if k in SECRET_KEYS),
+                "pre_argvs": [self.argv_for(s) for s in self.pre_services],
                 "argv": self.argv}
 
 
@@ -139,12 +162,23 @@ def build_plan(
     backend_repository: str, secret_check: Callable[[Path], None],
     reports_dir: Path = REPORTS_DIR, compose_name: str = COMPOSE_FILE,
     project: str = PROJECT, service: str = SERVICE,
+    tape_dir: Path | None = TAPE_DIR, pre_services: tuple[str, ...] = (TAPE_SERVICE,),
+    make_tape_dir: Callable[[Path], None] = ensure_tape_dir,
 ) -> Plan:
+    """`tape_dir=None, pre_services=()` for a job without the trade tape (the public site)."""
     compose_file = ops_dir / compose_name
     if not compose_file.is_file():
         raise DeployError("weekly_compose_missing")
     if reports_dir.is_symlink() or not reports_dir.is_dir():
         raise DeployError("reports_dir_missing")
+    if tape_dir is not None:
+        if tape_dir.is_symlink() or (tape_dir.exists() and not tape_dir.is_dir()):
+            raise DeployError("tape_dir_not_a_directory")
+        if not tape_dir.exists():
+            try:
+                make_tape_dir(tape_dir)
+            except OSError as exc:
+                raise DeployError(f"tape_dir_unusable:{exc.__class__.__name__}") from None
     revision = tooling_revision(ops_dir)
     view = ledger.read()
     deployed = view.last_success if view.exists else None
@@ -164,7 +198,8 @@ def build_plan(
     }
     return Plan(compose_file=compose_file, tooling_revision=revision,
                 deployed_revision=deployed.source_revision, backend_digest=digest,
-                backend_image=image, env=env, project=project, service=service)
+                backend_image=image, env=env, project=project, service=service,
+                pre_services=pre_services)
 
 
 def write_heartbeat(path: Path, plan: Plan, *, now: float) -> None:
@@ -189,6 +224,10 @@ def run(
     if execute is None:
         def execute(argv: list[str], env: Mapping[str, str]) -> int:
             return subprocess.run(argv, env=dict(env), check=False).returncode
+    for service in plan.pre_services:
+        pre = execute(plan.argv_for(service), plan.env)
+        if pre != 0:
+            log(f"warning: {service} exited {pre}; running {plan.service} anyway")
     returncode = execute(plan.argv, plan.env)
     log(f"finished with exit code {returncode}")
     if returncode == 0:

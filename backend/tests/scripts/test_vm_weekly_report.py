@@ -176,7 +176,7 @@ REMOVALS: dict[str, Callable[[dict[str, Any]], None]] = {
     "no_container_name": lambda s: s.__setitem__("container_name", "bfx-bot"),
     "no_pid": lambda s: s.__setitem__("pid", "host"),
     "tmpfs": lambda s: s.__setitem__("tmpfs", ["/tmp:rw,exec"]),
-    "reports_mount": lambda s: s["volumes"].append(
+    "no_extra_volumes": lambda s: s["volumes"].append(
         {"type": "bind", "source": "/", "target": "/host"}),
     "network": lambda s: s["networks"].__setitem__("other", {}),
     "runtime_env": lambda s: s["environment"].pop("BFX_EXCHANGE_ACCOUNT_ID"),
@@ -201,12 +201,17 @@ REPORTS_MOUNT_V5 = {"type": "bind", "source": "/home/ubuntu/bfx/reports", "targe
                     "bind": {"create_host_path": False}}
 REPORTS_MOUNT_V2 = {"type": "bind", "source": "/home/ubuntu/bfx/reports", "target": "/reports",
                     "bind": {}}
+TAPE_MOUNT = {"type": "bind", "source": "/home/ubuntu/bfx/tape", "target": "/tape",
+              "bind": {"create_host_path": False}}
+TAPE_MOUNT_RO = {**TAPE_MOUNT, "read_only": True}
 
 
 def test_the_file_pins_create_host_path_false() -> None:
-    (mount,) = COMPOSE["services"]["weekly-report"]["volumes"]
-    assert mount == REPORTS_MOUNT_V5
+    assert COMPOSE["services"]["weekly-report"]["volumes"] == [REPORTS_MOUNT_V5, TAPE_MOUNT_RO]
+    assert COMPOSE["services"]["tape-ingest"]["volumes"] == [TAPE_MOUNT]
     assert Path(policy.WEEKLY_REPORTS["source"]) == weekly.REPORTS_DIR
+    assert Path(policy.WEEKLY_TAPE["source"]) == weekly.TAPE_DIR
+    assert policy.TAPE_SERVICE == weekly.TAPE_SERVICE
 
 
 @needs_compose
@@ -214,7 +219,7 @@ def test_the_file_pins_create_host_path_false() -> None:
                          ids=["compose-v5", "compose-v2.38"])
 def test_both_compose_renderings_of_the_mount_pass(rendered: dict[str, Any], mount: dict[str, Any]) -> None:
     shaped = copy.deepcopy(rendered)
-    shaped["services"]["weekly-report"]["volumes"] = [copy.deepcopy(mount)]
+    shaped["services"]["weekly-report"]["volumes"] = [copy.deepcopy(mount), dict(TAPE_MOUNT_RO)]
     assert policy.weekly_violations(shaped) == []
     without_bind = {k: v for k, v in mount.items() if k != "bind"}
     assert policy.reports_mount_ok(without_bind)
@@ -322,16 +327,19 @@ def host(tmp_path: Path) -> dict[str, Path]:
         "BFX_VAULT_KEK=never-leaves-bot-env\nBFX_ADMIN_TOKEN=also-not\n")
     reports = tmp_path / "reports"
     reports.mkdir()
+    tape = tmp_path / "tape"
+    tape.mkdir()
     state = tmp_path / "state"
     for revision in (REV, OLD_REV):
         (state / "releases" / revision).mkdir(parents=True)
-    return {"ops": release / "ops", "runtime": runtime, "state": state, "reports": reports}
+    return {"ops": release / "ops", "runtime": runtime, "state": state, "reports": reports,
+            "tape": tape}
 
 
 def _plan(host: dict[str, Path], ledger: FakeLedger, checked: list[Path] | None = None) -> Any:
     return weekly.build_plan(
         ops_dir=host["ops"], ledger=ledger, runtime_dir=host["runtime"],
-        backend_repository=BACKEND, reports_dir=host["reports"],
+        backend_repository=BACKEND, reports_dir=host["reports"], tape_dir=host["tape"],
         secret_check=(checked.append if checked is not None else lambda _path: None))
 
 
@@ -343,9 +351,10 @@ def test_plan_runs_the_deployed_digest_with_only_the_needed_env(host: dict[str, 
     plan = _plan(host, ledger, checked)
     assert checked == [host["runtime"] / "research.env"]  # root 0600, as bfx-deploy checks it
     assert plan.backend_image == f"{BACKEND}@{DIGEST}"
-    assert plan.argv == ["docker", "compose", "-p", "bfx-weekly-report", "-f",
-                         str(host["ops"] / "docker-compose.weekly-report.yml"),
-                         "run", "--rm", "weekly-report"]
+    compose = ["docker", "compose", "-p", "bfx-weekly-report", "-f",
+               str(host["ops"] / "docker-compose.weekly-report.yml"), "run", "--rm"]
+    assert plan.argv == [*compose, "weekly-report"]
+    assert plan.describe()["pre_argvs"] == [[*compose, "tape-ingest"]]
     assert plan.env["DATABASE_URL"] == "postgresql://bfx_research:pw$x@bfx-postgres:5432/bfx"  # literal
     assert plan.env["BFX_EXCHANGE_ACCOUNT_ID"] == "00000000-0000-4000-8000-000000000001"
     assert "BFX_DEPLOYMENT_ENV" not in plan.env  # no one-shot job reads it
@@ -366,7 +375,7 @@ def test_steps_stay_with_the_installed_tooling_when_it_lags_the_deploy(
     assert plan.tooling_revision == OLD_REV and plan.deployed_revision == REV
     calls: list[tuple[list[str], Mapping[str, str]]] = []
     assert weekly.run(plan, execute=lambda argv, env: calls.append((argv, env)) or 7) == 7
-    assert calls == [(plan.argv, plan.env)]
+    assert calls == [(plan.argv_for("tape-ingest"), plan.env), (plan.argv, plan.env)]
     assert "warning: steps from tooling release" in capsys.readouterr().err
 
 
@@ -401,6 +410,9 @@ def test_heartbeat_path_is_the_one_backup_check_defaults_to() -> None:
     (lambda h, ledger: h["reports"].rmdir(), "reports_dir_missing"),
     (lambda h, ledger: (h["reports"].rmdir(), h["reports"].symlink_to(h["state"])),
      "reports_dir_missing"),
+    (lambda h, ledger: (h["tape"].rmdir(), h["tape"].symlink_to(h["state"])),
+     "tape_dir_not_a_directory"),
+    (lambda h, ledger: (h["tape"].rmdir(), h["tape"].write_text("x")), "tape_dir_not_a_directory"),
 ])
 def test_plan_refuses_instead_of_guessing(
     host: dict[str, Path], mutate: Callable[[dict[str, Path], FakeLedger], object], code: str,
@@ -418,7 +430,7 @@ def _checked_plan(host: dict[str, Path]) -> Any:
     return weekly.build_plan(
         ops_dir=host["ops"], ledger=FakeLedger([(REV, DIGEST, "deployed")]),
         runtime_dir=host["runtime"], backend_repository=BACKEND,
-        reports_dir=host["reports"],
+        reports_dir=host["reports"], tape_dir=host["tape"],
         secret_check=lambda path: bfx.protected_secret_file(path, owner_uid=uid))
 
 
@@ -460,3 +472,113 @@ def test_defaults_are_the_deployers() -> None:
     defaults = bfx.Settings()
     assert (args.runtime_dir, args.backend_repository, args.postgres_container) == (
         defaults.runtime_dir, defaults.backend_repository, defaults.postgres_container)
+
+
+# --------------------------------------------------------------------------- trade tape (plan 2026-11-15 step 2)
+
+
+def test_tape_ingest_step_is_the_paced_fail_soft_collector() -> None:
+    command = COMPOSE["services"]["tape-ingest"]["command"]
+    assert command[:2] == ["sh", "-c"]
+    (step,) = command[2].splitlines()
+    assert step.startswith("timeout 2400 python -m scripts.ingest_public_trades --tape-root /tape ")
+    assert "--pace" not in step  # the script's 20 s default, never faster
+    assert step.endswith('finished days kept; next run resumes — non-blocking)"')
+    assert "exit $$?" in step  # the WARN names the real exit code
+
+
+def _timeouts(service: str) -> list[int]:
+    return [int(t) for t in re.findall(r"^timeout (\d+) ", COMPOSE["services"][service]["command"][2],
+                                       flags=re.M)]
+
+
+def test_every_step_timeout_fits_the_unit_budget() -> None:
+    unit = (ROOT / "deploy/vm/systemd/bfx-weekly-report.service").read_text(encoding="utf-8")
+    match = re.search(r"(?m)^TimeoutStartSec=(\d+)$", unit)
+    assert match is not None
+    budget = int(match.group(1))
+    total = sum(_timeouts("weekly-report")) + sum(_timeouts("tape-ingest"))
+    assert total + 300 <= budget
+    assert f"合計 {total}" in unit  # the unit's budget comment stays in sync
+    assert _timeouts("tape-ingest") == [2400]  # 3x the measured 794 s weekly increment
+
+
+@needs_compose
+def test_research_service_cannot_write_the_tape(rendered: dict[str, Any]) -> None:
+    broken = copy.deepcopy(rendered)
+    for volume in broken["services"]["weekly-report"]["volumes"]:
+        if volume["target"] == "/tape":
+            volume.pop("read_only", None)
+    assert "weekly-report:tape_mount_read_only" in policy.weekly_violations(broken)
+
+
+@needs_compose
+@pytest.mark.parametrize("change", [
+    lambda s: s["volumes"][0].__setitem__("read_only", True),
+    lambda s: s["volumes"].append(dict(REPORTS_MOUNT_V5)),
+    lambda s: s["volumes"].clear(),
+], ids=["read-only", "reports-too", "none"])
+def test_tape_ingest_writes_only_the_tape(rendered: dict[str, Any], change: Callable[..., Any]) -> None:
+    broken = copy.deepcopy(rendered)
+    change(broken["services"]["tape-ingest"])
+    found = policy.weekly_violations(broken)
+    assert {"tape-ingest:tape_mount", "tape-ingest:no_extra_volumes"} & set(found), found
+
+
+@needs_compose
+@pytest.mark.parametrize("key", ["DATABASE_URL", "BFX_EXCHANGE_ACCOUNT_ID"])
+def test_tape_ingest_gets_no_database_identity(rendered: dict[str, Any], key: str) -> None:
+    assert key not in rendered["services"]["tape-ingest"]["environment"]
+    broken = copy.deepcopy(rendered)
+    broken["services"]["tape-ingest"]["environment"][key] = "x"
+    assert "tape-ingest:no_database_env" in policy.weekly_violations(broken)
+
+
+@needs_compose
+def test_tape_ingest_keeps_the_hardening(rendered: dict[str, Any]) -> None:
+    for prop, remove in REMOVALS.items():
+        if prop == "runtime_env":
+            continue
+        broken = copy.deepcopy(rendered)
+        remove(broken["services"]["tape-ingest"])
+        assert f"tape-ingest:{prop}" in policy.weekly_violations(broken), prop
+
+
+def test_a_failed_tape_ingest_is_logged_and_the_report_still_runs(
+    host: dict[str, Path], tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    plan = _plan(host, FakeLedger([(REV, DIGEST, "deployed")]))
+    calls: list[list[str]] = []
+
+    def execute(argv: list[str], env: Mapping[str, str]) -> int:
+        calls.append(argv)
+        return 1 if argv[-1] == "tape-ingest" else 0
+
+    assert weekly.run(plan, execute=execute, heartbeat=tmp_path / "hb.json") == 0
+    assert [c[-1] for c in calls] == ["tape-ingest", "weekly-report"]
+    assert "warning: tape-ingest exited 1" in capsys.readouterr().err
+
+
+def test_a_missing_tape_dir_is_created_not_a_reason_to_skip_the_report(host: dict[str, Path]) -> None:
+    host["tape"].rmdir()
+    made: list[Path] = []
+    weekly.build_plan(
+        ops_dir=host["ops"], ledger=FakeLedger([(REV, DIGEST, "deployed")]),
+        runtime_dir=host["runtime"], backend_repository=BACKEND, reports_dir=host["reports"],
+        tape_dir=host["tape"], secret_check=lambda _p: None,
+        make_tape_dir=lambda p: (made.append(p), p.mkdir()))
+    assert made == [host["tape"]] and host["tape"].is_dir()
+
+
+def test_tape_dir_creation_failure_is_named(host: dict[str, Path]) -> None:
+    host["tape"].rmdir()
+
+    def denied(_p: Path) -> None:
+        raise PermissionError
+
+    with pytest.raises(bfx.DeployError) as excinfo:
+        weekly.build_plan(
+            ops_dir=host["ops"], ledger=FakeLedger([(REV, DIGEST, "deployed")]),
+            runtime_dir=host["runtime"], backend_repository=BACKEND, reports_dir=host["reports"],
+            tape_dir=host["tape"], secret_check=lambda _p: None, make_tape_dir=denied)
+    assert excinfo.value.code == "tape_dir_unusable:PermissionError"

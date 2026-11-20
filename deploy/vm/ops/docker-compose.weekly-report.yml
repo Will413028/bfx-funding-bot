@@ -23,6 +23,13 @@
 # the only writable paths are a small /tmp and the reports bind mount. CI renders
 # this file and enforces it with compose_policy.py --kind weekly-report.
 #
+# Two services. `tape-ingest` runs first (bfx_weekly_report.py starts it before
+# `weekly-report`): it appends the public funding trade tape as one gzip CSV per
+# finished UTC day under /home/ubuntu/bfx/tape (plan 2026-11-15 step 2, ADR
+# 2026-11-20; research input only, the live bot never reads it). It is the only
+# service that can write the tape directory, holds no database URL, and its step is
+# fail-soft. `weekly-report` mounts the same directory read-only.
+#
 # Steps: ① funding_stats forward-fill (AlwaysFRR arm data) ② attribution rows ③
 # realized interest ④ G3 report ⑤ delivery metrics, then the research re-validation
 # (the public proof site builds in its own unit, bfx-public-site.service). Step ① failing
@@ -67,6 +74,13 @@ services:
         target: /reports
         bind:
           create_host_path: false
+      # Read-only here: only tape-ingest writes the tape (compose_policy checks both).
+      - type: bind
+        source: /home/ubuntu/bfx/tape
+        target: /tape
+        read_only: true
+        bind:
+          create_host_path: false
     command:
       - sh
       - -c
@@ -87,6 +101,46 @@ services:
         timeout 600 python -m scripts.run_oos_profitability --output "/reports/$$(date +%F)-oos-profitability.md" || echo "WARN run_oos_profitability failed (non-blocking)"
         python -m scripts.diff_research_report --kind period-structure --glob "/reports/*-period-structure-book.json" --out "/reports/$$(date +%F)-weekly-research-book.md" || echo "WARN diff (book) failed (non-blocking)"
         python -m scripts.diff_research_report --kind oos --glob "/reports/*-oos-profitability.json" --out "/reports/$$(date +%F)-weekly-research-oos.md" || echo "WARN diff (oos) failed (non-blocking)"
+    networks:
+      bfx_default: {}
+
+  tape-ingest:
+    image: ${BFX_BACKEND_IMAGE:?BFX_BACKEND_IMAGE must be a repository@sha256 reference}
+    pull_policy: never
+    entrypoint: []
+    user: "1000:1000"
+    working_dir: /app
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: "no"
+    environment:
+      BFX_IMAGE_DIGEST: ${BFX_BACKEND_DIGEST:?BFX_BACKEND_DIGEST is required}
+      BFX_SOURCE_REVISION: ${BFX_SOURCE_REVISION:?BFX_SOURCE_REVISION is required}
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: ""
+      PYTHONHOME: ""
+      PYTHONUSERBASE: ""
+      LD_PRELOAD: ""
+      LD_LIBRARY_PATH: ""
+      LD_AUDIT: ""
+    volumes:
+      # Created by the runner (uid 1000, 0775) when missing, never by Docker.
+      - type: bind
+        source: /home/ubuntu/bfx/tape
+        target: /tape
+        bind:
+          create_host_path: false
+    # One public request every 20 s, stop on the first 429 (the VM shares its egress
+    # IP with the live bot). A week of both symbols measured 794 s (step 1 spike);
+    # the timeout is 3x that. A killed run leaves only finished days.
+    command:
+      - sh
+      - -c
+      - |
+        timeout 2400 python -m scripts.ingest_public_trades --tape-root /tape --symbols fUSD,fUST || echo "WARN ingest_public_trades exit $$? (3=429 stop, 5=failed days, 7=locked, 124=timeout; finished days kept; next run resumes — non-blocking)"
     networks:
       bfx_default: {}
 

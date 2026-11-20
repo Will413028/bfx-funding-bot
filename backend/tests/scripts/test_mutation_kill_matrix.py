@@ -165,3 +165,48 @@ def test_the_command_line_passes_the_named_functions_on(tmp_path: Path, monkeypa
     assert seen[0][-1] == ["a", "B.c"]
     assert matrix.main(["--source", source, "--out", str(out), "--", "tests/x.py"]) == 0
     assert seen[1][-1] == []
+
+
+def _fake_build_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, names: list[str],
+                    survivors: set[str]) -> list[list[str]]:
+    """``build`` with mutmut and pytest replaced: every mutant is reached except those of
+    ``x_cold``, and a mutant survives when it is in ``survivors``. Returns the lists of
+    mutants ``survivor_diffs`` was asked for."""
+    asked: list[list[str]] = []
+    reached = sorted({matrix.function_of_mutant(name) for name in names} - {"m.x_cold"})
+    monkeypatch.setattr(matrix.sandbox, "copy_repository", lambda copy: copy.mkdir())
+    monkeypatch.setattr(matrix.sandbox, "digest", lambda sources: "same")
+    monkeypatch.setattr(matrix, "_mutate", lambda copy, sources, module_name: names)
+    monkeypatch.setattr(matrix, "_baseline", lambda copy, selection, workdir: {"tests/t.py::test_a": reached})
+    monkeypatch.setattr(matrix, "_pytest", lambda *args, **kwargs: object())
+    monkeypatch.setattr(matrix, "read_report", lambda report: matrix.Run(frozenset({"tests/t.py::test_a"}),
+                                                                          frozenset()))
+    monkeypatch.setattr(matrix, "_judge", lambda copy, workdir, name, tests, timeout: matrix.Run(
+        frozenset() if name in survivors else frozenset({"tests/t.py::test_a"}), frozenset()))
+    monkeypatch.setattr(matrix, "survivor_diffs",
+                        lambda copy, sources, module_name, survived: asked.append(list(survived)) or {})
+    return asked
+
+
+def test_build_runs_up_to_the_limit_taking_each_function_in_turn(tmp_path: Path,
+                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
+    names = [f"m.x_{f}__mutmut_{n}" for f in ("a", "b", "cold") for n in (1, 2, 3)]
+    _fake_build_run(tmp_path, monkeypatch, names, set())
+    report = matrix.build([Path("backend/src/m.py")], ["tests"], 2, tmp_path / "r.json", max_mutants=4)
+    # Unreached mutants cost nothing and do not count; of the six reached, four run, two of each.
+    assert report["not_reached"] == ["m.x_cold__mutmut_1", "m.x_cold__mutmut_2", "m.x_cold__mutmut_3"]
+    assert report["over_limit"] == ["m.x_a__mutmut_3", "m.x_b__mutmut_3"]
+    assert report["killed"] == 4
+    assert set(report["survived"]) == set(report["not_reached"])     # the matrix's own convention
+    unlimited = matrix.build([Path("backend/src/m.py")], ["tests"], 2, tmp_path / "r.json", max_mutants=6)
+    assert (unlimited["over_limit"], unlimited["killed"]) == ([], 6)
+
+
+def test_build_asks_for_diffs_of_run_survivors_only_up_to_max_diffs(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    names = [f"m.x_{f}__mutmut_{n}" for f in ("a", "cold") for n in (1, 2, 3)]
+    asked = _fake_build_run(tmp_path, monkeypatch, names, {"m.x_a__mutmut_1", "m.x_a__mutmut_3"})
+    matrix.build([Path("backend/src/m.py")], ["tests"], 2, tmp_path / "r.json",
+                 show_survivors=True, max_diffs=1)
+    matrix.build([Path("backend/src/m.py")], ["tests"], 2, tmp_path / "r.json", show_survivors=True)
+    assert asked == [["m.x_a__mutmut_1"], ["m.x_a__mutmut_1", "m.x_a__mutmut_3"]]
