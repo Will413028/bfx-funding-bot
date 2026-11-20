@@ -79,7 +79,7 @@
   - 停止條件：(0) 自己成交有一半以上找不到當初的 offer 期限 → 回報，第 1 項改找其他來源；(1) PERIOD 語意兩種解讀都對不上 → 回報，replay 的期限相容規則重評；(2) 我方金額超過該期限每日借方成交量 p10 的 10% → 回報，replay 要加市場衝擊；(3) 自己成交在公開紀錄找不到的比例 > 5% → 回報完整性問題；(4) 外推的每週 replay 耗時超過 1,800 秒 → 回報，評估 Parquet（延後項）。
   - 需要人做的事：第 1、4 項要對正式 DB 跑一個唯讀查詢（`funding_trades` 與 offer 期限），執行前取得 Will 核准。
 
-- [ ] **2. 成交紀錄每日檔案與收集**（被擋於：步驟 1b）——程式完成待驗收 2026-11-20：剩發版與 VM 上的匯入、抽查（見進度表）
+- [x] **2. 成交紀錄每日檔案與收集**（被擋於：步驟 1b）——完成 2026-11-20：發版 PR #428（部署 `ede0482b`），VM 上匯入、抽查、補抓見進度表
   - 檔案：新增 `backend/scripts/ingest_public_trades.py` 與其測試；修改 `deploy/vm/ops/docker-compose.weekly-report.yml`、`deploy/vm/ops/compose_policy.py`（新 service 的可寫掛載）、`deploy/vm/ops/bfx_weekly_report.py`（掛載存在檢查）、`deploy/vm/systemd/bfx-weekly-report.service`、`backend/tests/scripts/test_vm_weekly_report.py` 與 compose policy 的測試。
   - 範圍：`backend/scripts/ingest_public_trades.py`：輸出 `<root>/<symbol>/<YYYY-MM-DD>.csv.gz`（欄位 `id,mts,amount,rate,period`，amount 帶正負號），一天結束後才寫入該日檔；從目錄現況推導要補哪些日子，冪等（重抓一天，筆數與內容雜湊相同就不動，不同就報錯不覆蓋），可中斷續跑；續抓游標用 MTS、同一 MTS 依 id 去重；20 秒間隔、第一次 429 就停、通用 UA。不另存 R2（D5＝A）：VM 上的日檔是唯一副本，VM 毀損時從 API 重抓。收集跑在每週 compose 的另一個 service（只有它以可寫掛載這個目錄），在研究 service 之前執行；研究 service 以唯讀掛載同一目錄；兩者都沿用唯讀 rootfs，`compose_policy.py --kind weekly-report` 增加這個掛載的允許規則。
   - 消費端：`rg -ln "weekly-report|compose_policy|TimeoutStartSec|reports_mount" deploy backend/tests docs/runbooks`（每週工作的結構與預算）；新名字 `rg -n "ingest_public_trades|tape_root" backend deploy`。
@@ -156,7 +156,7 @@
 |---|---|---|---|---|
 | 1 Spike 完整量測 | 完成 | 全量抓取兩幣、`--summarize`、一週增量量測、PG18 每列大小；基線（`feaa9743`）：單元 5415 passed、mypy、ruff、quality ratchet 全綠 | 無 | PR #423 |
 | 1b replay 前置事實 | 完成 | 正式 DB 唯讀匯出（Will 核准）、`period_join.py`、`replay_cost.py` 兩幣；停止條件 (0) 觸發，Will 選 A | 無 | 本 PR |
-| 2 每日檔案與收集 | 程式完成待驗收 | 單元 5469 passed（`-n auto`）、`mypy src/`、ruff、quality ratchet；mutation 27 個全殺（`abs()` 加回、研究 service 可寫 tape、未結束當日寫檔、429/403/ratelimit body 重試、同 MTS 去重、覆寫既有日檔、空日寫檔、匯入頭尾日、缺鎖、連續失敗不停等）；compose policy 測試以本機 docker compose render；`/code-review` 與契約審查兩輪：findings 13（blocking 1），fixed 11、recorded 2（nit：`--dry-run` 也會建 tape 目錄；chown 失敗會留下 root 擁有的目錄），rejected 0 | 發版後 VM 上的 `--import-csv` 匯入與 `--verify` 抽 3 天（要部署，需 Will 核准）；integration 由 CI 跑 | `90058697`..`55df30e2` |
+| 2 每日檔案與收集 | 完成 | 單元 5469 passed（`-n auto`）、`mypy src/`、ruff、quality ratchet；mutation 27 個全殺（`abs()` 加回、研究 service 可寫 tape、未結束當日寫檔、429/403/ratelimit body 重試、同 MTS 去重、覆寫既有日檔、空日寫檔、匯入頭尾日、缺鎖、連續失敗不停等）；compose policy 測試以本機 docker compose render；`/code-review` 與契約審查兩輪：findings 13（blocking 1），fixed 11、recorded 2（nit：`--dry-run` 也會建 tape 目錄；chown 失敗會留下 root 擁有的目錄），rejected 0 ；CI（含 integration）綠；發版 PR #428 部署 `ede0482b`（`migrations=none`，ledger #530）；VM 上 `--import-csv` 兩幣各 1,778 天（2022-01-02..2026-11-14，來源頭尾日依設計不寫），`--verify` 抽 2022-06-15、2024-09-03、2026-11-14 兩幣 6 個日檔全部一致，再以收集補上 2022-01-01 與 2026-11-15..19；目前兩幣各 1,784 天、無缺日，共 1.2 GB | 每週 `tape-ingest` 的第一次實跑（下週一 04:17 UTC） | PR #427、#428 |
 | 3 replay 引擎 | 未開始 | | | |
 | 4 replay 驗證 | 未開始 | | | |
 | 5 刪期望值記帳與 linear | 未開始 | | | |
