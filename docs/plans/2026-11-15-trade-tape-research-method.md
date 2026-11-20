@@ -22,8 +22,8 @@
 - 公開 `GET /v2/trades/f{SYM}/hist` 回傳全市場成交 `[ID, MTS, AMOUNT, RATE, PERIOD]`，fUSD／fUST 有 2022-01 起的完整資料，沒有一天無成交（步驟 1 實測，2026-11-20；已確認）。
 - AMOUNT 正負號＝主動成交方：負＝借方主動吃放貸掛單，正＝放貸方主動吃借方掛單（4 筆自己成交對照，2026-11-15；已確認，樣本小）。規則在 `.claude/rules/bitfinex-venue.md`（PR #418，已合併）。
 - 撮合規則：offer 期限必須 ≥ bid 期限才能撮合；固定利率單不和 FRR 單撮合；價格優先、同價先到先撮（[Bitfinex support](https://support.bitfinex.com/hc/en-us/articles/115003428165-Margin-Funding-on-Bitfinex)，2026-11-20 讀；已確認）。
-- 公開紀錄的 PERIOD 記的是 bid 還是 offer 的期限：**未確認**（步驟 1b 驗）。
-- 公開紀錄是否包含所有成交（例如 FRR 成交、隱藏單）：**未確認**（步驟 1b 盡力驗，驗不到就寫成已知限制交 Will）。
+- 公開紀錄的 PERIOD 記的是 bid 還是 offer 的期限：**無法用自己的成交確認**（步驟 1b：自己的成交全是 2 天期，兩種解讀算出同值）。replay 改用兩種解讀下都成立的規則：假想掛單期限 P 只算公開 PERIOD ≤ P 的成交（Will 2026-11-20 選 A；`spike/report-1b.md` 第 1 節）。
+- 公開紀錄是否包含所有成交：自己的 64 筆成交全部找得到（步驟 1b 實測，2026-11-20；已確認，限 fUST 2 天期）。FRR 成交無法辨識，replay 不排除，寫成偏樂觀的已知限制（步驟 1b 第 5 節）。
 - 私有 funding trades 的 trade id 與公開紀錄的 ID 相同（實測 2026-11-15；已確認），可用 trade id join。
 - trade id 是跨 symbol 共用的序號（步驟 1 實測；已確認）；同 symbol 依時間排序時 4.6–7.2% 的 id 往回跳，續抓游標用 MTS、同一 MTS 依 id 去重（已確認）。
 - 密度（步驟 1 全量；已確認）：fUSD 1.03 億列、fUST 3,957 萬列；p30 每日中位數 fUSD 600、fUST 77，fUST 有 72 天沒有 p30 成交、最長 7.9 天。
@@ -65,7 +65,7 @@
   - 驗收：`spike/report.md` 附上述每個數字與產生它的指令。
   - 停止條件：任何 symbol 有超過 7 天沒有任何成交的空窗 → 回報，D1／D2 重評。（未觸發：最長 6.95 小時。）
 
-- [ ] **1b. Spike：replay 的前置事實**（被擋於：無；第 1、4 項的正式 DB 查詢要 Will 核准）
+- [x] **1b. Spike：replay 的前置事實**（完成 2026-11-20，結果見 `spike/report-1b.md`）（被擋於：無；第 1、4 項的正式 DB 查詢要 Will 核准）
   - 範圍：唯讀，產出 `spike/report-1b.md`：
     1. PERIOD 語意：`funding_trades` 的 `trade_id` join VM 上的成交紀錄 CSV 取公開 PERIOD；我方 offer 當初掛的期限取自 `funding_trades.offer_id` 對到 `ledger_observation_offer_history.venue_offer_id`（文字型別，需轉換）的 `period_days`。`funding_trades.period` 是成交本身的期限，和公開 PERIOD 同一種欄位，不能拿來當 offer 期限。公開 PERIOD 恆等於我方掛的期限 → 記的是 offer 期限；有比我方短的值 → 記的是 bid 期限。找不到 offer 期限的筆數另列。
     2. 我方規模：cell 上限與典型掛單金額，對各期限每日借方主動成交量的中位數與 p10。
@@ -90,7 +90,7 @@
 
 - [ ] **3. replay 引擎**（被擋於：步驟 1b、步驟 2）
   - 檔案：新增 `backend/src/bfx_funding_bot/modules/backtest/replay.py` 與其測試、golden fixture；修改 `backtest/engine.py`、`backtest/config.py`、`backend/ARCHITECTURE.md`。
-  - 範圍：新增 `backend/src/bfx_funding_bot/modules/backtest/replay.py`：輸入策略決策序列與成交紀錄，對每張假想掛單（利率 r、期限 P、掛出時間 t0、金額 s）輸出成交量、成交時間、閒置時間。規則：只看 t0 之後、借方主動（負號）、期限與 P 相容（依步驟 1b 的 PERIOD 語意）的成交；利率 > r 的成交依累積量成交（部分成交）；利率 = r 的成交，保守邊界不計、樂觀邊界全計，2026-07-19 之後有 book 快照時另給排隊模型估計值（可重用 `lending/tracking/queue_fill.py`）；FRR 成交若可辨識則排除。引擎新增 replay 記帳路徑，與現有期望值路徑並存（`_apply_friction` 與 runner 的 `--fill-model` 在步驟 5 才刪，讓步驟 4 的驗證能在刪除前放行）；成交紀錄缺日時 `BacktestIncomplete`，`BacktestIncompleteReason` 新增對應原因。FRR 依步驟 1b 第 5 項：可辨識就排除並加 mutation，不可辨識就寫進報告的已知限制。`backend/ARCHITECTURE.md` 的回測段落同步改寫。
+  - 範圍：新增 `backend/src/bfx_funding_bot/modules/backtest/replay.py`：輸入策略決策序列與成交紀錄，對每張假想掛單（利率 r、期限 P、掛出時間 t0、金額 s）輸出成交量、成交時間、閒置時間。規則：只看 t0 之後、借方主動（負號）、公開 PERIOD ≤ P（步驟 1b 第 1 節，兩種 PERIOD 語意下都成立）的成交；利率 > r 的成交依累積量成交（部分成交）；利率 = r 的成交，保守邊界不計、樂觀邊界全計，2026-07-19 之後有 book 快照時另給排隊模型估計值（可重用 `lending/tracking/queue_fill.py`）；引擎新增 replay 記帳路徑，與現有期望值路徑並存（`_apply_friction` 與 runner 的 `--fill-model` 在步驟 5 才刪，讓步驟 4 的驗證能在刪除前放行）；成交紀錄缺日時 `BacktestIncomplete`，`BacktestIncompleteReason` 新增對應原因。FRR 成交無法辨識（步驟 1b 第 5 節），不排除，報告的已知限制寫明會偏樂觀；fUST 15 天以上的期限每日成交量 p10 只有 150–472（步驟 1b 第 2 節），報告的已知限制寫明沒有市場衝擊模型。`backend/ARCHITECTURE.md` 的回測段落同步改寫。
   - 消費端：`rg -n "run_backtest\(|_apply_friction|BacktestConfig\(" backend/src backend/scripts backend/tests`。
   - 不能動：`OPTIMIZER_LIVE` 路徑（`FillRateModel`、`estimate_fill`、book learner）；WFO／DSR 計算。
   - 驗收：golden 測試（固定小段成交紀錄＋固定掛單 → 固定成交量與時間）；mutation：期限不相容的成交也算、正號成交也算、同價成交在保守邊界也算、部分成交改成全額、拿掉缺日的 `BacktestIncomplete`，各自要讓測試失敗；全量 replay 一次的耗時記入進度表。
@@ -155,7 +155,7 @@
 | 步驟 | 狀態 | 已跑的驗收 | 未跑的驗收與原因 | commit |
 |---|---|---|---|---|
 | 1 Spike 完整量測 | 完成 | 全量抓取兩幣、`--summarize`、一週增量量測、PG18 每列大小；基線（`feaa9743`）：單元 5415 passed、mypy、ruff、quality ratchet 全綠 | 無 | PR #423 |
-| 1b replay 前置事實 | 未開始 | | | |
+| 1b replay 前置事實 | 完成 | 正式 DB 唯讀匯出（Will 核准）、`period_join.py`、`replay_cost.py` 兩幣；停止條件 (0) 觸發，Will 選 A | 無 | 本 PR |
 | 2 每日檔案與收集 | 未開始 | | | |
 | 3 replay 引擎 | 未開始 | | | |
 | 4 replay 驗證 | 未開始 | | | |
