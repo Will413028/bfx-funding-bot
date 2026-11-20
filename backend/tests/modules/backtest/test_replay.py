@@ -6,6 +6,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from bfx_funding_bot.modules.backtest.engine import BacktestIncomplete
@@ -29,7 +30,6 @@ GOLDEN_ROWS = [
     (6, T0 + 5 * H, -25.0, 0.0002, 7),   # exactly our rate: queue-dependent
     (7, T0 + 6 * H, -45.0, 0.00021, 2),  # PERIOD 2 <= 7: compatible -> cum 85
     (8, T0 + 7 * H, -60.0, 0.00022, 7),  # cum 145 >= 100 -> conservative full fill
-    (9, T0 + 30 * H, -999.0, 0.0009, 7),  # after the wait window
 ]
 
 
@@ -45,7 +45,10 @@ def write_day(root: Path, symbol: str, day: date, rows: list[tuple]) -> None:
 @pytest.fixture
 def tape(tmp_path: Path) -> TapeDays:
     write_day(tmp_path, "fUST", DAY, GOLDEN_ROWS)
-    write_day(tmp_path, "fUST", date(2026, 1, 11), [(10, T0 + 26 * H, -1.0, 0.0001, 2)])
+    write_day(tmp_path, "fUST", date(2026, 1, 11), [
+        (10, T0 + 26 * H, -1.0, 0.0001, 2),
+        (9, T0 + 30 * H, -999.0, 0.0009, 7),  # after every wait window below
+    ])
     return TapeDays(tmp_path, "fUST")
 
 
@@ -111,3 +114,12 @@ def test_day_cache_is_bounded(tmp_path: Path) -> None:
     for d in range(1, 8):
         days.day(date(2026, 1, d))
     assert days.cached_days() <= 3
+
+
+def test_float_sum_a_hair_short_still_counts_as_full_fill(tmp_path: Path) -> None:
+    rows = [(i, T0 + (i + 1) * 60_000, -0.1, 0.0003, 2) for i in range(10)]
+    write_day(tmp_path, "fUST", DAY, rows)
+    r = replay_offer(offer(period=2, amount="1"), TapeDays(tmp_path, "fUST"), max_wait_ms=H)
+    assert np.cumsum([0.1] * 10)[-1] < 1.0  # the float trap this guards
+    assert r.conservative.filled == Decimal("1")
+    assert r.conservative.full_fill_mts == T0 + 10 * 60_000

@@ -62,7 +62,10 @@ class BacktestResult(BaseModel):
     pricing_series_used: dict[str, int] | None = None
     # series key -> artifact hash when per-series fill models priced the run.
     fill_models_by_series: dict[str, str] | None = None
-    # tape-replay only: the bound that booked fills, and the hours offers spent
-    # resting unfilled (waiting for a fill, or the whole wait when none came).
+    # tape-replay only: the bound that booked fills, and the hours capital sat
+    # idle (waiting for a fill, plus the unfilled share of each lock).
     replay_bound: Literal["conservative", "optimistic"] | None = None
     idle_hours: Decimal | None = None
+    # Mean filled fraction under the same-rate queue estimate, over the offers a
+    # queue provider covered (book snapshots); None when none were covered.
+    queue_fill_rate: Decimal | None = None

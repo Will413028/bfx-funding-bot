@@ -59,6 +59,8 @@ class TapeDays:
         self._folder = root / symbol
         self._cache_days = cache_days
         self._cache: OrderedDict[date, Tape] = OrderedDict()
+        # The last concatenated multi-day span: consecutive hourly offers reuse it.
+        self._span: tuple[tuple[date, date], Tape] | None = None
 
     def day(self, day: date) -> Tape:
         cached = self._cache.get(day)
@@ -81,14 +83,23 @@ class TapeDays:
     def window(self, start_mts: int, end_mts: int) -> Tape:
         """Rows with start_mts < mts <= end_mts, across day files."""
         first, last = _utc_day(start_mts), _utc_day(end_mts)
-        parts = []
-        current = first
-        while current <= last:
-            parts.append(self.day(current))
-            current += timedelta(days=1)
-        rows = np.concatenate(parts) if len(parts) > 1 else parts[0]
+        # Keep every day of the window cached so hourly offers do not re-parse.
+        self._cache_days = max(self._cache_days, (last - first).days + 2)
+        span = (first, last)
+        if self._span is None or self._span[0] != span:
+            parts = []
+            current = first
+            while current <= last:
+                parts.append(self.day(current))
+                current += timedelta(days=1)
+            rows = np.concatenate(parts) if len(parts) > 1 else parts[0]
+            self._span = (span, rows)
+        rows = self._span[1]
+        # Day files are sorted by (mts, id), so the window is one contiguous slice.
         mts = rows[:, _COL_MTS]
-        return rows[(mts > start_mts) & (mts <= end_mts)]
+        lo = int(np.searchsorted(mts, start_mts, side="right"))
+        hi = int(np.searchsorted(mts, end_mts, side="right"))
+        return rows[lo:hi]
 
     def cached_days(self) -> int:
         return len(self._cache)
@@ -124,7 +135,9 @@ def _path(mts: npt.NDArray[np.float64], cumulative: npt.NDArray[np.float64],
         return FillPath(Decimal(0), None, None)
     total = Decimal(repr(float(cumulative[-1]))).quantize(_AMOUNT_QUANTUM)
     first = int(mts[int(np.argmax(cumulative > 0))])
-    full_idx = np.flatnonzero(cumulative >= float(amount))
+    # Same tolerance as the 1e-8 rounding of `total`: float sums of 8-decimal
+    # amounts can land a hair under the exact total.
+    full_idx = np.flatnonzero(cumulative >= float(amount) - 1e-8)
     full = int(mts[int(full_idx[0])]) if full_idx.size else None
     return FillPath(min(total, amount), first, full)
 

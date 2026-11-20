@@ -49,6 +49,8 @@ class BacktestConfig:
             raise ValueError(f"fill_alpha must be positive, got {self.fill_alpha}")
         if self.fill_horizon_h <= 0:
             raise ValueError(f"fill_horizon_h must be positive, got {self.fill_horizon_h}")
+        if self.replay_bound not in ("conservative", "optimistic"):
+            raise ValueError(f"replay_bound must be conservative|optimistic, got {self.replay_bound!r}")
         if self.replay_max_wait_h <= 0:
             raise ValueError(f"replay_max_wait_h must be positive, got {self.replay_max_wait_h}")
         if self.replay_offer_amount <= 0:
