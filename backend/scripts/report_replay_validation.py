@@ -30,8 +30,7 @@ the thresholds above are unchanged):
 - bids resting at placement that the offer crosses fill it at once
   (`replay_offer(crossing_bid_amount=...)`, from the snapshot at or before
   placement);
-- `funding_trades` misses fills where our offer took a resting bid, so the
-  actual first fill and the cancel time also come from the offer history
+- the cancel time, and a fill `funding_trades` lacks, come from the offer history
   (`--offer-history`, exported with `bfx_operator`, which alone can read it):
     \copy (SELECT venue_offer_id, amount_original, amount_remaining, terminal_kind,
             mts_updated FROM ledger_observation_offer_history) TO 'history.csv' CSV HEADER
@@ -45,14 +44,21 @@ unchanged):
   venue stamps a fill in that second at or before the ack;
 - the offer history only bounds the first fill from above (`mts_updated` is the
   last update of a row that already shows a fill); it sets the first fill only
-  when that bound lies within the ack's second, otherwise an offer missing from
-  `funding_trades` is left out as "fill time unknown";
+  when that bound can only mean "at placement" (`at_placement`), otherwise an
+  offer missing from `funding_trades` is left out as "fill time unknown";
 - a cancel counts only when the row shows nothing filled (`amount_original`
   known and equal to the remainder); a row with no time or a cancel with no
   original amount leaves an unfilled offer's end unknown;
 - placement is only an `ack` transport outcome; other outcomes record when the
   send gave up, not when the venue accepted, so those offers are left out;
 - crossed bids come only from a snapshot taken at most 10 s before placement.
+
+Venue clock correction (2026-11-20, after the third run; thresholds unchanged):
+an own fill stamped up to `VENUE_CLOCK_TOLERANCE_MS` before the ack counts as
+at placement (venue times are whole seconds on the venue's clock; measured up
+to 1,044 ms), and one stamped earlier leaves the fill time unknown. The replay
+window, crossing snapshot and queue adjustment still anchor on the ack, so a
+snapshot taken between the real placement and the ack can miss crossed bids.
 
 Run from backend/ (env: DATABASE_URL; read-only, the `bfx_research` role suffices):
   uv run python -m scripts.report_replay_validation --tape-root /tape [--out FILE]
@@ -79,6 +85,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bfx_funding_bot.core.db import make_engine, make_session_factory
 from bfx_funding_bot.core.settings import Settings
+from bfx_funding_bot.core.venue_time import VENUE_CLOCK_TOLERANCE_MS
 from bfx_funding_bot.modules.backtest.replay import (
     HypotheticalOffer,
     ReplayResult,
@@ -161,9 +168,15 @@ def replay_start_mts(placed_mts: int) -> int:
     return placed_mts - placed_mts % 1000 - 1
 
 
-def in_ack_second(mts: int, placed_mts: int) -> bool:
-    """`mts` falls in the ack's whole second (before or after the ack itself)."""
-    return 0 <= mts - (placed_mts - placed_mts % 1000) < 1000
+def at_placement(mts: int, placed_mts: int) -> bool:
+    """A venue time that can only mean "at placement".
+
+    Venue times are whole seconds on the venue's clock: a fill at placement
+    can read up to `VENUE_CLOCK_TOLERANCE_MS` before the local ack (measured:
+    1,044 ms), and no later than the end of the ack's whole second.
+    """
+    return (placed_mts - VENUE_CLOCK_TOLERANCE_MS <= mts
+            < placed_mts - placed_mts % 1000 + 1000)
 
 
 def _elapsed(first_mts: int | None, placed_mts: int, max_wait_ms: int, *,
@@ -171,9 +184,9 @@ def _elapsed(first_mts: int | None, placed_mts: int, max_wait_ms: int, *,
     if first_mts is None:
         return None
     waited = first_mts - placed_mts
-    # A fill stamped in the ack's own second reads as before the ack; a replayed
-    # fill can also sit at the window's opening millisecond (crossed bids).
-    if waited < 0 and (in_ack_second(first_mts, placed_mts)
+    # A fill at placement can read as before the ack; a replayed fill can also
+    # sit at the window's opening millisecond (crossed bids).
+    if waited < 0 and (at_placement(first_mts, placed_mts)
                        or (replayed and first_mts == replay_start_mts(placed_mts))):
         waited = 0
     return waited if 0 <= waited <= max_wait_ms else None
@@ -440,8 +453,8 @@ def build_offers(offer_rows: Iterable[tuple[str, str, int, Decimal, int, Decimal
     """Join the journal, `funding_trades` and the offer history into replayable offers.
 
     Trades give exact fill times. The history adds a fill missing from the
-    trades only when its upper bound lies within the ack's second, where it is
-    exact to the tape's resolution; a later bound leaves the fill time unknown.
+    trades only when its upper bound can only mean "at placement"; a later
+    bound leaves the fill time unknown.
     """
     trade_fill: dict[str, int] = {}
     trade_ids: dict[str, list[int]] = defaultdict(list)
@@ -455,8 +468,10 @@ def build_offers(offer_rows: Iterable[tuple[str, str, int, Decimal, int, Decimal
         first = trade_fill.get(oid)
         by = facts.fill_by_mts if facts else None
         reasons = [] if acked else ["no venue ack"]
+        if first is not None and first < placed - VENUE_CLOCK_TOLERANCE_MS:
+            reasons.append("fill time unknown")  # before placement: skew past tolerance
         if by is not None and (first is None or by < first):
-            if in_ack_second(by, placed):
+            if at_placement(by, placed):
                 first = by
             else:
                 reasons.append("fill time unknown")
