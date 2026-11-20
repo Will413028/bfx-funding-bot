@@ -359,6 +359,7 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 - 策略**看到**的序列與**定價**的序列分開：`market_candles`（依 mts 對齊）或 `market_series_by_agg`（依 lock 天期選 `p{period}`，否則退到 `a30` 聚合，兩者皆無則 KeyError；`resolve_market_series_key`）。兩者互斥。決策 mts 沒有 market print → `BacktestIncomplete("market_series_gap")`，絕不退回用觀測 candle 或假設 100% 成交。
 - 市場利率只來自 `candle_close`（`market_rate_source`）；FRR 不是可換算的市場利率代理。
 - `fill_model="empirical"` 時，fill model 必須存在、有 artifact、source ∈ {`candle`,`book`}、horizon 與 symbol／period_agg 與被定價序列一致，否則以 `fill_model_missing`／`fill_model_low_confidence`／`fill_model_scope_mismatch` 拒跑（preflight 在任何計算前）；不會靜默退化成 linear。`linear-baseline` 為明示的 baseline。
+- `fill_model="tape-replay"`（必須同時傳 `tape`，`tape` 也只接受這個模式）：每個決策變成一張假想掛單（利率、期限、掛出時間、`replay_offer_amount`），交給 `modules/backtest/replay.py` 對 Bitfinex 公開成交紀錄（VM 上的每日 gzip 檔，`TapeDays` 逐日讀、只快取幾天）逐筆判定。可成交的只有掛出之後、等待窗口內、借方主動（金額為負）、公開 PERIOD ≤ 掛單期限的成交；利率高於掛價的依累積量成交（可部分成交），利率等於掛價的保守邊界不計、樂觀邊界全計，呼叫端給同價排隊量時另算排隊估計。`replay_bound` 選哪個邊界記帳；成交比例乘利率計息，鎖倉從完全成交的時間起算，沒有完全成交就閒置 `replay_max_wait_h`（`BacktestResult.idle_hours`）。缺某天的日檔 → `BacktestIncomplete("tape_day_missing")`。已知限制：FRR 成交無法辨識、沒有排除（偏樂觀）；沒有市場衝擊模型（fUST 15 天以上的期限每日成交量 p10 只有 150–472）；PERIOD 若記的是 bid 期限，這條期限規則偏保守。live money path 不讀成交紀錄。
 
 ---
 

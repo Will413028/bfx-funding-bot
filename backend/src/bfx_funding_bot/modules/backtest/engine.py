@@ -1,10 +1,12 @@
 import math
 from collections.abc import Mapping
 from decimal import Decimal
-from typing import Literal, NoReturn
+from typing import NoReturn
 
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig, compute_fill_prob
+from bfx_funding_bot.modules.backtest.incomplete import BacktestIncomplete as BacktestIncomplete
+from bfx_funding_bot.modules.backtest.replay import HypotheticalOffer, TapeDays, replay_offer
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult
 from bfx_funding_bot.modules.lending.tracking.artifact import FillModelUnavailable
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
@@ -14,11 +16,6 @@ from bfx_funding_bot.modules.performance.sortino import (
     monthly_returns_from_equity_curve,
 )
 from bfx_funding_bot.modules.strategy import LendDecision, Strategy
-
-BacktestIncompleteReason = Literal[
-    "fill_model_missing", "fill_model_low_confidence", "fill_model_scope_mismatch",
-    "market_series_gap",
-]
 
 _MS_PER_DAY = Decimal(86_400_000)
 _AGGREGATE_SERIES_KEY = "a30"
@@ -43,14 +40,6 @@ def resolve_market_series_key(period_days: int, available: Mapping[str, object])
     raise KeyError(
         f"no market series for period {period_days}: have {sorted(available)}"
     )
-
-
-class BacktestIncomplete(RuntimeError):  # noqa: N818 - contract name is prescribed
-    """A requested empirical backtest lacks usable versioned fill evidence."""
-
-    def __init__(self, reason: BacktestIncompleteReason) -> None:
-        super().__init__(reason)
-        self.reason = reason
 
 
 def _raise_for_unavailable(evidence: FillModelUnavailable) -> NoReturn:
@@ -163,6 +152,7 @@ def run_backtest(
     market_candles: list[FundingCandle] | None = None,
     market_series_by_agg: Mapping[str, list[FundingCandle]] | None = None,
     fill_models_by_agg: Mapping[str, FillRateModel] | None = None,
+    tape: TapeDays | None = None,
 ) -> BacktestResult:
     """Run a strategy over a candle series and return summary metrics.
 
@@ -188,6 +178,13 @@ def run_backtest(
     `resolve_market_series_key`. A strategy that observes the a30 series but
     posts 2-day offers is then scored against the 2-day market it actually
     competes in, instead of being credited the aggregate rate for a 2-day lock.
+
+    `tape` (required by, and only allowed with, `fill_model="tape-replay"`) books
+    each decision as a hypothetical offer replayed against the public trade tape
+    (`backtest/replay.py`): the chosen bound's filled fraction earns the rate, the
+    lock starts when the offer finishes filling, and an offer never fully filled
+    rests `replay_max_wait_h` before the strategy decides again. A missing tape
+    day raises `BacktestIncomplete("tape_day_missing")`.
     """
     if market_candles is not None and market_series_by_agg is not None:
         raise ValueError("pass market_candles or market_series_by_agg, not both")
@@ -195,6 +192,11 @@ def run_backtest(
         raise ValueError("pass fill_model or fill_models_by_agg, not both")
     if fill_models_by_agg is not None and market_series_by_agg is None:
         raise ValueError("fill_models_by_agg requires market_series_by_agg")
+    replaying = config.fill_model == "tape-replay"
+    if replaying and tape is None:
+        raise ValueError("fill_model='tape-replay' requires tape")
+    if not replaying and tape is not None:
+        raise ValueError("tape is only used with fill_model='tape-replay'")
     if config.fill_model == "empirical":
         if fill_models_by_agg is not None:
             assert market_series_by_agg is not None  # guarded above
@@ -211,6 +213,8 @@ def run_backtest(
             n_trades=0, fill_rate=Decimal("0"),
             sortino=Decimal("0"),
             model_kind=config.fill_model,
+            replay_bound=config.replay_bound if replaying else None,
+            idle_hours=Decimal("0") if replaying else None,
         )
 
     sorted_candles = sorted(candles, key=lambda c: c.mts)
@@ -240,6 +244,8 @@ def run_backtest(
     n_trades = 0
     n_window_candles = 0  # candles inside [effective_start, effective_end] regardless of cooldown
     fill_prob_sum = Decimal("0")
+    idle_ms = 0
+    max_wait_ms = config.replay_max_wait_h * 3_600_000
     cooldown_until_idx = -1
     # Assumes 1h candles: gap_minutes / 60 gives candle count. Other timeframes (5m, 1D) miscount.
     gap_candles = math.ceil(config.gap_minutes / 60)
@@ -282,12 +288,32 @@ def run_backtest(
             if trade_model is None and config.fill_model == "empirical":
                 # Strict: a series without book evidence cannot borrow another's.
                 raise BacktestIncomplete("fill_model_missing")
-        gross_rate, fill_prob = _apply_friction(
-            decision, pricing_candle, config, trade_model
-        )
+        lock_start_mts = candle.mts
+        if replaying:
+            assert tape is not None  # guarded above
+            replayed = replay_offer(
+                HypotheticalOffer(rate=decision.rate, period_days=decision.period_days,
+                                  placed_mts=candle.mts, amount=config.replay_offer_amount),
+                tape, max_wait_ms=max_wait_ms,
+            )
+            path = (replayed.conservative if config.replay_bound == "conservative"
+                    else replayed.optimistic)
+            fill_prob = path.filled / config.replay_offer_amount
+            gross_rate = decision.rate * fill_prob
+            wait_ms = (path.full_fill_mts - candle.mts if path.full_fill_mts is not None
+                       else max_wait_ms)
+            idle_ms += wait_ms
+            lock_start_mts = candle.mts + wait_ms
+            lock_candles = decision.period_days * 24 if fill_prob > 0 else 0
+            next_cooldown = i + math.ceil(wait_ms / 3_600_000) + lock_candles + gap_candles
+        else:
+            gross_rate, fill_prob = _apply_friction(
+                decision, pricing_candle, config, trade_model
+            )
+            next_cooldown = i + decision.period_days * 24 + gap_candles
         period = Decimal(decision.period_days)
         if config.truncate_at_window_end:
-            remaining_days = Decimal(effective_end - candle.mts) / _MS_PER_DAY
+            remaining_days = Decimal(effective_end - lock_start_mts) / _MS_PER_DAY
             period = min(period, max(remaining_days, Decimal("0")))
         gross_equity = gross_equity * (Decimal("1") + gross_rate * period)
         net_rate = gross_rate * one_minus_fee
@@ -295,7 +321,7 @@ def run_backtest(
 
         n_trades += 1
         fill_prob_sum += fill_prob
-        cooldown_until_idx = i + decision.period_days * 24 + gap_candles
+        cooldown_until_idx = next_cooldown
 
         if net_equity > peak:
             peak = net_equity
@@ -348,6 +374,8 @@ def run_backtest(
             if fill_models_by_agg is not None
             else None
         ),
+        replay_bound=config.replay_bound if replaying else None,
+        idle_hours=Decimal(idle_ms) / Decimal(3_600_000) if replaying else None,
     )
 
 
