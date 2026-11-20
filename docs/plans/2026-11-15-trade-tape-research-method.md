@@ -97,7 +97,7 @@
   - 停止條件：replay 一次 WFO 掃描的耗時讓每週工作超出預算 → 回報，評估 Parquet（延後項）。
 
 - [ ] **4. 用自己成交驗證 replay**（被擋於：無；D4＝A 已拍，門檻已預登記如下）——2026-11-20 第一次執行 FAIL（涵蓋率 65.8%），見 `step4-validation.md`；停止條件 (a) 觸發
-  - 檔案：新增 `backend/scripts/report_replay_validation.py` 與其測試、`docs/research/` 報告。
+  - 檔案：新增 `backend/scripts/report_replay_validation.py` 與其測試；彙總報告放附件 `step4-validation.md`（`docs/research/` 被 `.gitignore` 擋住，逐張明細依本機個人脈絡檔放 repo 外）。
   - 範圍：`backend/scripts/report_replay_validation.py`：(0) 從 2026-07-19 起的 book 快照推出同價排在前面的量，接成 `run_backtest` 的 `same_rate_queue_ahead`（可重用 `lending/tracking/queue_fill.py` 的 `queue_ahead_of`），D4 選 A 時排隊誤差靠它；(a) 把自己的歷史 offer（利率、期限、掛出時間、金額）丟進 replay，比較 replay 判定的成交時間與實際成交時間；(b) 保守與樂觀邊界的寬度分佈（邊界太寬代表同價成交佔比高，排隊位置是主要不確定性）。replay 時剔除自己的成交（join trade id），避免自己對照自己。報告寫進 `docs/research/`。
   - 消費端：無（新報告）。
   - 不能動：既有報告。

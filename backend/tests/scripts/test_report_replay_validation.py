@@ -25,6 +25,7 @@ from scripts.report_replay_validation import (
     render,
     same_rate_queue,
     summarize,
+    tape_has_day,
 )
 
 DAY = date(2026, 1, 10)
@@ -77,6 +78,19 @@ def test_own_trades_are_removed_from_the_tape(tape_root: Path) -> None:
     assert without.optimistic_ms == 10 * M
     assert without.conservative_ms == 2 * H
     assert without.actual_ms == 30 * M
+
+
+def test_offers_whose_wait_passes_the_tape_end_are_skipped(tape_root: Path) -> None:
+    rows = evaluate([own()], tape_for=lambda s: ExcludingTape(tape_root, s, []),
+                    snapshots={}, tape_covers=lambda _end: False)
+    assert rows == []
+    assert tape_has_day(tape_root, [own()], T0 + DEFAULT_MAX_WAIT_MS)
+    assert not tape_has_day(tape_root, [own()], T0 + 2 * DEFAULT_MAX_WAIT_MS)
+
+
+def test_same_rate_queue_tolerates_float_rate_noise() -> None:
+    snap = BookAskSnapshot("fUST", T0 - M, ((Decimal("0.00020000000000000001"), 2, Decimal("7")),))
+    assert same_rate_queue(snap, own()) == Decimal("7")
 
 
 def test_actual_fill_after_the_wait_counts_as_no_fill(tape_root: Path) -> None:

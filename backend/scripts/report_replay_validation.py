@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import math
 import statistics
 import sys
 import time
@@ -123,8 +124,10 @@ def same_rate_queue(snapshot: BookAskSnapshot, offer: OwnOffer) -> Decimal:
     which the replay never counts. A snapshot taken after placement may already
     hold our own offer at that level, so its amount comes off (floored at zero).
     """
-    level = [a for a in snapshot.asks if a[0] == offer.rate]
-    queue = queue_ahead_of(level, period_days=offer.period_days, offer_rate=offer.rate)
+    # Same tolerance as replay_offer's same-rate test: payload rates went through float.
+    level = [a for a in snapshot.asks if math.isclose(a[0], offer.rate, rel_tol=1e-9)]
+    queue = queue_ahead_of(level, period_days=offer.period_days,
+                           offer_rate=max((a[0] for a in level), default=offer.rate))
     if snapshot.captured_at_ms > offer.placed_mts:
         queue = max(queue - offer.amount, Decimal(0))
     return queue
@@ -132,9 +135,13 @@ def same_rate_queue(snapshot: BookAskSnapshot, offer: OwnOffer) -> Decimal:
 
 def evaluate(offers: Sequence[OwnOffer], *, tape_for: Callable[[str], TapeDays],
              snapshots: Mapping[str, Sequence[BookAskSnapshot]],
-             max_wait_ms: int = DEFAULT_MAX_WAIT_MS) -> list[OfferOutcome]:
+             max_wait_ms: int = DEFAULT_MAX_WAIT_MS,
+             tape_covers: Callable[[int], bool] = lambda _end_mts: True) -> list[OfferOutcome]:
+    """Offers whose wait ends past the tape (`tape_covers` false) are left out, not failed."""
     outcomes = []
     for offer in offers:
+        if not tape_covers(offer.placed_mts + max_wait_ms):
+            continue
         snap = nearest_snapshot(snapshots.get(offer.symbol, ()), offer.placed_mts)
         queue = same_rate_queue(snap, offer) if snap is not None else None
         result: ReplayResult = replay_offer(
@@ -293,6 +300,11 @@ async def load_inputs(session: AsyncSession) -> tuple[
     return offers, own_ids, snapshots
 
 
+def tape_has_day(root: Path, offers: Sequence[OwnOffer], end_mts: int) -> bool:
+    day = time.strftime("%Y-%m-%d", time.gmtime(end_mts / 1000))
+    return all((root / sym / f"{day}.csv.gz").is_file() for sym in {o.symbol for o in offers})
+
+
 async def _amain(args: argparse.Namespace) -> int:
     engine = make_engine(Settings())
     try:
@@ -304,8 +316,11 @@ async def _amain(args: argparse.Namespace) -> int:
     tape_root = Path(args.tape_root)
     tapes = {sym: ExcludingTape(tape_root, sym, own_ids)
              for sym in {o.symbol for o in offers}}
-    outcomes = evaluate(offers, tape_for=tapes.__getitem__, snapshots=snapshots)
+    outcomes = evaluate(offers, tape_for=tapes.__getitem__, snapshots=snapshots,
+                        tape_covers=lambda end: tape_has_day(tape_root, offers, end))
     report = render(summarize(outcomes), outcomes)
+    skipped = len(offers) - len(outcomes)
+    report += f"\nSkipped {skipped} offer(s) whose wait ends after the last tape day.\n"
     if args.out:
         Path(args.out).write_text(report, encoding="utf-8")
     sys.stdout.write(report)
