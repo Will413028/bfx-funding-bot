@@ -38,6 +38,22 @@ the thresholds above are unchanged):
   A cancelled offer is replayed only until its cancel; an offer with no fill and
   no history has an unknown end and is left out (counted in the report).
 
+Second post-hoc round (Will 2026-11-20, after review round 2; thresholds still
+unchanged):
+
+- the replay window opens at the start of the ack's whole second, since the
+  venue stamps a fill in that second at or before the ack;
+- the offer history only bounds the first fill from above (`mts_updated` is the
+  last update of a row that already shows a fill); it sets the first fill only
+  when that bound lies within the ack's second, otherwise an offer missing from
+  `funding_trades` is left out as "fill time unknown";
+- a cancel counts only when the row shows nothing filled (`amount_original`
+  known and equal to the remainder); a row with no time or a cancel with no
+  original amount leaves an unfilled offer's end unknown;
+- placement is only an `ack` transport outcome; other outcomes record when the
+  send gave up, not when the venue accepted, so those offers are left out;
+- crossed bids come only from a snapshot taken at most 10 s before placement.
+
 Run from backend/ (env: DATABASE_URL; read-only, the `bfx_research` role suffices):
   uv run python -m scripts.report_replay_validation --tape-root /tape [--out FILE]
 """
@@ -50,9 +66,10 @@ import math
 import statistics
 import sys
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -75,6 +92,7 @@ MS_PER_HOUR = 3_600_000
 DEFAULT_MAX_WAIT_MS = 24 * MS_PER_HOUR  # replay_max_wait_h default
 SNAPSHOT_TOLERANCE_MS = 5 * 60_000
 COVERAGE_TOLERANCE_MS = 1_000  # tape timestamps are whole seconds
+CROSSING_SNAPSHOT_MAX_AGE_MS = 10_000  # resting bids turn over within minutes
 
 # Pre-registered (plan step 4, Will 2026-11-20). Do not tune after a run.
 COVERAGE_MIN = 0.80
@@ -94,7 +112,7 @@ class OwnOffer:
     first_fill_mts: int | None  # earliest own fill of this offer, any time
     own_trade_ids: tuple[int, ...] = ()
     cancel_mts: int | None = None  # stopped resting unfilled at this time
-    end_known: bool = True  # False: no fill and no history, so the wait is unknown
+    excluded: str | None = None  # why the offer cannot be replayed, if it cannot
 
 
 @dataclass(frozen=True)
@@ -116,15 +134,11 @@ class OfferOutcome:
 
 
 class ExcludingTape(TapeDays):
-    """A tape without our own trades, except those `keep` names (the replayed offer's)."""
+    """A tape without the given trade ids (our own trades, minus the replayed offer's)."""
 
     def __init__(self, root: Path, symbol: str, exclude_ids: Iterable[int]) -> None:
         super().__init__(root, symbol)
-        self._all_own = frozenset(exclude_ids)
-        self._exclude = np.fromiter(self._all_own, dtype=np.float64)
-
-    def keep(self, ids: Iterable[int]) -> None:
-        self._exclude = np.fromiter(self._all_own - set(ids), dtype=np.float64)
+        self._exclude = np.fromiter(frozenset(exclude_ids), dtype=np.float64)
 
     def window(self, start_mts: int, end_mts: int) -> Tape:
         rows = super().window(start_mts, end_mts)
@@ -142,13 +156,17 @@ def book_from_payload(captured_at_ms: int, payload: Mapping[str, object]) -> Boo
     return BookSides(captured_at_ms, side("asks"), side("bids"))
 
 
+def replay_start_mts(placed_mts: int) -> int:
+    """Just before the ack's whole second: `window` is strict and venue times are whole seconds."""
+    return placed_mts - placed_mts % 1000 - 1
+
+
 def _elapsed(first_mts: int | None, placed_mts: int, max_wait_ms: int) -> int | None:
     if first_mts is None:
         return None
     waited = first_mts - placed_mts
-    # Venue times are whole seconds, the ack is not: a fill stamped in the ack's
-    # own second can read up to a second before placement.
-    if -COVERAGE_TOLERANCE_MS < waited < 0:
+    # A fill stamped in the ack's own second reads as before the ack.
+    if replay_start_mts(placed_mts) <= first_mts < placed_mts:
         waited = 0
     return waited if 0 <= waited <= max_wait_ms else None
 
@@ -182,10 +200,11 @@ def same_rate_queue(snapshot: BookSides, offer: OwnOffer) -> Decimal:
 def crossing_bids(snapshot: BookSides, offer: OwnOffer) -> Decimal:
     """Bid volume the offer would match on arrival: rate >= ours, period <= ours.
 
-    Only a snapshot from before placement can show it: after placement the
-    crossed bids are already gone.
+    Only a snapshot from just before placement can show it: after placement the
+    crossed bids are gone, and an older one shows bids that may have left.
     """
-    if snapshot.captured_at_ms > offer.placed_mts:
+    age = offer.placed_mts - snapshot.captured_at_ms
+    if not 0 <= age <= CROSSING_SNAPSHOT_MAX_AGE_MS:
         return Decimal(0)
     floor = offer.rate * (1 - Decimal("1e-9"))
     return sum((a for r, p, a in snapshot.bids if r >= floor and p <= offer.period_days),
@@ -198,30 +217,32 @@ def offer_wait_ms(offer: OwnOffer, max_wait_ms: int) -> int:
     return max_wait_ms
 
 
-def evaluate(offers: Sequence[OwnOffer], *, tape_for: Callable[[str], TapeDays],
+def evaluate(offers: Sequence[OwnOffer], *, tape_for: Callable[[OwnOffer], TapeDays],
              snapshots: Mapping[str, Sequence[BookSides]],
              max_wait_ms: int = DEFAULT_MAX_WAIT_MS,
-             tape_covers: Callable[[int], bool] = lambda _end_mts: True) -> list[OfferOutcome]:
-    """Replay every offer with a known end over its own wait.
+             tape_covers: Callable[[str, int, int], bool] = lambda _s, _a, _b: True,
+             ) -> list[OfferOutcome]:
+    """Replay every offer that can be replayed over its own wait.
 
-    Left out, not failed: offers whose wait ends past the tape (`tape_covers`
-    false), offers with an unknown end, and offers cancelled before they rested.
+    Left out, not failed: offers with an `excluded` reason, offers whose wait
+    is not fully on the tape (`tape_covers(symbol, start, end)` false), and
+    offers cancelled before they rested.
     """
     outcomes = []
     for offer in offers:
         wait = offer_wait_ms(offer, max_wait_ms)
-        if not offer.end_known or wait <= 0 or not tape_covers(offer.placed_mts + wait):
+        start = replay_start_mts(offer.placed_mts)
+        if (offer.excluded is not None or wait <= 0
+                or not tape_covers(offer.symbol, start, offer.placed_mts + wait)):
             continue
         snap = nearest_snapshot(snapshots.get(offer.symbol, ()), offer.placed_mts)
         queue = same_rate_queue(snap, offer) if snap is not None else None
         crossing = crossing_bids(snap, offer) if snap is not None else None
-        tape = tape_for(offer.symbol)
-        if isinstance(tape, ExcludingTape):
-            tape.keep(offer.own_trade_ids)
         result: ReplayResult = replay_offer(
             HypotheticalOffer(rate=offer.rate, period_days=offer.period_days,
-                              placed_mts=offer.placed_mts, amount=offer.amount),
-            tape, max_wait_ms=wait, same_rate_queue_ahead=queue, crossing_bid_amount=crossing)
+                              placed_mts=start, amount=offer.amount),
+            tape_for(offer), max_wait_ms=wait + offer.placed_mts - start,
+            same_rate_queue_ahead=queue, crossing_bid_amount=crossing)
         p = offer.placed_mts
         outcomes.append(OfferOutcome(
             offer=offer,
@@ -333,14 +354,15 @@ def render(summaries: Sequence[BucketSummary], outcomes: Sequence[OfferOutcome],
 _OFFERS_SQL = text("""
 WITH sub AS (
   SELECT s.attempt_id, s.symbol, coalesce(t.completed_at_ms, s.started_at_ms) AS placed_mts,
+         t.kind IS NOT NULL AS acked,
          s.match_rate, s.match_period_days, s.intended_amount,
          coalesce(t.venue_offer_id, (
            SELECT r.venue_offer_id FROM execution_resolution_journal r
            WHERE r.attempt_id = s.attempt_id AND r.venue_offer_id IS NOT NULL
            ORDER BY r.resolved_at_ms LIMIT 1)) AS venue_offer_id
   FROM submission_attempt_journal s
-  LEFT JOIN transport_outcome_journal t USING (attempt_id))
-SELECT venue_offer_id, symbol, placed_mts, match_rate, match_period_days, intended_amount
+  LEFT JOIN transport_outcome_journal t ON t.attempt_id = s.attempt_id AND t.kind = 'ack')
+SELECT venue_offer_id, symbol, placed_mts, match_rate, match_period_days, intended_amount, acked
 FROM sub
 WHERE venue_offer_id IS NOT NULL AND match_rate IS NOT NULL AND match_period_days IS NOT NULL
 ORDER BY placed_mts
@@ -371,31 +393,48 @@ def read_history(path: Path) -> list[HistoryRow]:
 
 @dataclass(frozen=True)
 class HistoryFacts:
-    first_fill_mts: int | None
-    cancel_mts: int | None
+    fill_by_mts: int | None  # the first fill happened at or before this
+    cancel_mts: int | None  # cancelled with nothing filled
+    complete: bool  # every row has a time, and every cancel a known original amount
 
 
 def history_facts(rows: Iterable[HistoryRow]) -> dict[str, HistoryFacts]:
-    """Per offer: the first observation with less left than placed, and a clean cancel."""
+    """Per offer: an upper bound on the first fill, a clean cancel, and whether rows are whole.
+
+    `mts_updated` is a row's last update, so a row that shows a fill only says
+    the first fill came no later than that time.
+    """
     fills: dict[str, int] = {}
     cancels: dict[str, int] = {}
     seen: set[str] = set()
+    incomplete: set[str] = set()
     for r in rows:
-        seen.add(r.venue_offer_id)
+        oid = r.venue_offer_id
+        seen.add(oid)
         if r.mts_updated is None:
+            incomplete.add(oid)
             continue
-        filled = (r.terminal_kind == "executed"
-                  or (r.amount_original is not None and r.amount_remaining < r.amount_original))
-        if filled:
-            fills[r.venue_offer_id] = min(r.mts_updated, fills.get(r.venue_offer_id, r.mts_updated))
+        if r.terminal_kind == "executed" or (
+                r.amount_original is not None and r.amount_remaining < r.amount_original):
+            fills[oid] = min(r.mts_updated, fills.get(oid, r.mts_updated))
         elif r.terminal_kind == "canceled":
-            cancels[r.venue_offer_id] = max(r.mts_updated, cancels.get(r.venue_offer_id, 0))
-    return {oid: HistoryFacts(fills.get(oid), cancels.get(oid)) for oid in seen}
+            if r.amount_original is None:
+                incomplete.add(oid)  # cannot tell whether part of it filled
+            else:
+                cancels[oid] = max(r.mts_updated, cancels.get(oid, 0))
+    return {oid: HistoryFacts(fills.get(oid), cancels.get(oid), oid not in incomplete)
+            for oid in seen}
 
 
-def build_offers(offer_rows: Iterable[tuple[str, str, int, Decimal, int, Decimal]],
+def build_offers(offer_rows: Iterable[tuple[str, str, int, Decimal, int, Decimal, bool]],
                  trades: Iterable[tuple[int, int, int]],
                  history: Mapping[str, HistoryFacts]) -> list[OwnOffer]:
+    """Join the journal, `funding_trades` and the offer history into replayable offers.
+
+    Trades give exact fill times. The history adds a fill missing from the
+    trades only when its upper bound lies within the ack's second, where it is
+    exact to the tape's resolution; a later bound leaves the fill time unknown.
+    """
     trade_fill: dict[str, int] = {}
     trade_ids: dict[str, list[int]] = defaultdict(list)
     for offer_id, trade_id, mts in trades:
@@ -403,15 +442,23 @@ def build_offers(offer_rows: Iterable[tuple[str, str, int, Decimal, int, Decimal
         trade_fill[key] = min(mts, trade_fill.get(key, mts))
         trade_ids[key].append(trade_id)
     offers = []
-    for oid, sym, placed, rate, period, amount in offer_rows:
+    for oid, sym, placed, rate, period, amount, acked in offer_rows:
         facts = history.get(oid)
-        fills = [m for m in (trade_fill.get(oid), facts and facts.first_fill_mts) if m]
-        first = min(fills) if fills else None
+        first = trade_fill.get(oid)
+        by = facts.fill_by_mts if facts else None
+        reasons = [] if acked else ["no venue ack"]
+        if by is not None and (first is None or by < first):
+            if by - placed < COVERAGE_TOLERANCE_MS:
+                first = by
+            else:
+                reasons.append("fill time unknown")
+        if first is None and (facts is None or not facts.complete):
+            reasons.append("unknown end")
         offers.append(OwnOffer(
             venue_offer_id=oid, symbol=sym, rate=rate, period_days=period, placed_mts=placed,
             amount=amount, first_fill_mts=first, own_trade_ids=tuple(trade_ids.get(oid, ())),
             cancel_mts=facts.cancel_mts if facts else None,
-            end_known=first is not None or facts is not None))
+            excluded=reasons[0] if reasons else None))
     return offers
 
 
@@ -432,9 +479,14 @@ async def load_inputs(session: AsyncSession, history: Mapping[str, HistoryFacts]
     return offers, own_ids, snapshots
 
 
-def tape_has_day(root: Path, offers: Sequence[OwnOffer], end_mts: int) -> bool:
-    day = time.strftime("%Y-%m-%d", time.gmtime(end_mts / 1000))
-    return all((root / sym / f"{day}.csv.gz").is_file() for sym in {o.symbol for o in offers})
+def tape_has_days(root: Path, symbol: str, start_mts: int, end_mts: int) -> bool:
+    """Every UTC day file of `symbol` from `start_mts` through `end_mts` exists."""
+    day, last = (datetime.fromtimestamp(m / 1000, UTC).date() for m in (start_mts, end_mts))
+    while day <= last:
+        if not (root / symbol / f"{day.isoformat()}.csv.gz").is_file():
+            return False
+        day += timedelta(days=1)
+    return True
 
 
 async def _amain(args: argparse.Namespace) -> int:
@@ -447,15 +499,17 @@ async def _amain(args: argparse.Namespace) -> int:
     finally:
         await engine.dispose()
     tape_root = Path(args.tape_root)
-    tapes = {sym: ExcludingTape(tape_root, sym, own_ids)
-             for sym in {o.symbol for o in offers}}
-    outcomes = evaluate(offers, tape_for=tapes.__getitem__, snapshots=snapshots,
-                        tape_covers=lambda end: tape_has_day(tape_root, offers, end))
+    all_own = frozenset(own_ids)
+    outcomes = evaluate(
+        offers, snapshots=snapshots,
+        tape_for=lambda o: ExcludingTape(tape_root, o.symbol, all_own - set(o.own_trade_ids)),
+        tape_covers=lambda sym, a, b: tape_has_days(tape_root, sym, a, b))
     report = render(summarize(outcomes), outcomes)
-    unknown = sum(not o.end_known for o in offers)
+    reasons = Counter(o.excluded for o in offers if o.excluded is not None)
+    listed = ", ".join(f"{n} {why}" for why, n in sorted(reasons.items())) or "none excluded"
     report += (f"\nLeft out: {len(offers) - len(outcomes)} of {len(offers)} offer(s) "
-               f"({unknown} with an unknown end; the rest end past the last tape day "
-               f"or were cancelled before resting).\n")
+               f"({listed}; the rest are not fully on the tape or were cancelled "
+               f"before resting).\n")
     if args.out:
         Path(args.out).write_text(report, encoding="utf-8")
     sys.stdout.write(report)

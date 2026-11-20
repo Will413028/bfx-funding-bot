@@ -33,7 +33,7 @@ from scripts.report_replay_validation import (
     render,
     same_rate_queue,
     summarize,
-    tape_has_day,
+    tape_has_days,
 )
 
 DAY = date(2026, 1, 10)
@@ -77,13 +77,16 @@ def tape_root(tmp_path: Path) -> Path:
         (102, T0 + 2 * H, -100.0, 0.0003, 2),    # through our rate: conservative
     ])
     write_day(tmp_path, "fUST", date(2026, 1, 11), [])
+    write_day(tmp_path, "fUST", date(2026, 1, 9), [])  # the window opens 1 ms before T0
     return tmp_path
 
 
 def run(tape_root: Path, offer: OwnOffer, snaps: list[BookSides], own_ids: list[int]
         ) -> OfferOutcome:
-    tape = ExcludingTape(tape_root, "fUST", own_ids)
-    (result,) = evaluate([offer], tape_for=lambda _s: tape, snapshots={"fUST": snaps})
+    keep = set(offer.own_trade_ids)
+    (result,) = evaluate(
+        [offer], snapshots={"fUST": snaps},
+        tape_for=lambda o: ExcludingTape(tape_root, o.symbol, [i for i in own_ids if i not in keep]))
     return result
 
 
@@ -105,16 +108,18 @@ def test_the_replayed_offers_own_trades_stay_as_demand(tape_root: Path) -> None:
 
 
 def test_crossed_bids_fill_at_placement(tape_root: Path) -> None:
-    snap = book(T0 - M, bids=((Decimal("0.00021"), 2, Decimal("40")),))
+    snap = book(T0 - 5_000, bids=((Decimal("0.00021"), 2, Decimal("40")),))
     result = run(tape_root, own(), [snap], own_ids=[])
     assert result.conservative_ms == 0 and result.optimistic_ms == 0
 
 
 @pytest.mark.parametrize(("bids", "ts", "expected"), [
-    (((Decimal("0.00021"), 2, Decimal("40")), (Decimal("0.0002"), 2, Decimal("5"))), T0 - M, "45"),
+    (((Decimal("0.00021"), 2, Decimal("40")), (Decimal("0.0002"), 2, Decimal("5"))), T0 - 5_000, "45"),
     (((Decimal("0.00019"), 2, Decimal("40")),), T0 - M, "0"),   # below our rate
     (((Decimal("0.00021"), 7, Decimal("40")),), T0 - M, "0"),   # bid longer than our offer
     (((Decimal("0.00021"), 2, Decimal("40")),), T0 + M, "0"),   # snapshot after placement
+    (((Decimal("0.00021"), 2, Decimal("40")),), T0 - 10_000, "40"),  # oldest usable
+    (((Decimal("0.00021"), 2, Decimal("40")),), T0 - 10_001, "0"),   # bids may have left
 ])
 def test_crossing_bids(bids: tuple, ts: int, expected: str) -> None:
     assert crossing_bids(book(ts, bids=bids), own()) == Decimal(expected)
@@ -129,19 +134,38 @@ def test_cancelled_offer_is_replayed_only_until_its_cancel(tape_root: Path) -> N
     assert result.conservative_ms is None and is_covered(result)
 
 
-def test_offers_with_unknown_end_or_past_the_tape_are_left_out(tape_root: Path) -> None:
-    tape = ExcludingTape(tape_root, "fUST", [])
-    unknown = own(first_fill=None, end_known=False)
-    assert evaluate([unknown], tape_for=lambda _s: tape, snapshots={}) == []
-    assert evaluate([own()], tape_for=lambda _s: tape, snapshots={},
-                    tape_covers=lambda _end: False) == []
-    assert tape_has_day(tape_root, [own()], T0 + W)
-    assert not tape_has_day(tape_root, [own()], T0 + 2 * W)
+def test_excluded_offers_or_past_the_tape_are_left_out(tape_root: Path) -> None:
+    def tape(o: OwnOffer) -> ExcludingTape:
+        return ExcludingTape(tape_root, o.symbol, [])
+    unknown = own(first_fill=None, excluded="unknown end")
+    assert evaluate([unknown], tape_for=tape, snapshots={}) == []
+    seen: list[tuple[str, int, int]] = []
+    assert evaluate([own(placed_mts=T0 + 500)], tape_for=tape, snapshots={},
+                    tape_covers=lambda *a: seen.append(a) or False) == []
+    assert seen == [("fUST", T0 - 1, T0 + 500 + W)]
+
+
+def test_tape_has_days_checks_every_day_of_the_symbol(tape_root: Path) -> None:
+    assert tape_has_days(tape_root, "fUST", T0, T0 + W)
+    assert not tape_has_days(tape_root, "fUST", T0, T0 + 2 * W)
+    assert not tape_has_days(tape_root, "fUST", T0 - 2 * W, T0)   # missing first day
+    assert not tape_has_days(tape_root, "fUSD", T0, T0)       # other symbol
 
 
 def test_fill_stamped_in_the_acks_second_counts_as_immediate(tape_root: Path) -> None:
-    assert run(tape_root, own(first_fill=T0 - 999), [], own_ids=[]).actual_ms == 0
-    assert run(tape_root, own(first_fill=T0 - 1000), [], own_ids=[]).actual_ms is None
+    acked = T0 + 500  # venue stamps the fill at T0, before the ack
+    assert run(tape_root, own(first_fill=T0, placed_mts=acked), [], own_ids=[]).actual_ms == 0
+    assert run(tape_root, own(first_fill=T0 - 1000, placed_mts=acked), [],
+               own_ids=[]).actual_ms is None
+
+
+def test_replay_window_opens_at_the_acks_whole_second(tmp_path: Path) -> None:
+    write_day(tmp_path, "fUST", DAY, [(100, T0, -100.0, 0.0003, 2)])
+    write_day(tmp_path, "fUST", date(2026, 1, 11), [])
+    write_day(tmp_path, "fUST", date(2026, 1, 9), [])  # the window opens 1 ms before T0
+    result = run(tmp_path, own(first_fill=T0, placed_mts=T0 + 500), [], own_ids=[])
+    assert result.optimistic_ms == 0 and result.conservative_ms == 0
+    assert is_covered(result)
 
 
 def test_actual_fill_after_the_wait_counts_as_no_fill(tape_root: Path) -> None:
@@ -202,7 +226,7 @@ def test_nearest_snapshot_prefers_before_and_respects_tolerance() -> None:
     assert nearest_snapshot(snaps[:1], T0) is None
 
 
-def test_history_facts_first_fill_and_clean_cancel(tmp_path: Path) -> None:
+def test_history_facts_fill_bound_clean_cancel_and_completeness(tmp_path: Path) -> None:
     csv_path = tmp_path / "h.csv"
     csv_path.write_text(
         "venue_offer_id,amount_original,amount_remaining,terminal_kind,mts_updated\n"
@@ -214,30 +238,43 @@ def test_history_facts_first_fill_and_clean_cancel(tmp_path: Path) -> None:
         "d,,5,canceled,\n"
         "e,100,60,canceled,400\n"          # partial fill seen only through the remainder
         "f,100,100,canceled,900\n"         # the last cancel observation wins
-        "f,100,100,canceled,800\n", encoding="utf-8")
+        "f,100,100,canceled,800\n"
+        "g,,100,canceled,600\n", encoding="utf-8")       # unknown original: partial fill?
     facts = history_facts(read_history(csv_path))
-    assert facts["a"].first_fill_mts is None and facts["a"].cancel_mts == 500
-    assert facts["b"].first_fill_mts == 650
-    assert facts["c"].first_fill_mts == 200 and facts["c"].cancel_mts is None
-    assert "d" in facts and facts["d"].first_fill_mts is None
-    assert facts["e"].first_fill_mts == 400
+    assert facts["a"].fill_by_mts is None and facts["a"].cancel_mts == 500
+    assert facts["a"].complete
+    assert facts["b"].fill_by_mts == 650 and facts["b"].cancel_mts is None
+    assert facts["c"].fill_by_mts == 200 and facts["c"].cancel_mts is None
+    assert facts["d"].fill_by_mts is None and not facts["d"].complete   # no time
+    assert facts["e"].fill_by_mts == 400  # an upper bound, not the fill time
     assert facts["f"].cancel_mts == 900
+    assert facts["g"].cancel_mts is None and not facts["g"].complete
 
 
-def test_build_offers_takes_the_earliest_fill_from_trades_or_history() -> None:
-    rows = [("1", "fUST", T0, RATE, 2, Decimal(100)), ("2", "fUST", T0, RATE, 2, Decimal(100)),
-            ("3", "fUST", T0, RATE, 2, Decimal(100)), ("4", "fUST", T0, RATE, 2, Decimal(100))]
-    trades = [(1, 900, T0 + 50), (1, 901, T0 + 40), (4, 902, T0 + 9)]
+def test_build_offers_fill_from_trades_or_an_exact_history_bound() -> None:
+    def row(oid: str, acked: bool = True) -> tuple:
+        return (oid, "fUST", T0, RATE, 2, Decimal(100), acked)
+    rows = [row(str(i)) for i in range(1, 8)] + [row("8", acked=False)]
+    trades = [(1, 900, T0 + 50 * 1000), (1, 901, T0 + 40 * 1000), (4, 902, T0 + 9000),
+              (5, 903, T0 + 60_000), (8, 904, T0 + 1000)]
     history = history_facts([
-        HistoryRow("1", Decimal(100), Decimal(0), "executed", T0 + 45),
-        HistoryRow("4", Decimal(100), Decimal(0), "executed", T0 + 3),
-        HistoryRow("2", Decimal(100), Decimal(0), "executed", T0 + 7),  # missing from trades
+        HistoryRow("1", Decimal(100), Decimal(0), "executed", T0 + 45 * 1000),  # later: trade wins
+        HistoryRow("4", Decimal(100), Decimal(0), "executed", T0 + 999),  # ack's second: exact
+        HistoryRow("2", Decimal(100), Decimal(0), "executed", T0 + 999),  # missing from trades
+        HistoryRow("5", Decimal(100), Decimal(0), "executed", T0 + 1000),  # earlier, inexact
+        HistoryRow("6", Decimal(100), Decimal(0), "executed", T0 + 7000),  # no trade, inexact
+        HistoryRow("7", None, Decimal(100), "canceled", T0 + 7000),
     ])
-    one, two, three, four = build_offers(rows, trades, history)
-    assert four.first_fill_mts == T0 + 3  # history earlier than the trade
-    assert one.first_fill_mts == T0 + 40 and one.own_trade_ids == (900, 901)
-    assert two.first_fill_mts == T0 + 7 and two.end_known
-    assert three.first_fill_mts is None and not three.end_known
+    one, two, three, four, five, six, seven, eight = build_offers(rows, trades, history)
+    assert one.first_fill_mts == T0 + 40_000 and one.own_trade_ids == (900, 901)
+    assert one.excluded is None
+    assert two.first_fill_mts == T0 + 999 and two.excluded is None
+    assert three.first_fill_mts is None and three.excluded == "unknown end"
+    assert four.first_fill_mts == T0 + 999
+    assert five.excluded == "fill time unknown"
+    assert six.excluded == "fill time unknown"
+    assert seven.excluded == "unknown end"
+    assert eight.excluded == "no venue ack"
 
 
 def test_coverage_denominator_is_every_offer_not_only_filled_ones() -> None:
