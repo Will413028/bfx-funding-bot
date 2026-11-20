@@ -161,12 +161,20 @@ def replay_start_mts(placed_mts: int) -> int:
     return placed_mts - placed_mts % 1000 - 1
 
 
-def _elapsed(first_mts: int | None, placed_mts: int, max_wait_ms: int) -> int | None:
+def in_ack_second(mts: int, placed_mts: int) -> bool:
+    """`mts` falls in the ack's whole second (before or after the ack itself)."""
+    return 0 <= mts - (placed_mts - placed_mts % 1000) < 1000
+
+
+def _elapsed(first_mts: int | None, placed_mts: int, max_wait_ms: int, *,
+             replayed: bool = False) -> int | None:
     if first_mts is None:
         return None
     waited = first_mts - placed_mts
-    # A fill stamped in the ack's own second reads as before the ack.
-    if replay_start_mts(placed_mts) <= first_mts < placed_mts:
+    # A fill stamped in the ack's own second reads as before the ack; a replayed
+    # fill can also sit at the window's opening millisecond (crossed bids).
+    if waited < 0 and (in_ack_second(first_mts, placed_mts)
+                       or (replayed and first_mts == replay_start_mts(placed_mts))):
         waited = 0
     return waited if 0 <= waited <= max_wait_ms else None
 
@@ -247,9 +255,9 @@ def evaluate(offers: Sequence[OwnOffer], *, tape_for: Callable[[OwnOffer], TapeD
         outcomes.append(OfferOutcome(
             offer=offer,
             actual_ms=_elapsed(offer.first_fill_mts, p, wait),
-            optimistic_ms=_elapsed(result.optimistic.first_fill_mts, p, wait),
-            conservative_ms=_elapsed(result.conservative.first_fill_mts, p, wait),
-            queue_ms=(_elapsed(result.queue_estimate.first_fill_mts, p, wait)
+            optimistic_ms=_elapsed(result.optimistic.first_fill_mts, p, wait, replayed=True),
+            conservative_ms=_elapsed(result.conservative.first_fill_mts, p, wait, replayed=True),
+            queue_ms=(_elapsed(result.queue_estimate.first_fill_mts, p, wait, replayed=True)
                       if result.queue_estimate is not None else None),
             has_queue_estimate=result.queue_estimate is not None,
             wait_ms=wait,
@@ -448,7 +456,7 @@ def build_offers(offer_rows: Iterable[tuple[str, str, int, Decimal, int, Decimal
         by = facts.fill_by_mts if facts else None
         reasons = [] if acked else ["no venue ack"]
         if by is not None and (first is None or by < first):
-            if by - placed < COVERAGE_TOLERANCE_MS:
+            if in_ack_second(by, placed):
                 first = by
             else:
                 reasons.append("fill time unknown")
@@ -458,7 +466,7 @@ def build_offers(offer_rows: Iterable[tuple[str, str, int, Decimal, int, Decimal
             venue_offer_id=oid, symbol=sym, rate=rate, period_days=period, placed_mts=placed,
             amount=amount, first_fill_mts=first, own_trade_ids=tuple(trade_ids.get(oid, ())),
             cancel_mts=facts.cancel_mts if facts else None,
-            excluded=reasons[0] if reasons else None))
+            excluded=reasons[0] if reasons else None))  # first reason only, in check order
     return offers
 
 
