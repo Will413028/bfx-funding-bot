@@ -145,3 +145,23 @@ def test_unsorted_day_file_is_rejected(tmp_path: Path) -> None:
 def test_negative_queue_ahead_is_rejected(tape: TapeDays) -> None:
     with pytest.raises(ValueError, match="same_rate_queue_ahead"):
         replay_offer(offer(), tape, max_wait_ms=H, same_rate_queue_ahead=Decimal("-1"))
+
+
+def test_crossing_bid_fills_every_bound_at_placement(tape: TapeDays) -> None:
+    result = replay_offer(offer(), tape, max_wait_ms=24 * H, same_rate_queue_ahead=Decimal(0),
+                          crossing_bid_amount=Decimal("60"))
+    for path in (result.conservative, result.optimistic, result.queue_estimate):
+        assert path is not None and path.first_fill_mts == T0
+    # 60 crossed at t0, then 40 more through our rate at t0+1h completes the 100.
+    assert result.conservative.full_fill_mts == T0 + 1 * H
+
+
+def test_crossing_bid_larger_than_offer_fills_in_full_at_once(tape: TapeDays) -> None:
+    result = replay_offer(offer(), tape, max_wait_ms=24 * H, crossing_bid_amount=Decimal("500"))
+    assert result.conservative.full_fill_mts == T0
+    assert result.conservative.filled == Decimal("100")
+
+
+def test_negative_crossing_bid_is_rejected(tape: TapeDays) -> None:
+    with pytest.raises(ValueError, match="crossing_bid_amount"):
+        replay_offer(offer(), tape, max_wait_ms=H, crossing_bid_amount=Decimal("-1"))

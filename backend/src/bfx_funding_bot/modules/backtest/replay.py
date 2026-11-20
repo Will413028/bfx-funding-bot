@@ -151,12 +151,21 @@ def replay_offer(
     *,
     max_wait_ms: int,
     same_rate_queue_ahead: Decimal | None = None,
+    crossing_bid_amount: Decimal | None = None,
 ) -> ReplayResult:
-    """Fill bounds for `offer` resting at most `max_wait_ms` after placement."""
+    """Fill bounds for `offer` resting at most `max_wait_ms` after placement.
+
+    `crossing_bid_amount` (optional) is the bid volume resting at placement that
+    the offer crosses (bid rate >= offer rate, bid period <= offer period, from a
+    book snapshot): the venue matches it at once, so every bound fills that much
+    at `placed_mts` before any later trade.
+    """
     if offer.amount <= 0 or max_wait_ms <= 0:
         raise ValueError("offer amount and max_wait_ms must be positive")
     if same_rate_queue_ahead is not None and not same_rate_queue_ahead >= 0:
         raise ValueError(f"same_rate_queue_ahead must be >= 0, got {same_rate_queue_ahead}")
+    if crossing_bid_amount is not None and not crossing_bid_amount >= 0:
+        raise ValueError(f"crossing_bid_amount must be >= 0, got {crossing_bid_amount}")
     rows = tape.window(offer.placed_mts, offer.placed_mts + max_wait_ms)
     rate = float(offer.rate)
     eligible = rows[(rows[:, _COL_AMOUNT] < 0) & (rows[:, _COL_PERIOD] <= offer.period_days)
@@ -166,6 +175,11 @@ def replay_offer(
     same = np.isclose(eligible[:, _COL_RATE], rate, rtol=1e-9, atol=0.0)
     above_cum = np.cumsum(np.where(same, 0.0, volume))
     same_cum = np.cumsum(np.where(same, volume, 0.0))
+    if crossing_bid_amount:
+        crossed = float(crossing_bid_amount)
+        mts = np.concatenate(([float(offer.placed_mts)], mts))
+        above_cum = np.concatenate(([crossed], above_cum + crossed))
+        same_cum = np.concatenate(([0.0], same_cum))
 
     queue_estimate = None
     if same_rate_queue_ahead is not None:
