@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from bfx_funding_bot.core.venue_time import VENUE_CLOCK_TOLERANCE_MS
 from scripts.report_replay_validation import (
     COVERAGE_MIN,
     COVERAGE_TOLERANCE_MS,
@@ -155,10 +156,17 @@ def test_tape_has_days_checks_every_day_of_the_symbol(tape_root: Path) -> None:
 def test_fill_stamped_in_the_acks_second_counts_as_immediate(tape_root: Path) -> None:
     acked = T0 + 500  # venue stamps the fill at T0, before the ack
     assert run(tape_root, own(first_fill=T0, placed_mts=acked), [], own_ids=[]).actual_ms == 0
-    assert run(tape_root, own(first_fill=T0 - 1000, placed_mts=acked), [],
-               own_ids=[]).actual_ms is None
-    assert run(tape_root, own(first_fill=T0 - 1, placed_mts=acked), [],
-               own_ids=[]).actual_ms is None   # previous second, even by 1 ms
+
+
+def test_fill_stamped_before_the_ack_within_venue_clock_skew_is_immediate(tape_root: Path) -> None:
+    # Measured 2026-11-20: an own fill stamped 1,044 ms before its ack.
+    acked = T0 + 500
+    assert run(tape_root, own(first_fill=acked - 1044, placed_mts=acked), [],
+               own_ids=[]).actual_ms == 0
+    assert run(tape_root, own(first_fill=acked - VENUE_CLOCK_TOLERANCE_MS, placed_mts=acked), [],
+               own_ids=[]).actual_ms == 0
+    assert run(tape_root, own(first_fill=acked - VENUE_CLOCK_TOLERANCE_MS - 1, placed_mts=acked),
+               [], own_ids=[]).actual_ms is None
 
 
 def test_replay_window_opens_at_the_acks_whole_second(tmp_path: Path) -> None:
@@ -257,7 +265,7 @@ def test_build_offers_fill_from_trades_or_an_exact_history_bound() -> None:
     def row(oid: str, acked: bool = True) -> tuple:
         return (oid, "fUST", T0, RATE, 2, Decimal(100), acked)
     rows = ([row(str(i)) for i in range(1, 8)] + [row("8", acked=False)]
-            + [(oid, "fUST", T0 + 800, RATE, 2, Decimal(100), True) for oid in ("9", "10")])
+            + [(oid, "fUST", T0 + 800, RATE, 2, Decimal(100), True) for oid in ("9", "10", "11")])
     trades = [(1, 900, T0 + 50 * 1000), (1, 901, T0 + 40 * 1000), (4, 902, T0 + 9000),
               (5, 903, T0 + 60_000), (8, 904, T0 + 1000)]
     history = history_facts([
@@ -268,9 +276,11 @@ def test_build_offers_fill_from_trades_or_an_exact_history_bound() -> None:
         HistoryRow("6", Decimal(100), Decimal(0), "executed", T0 + 7000),  # no trade, inexact
         HistoryRow("7", None, Decimal(100), "canceled", T0 + 7000),
         HistoryRow("9", Decimal(100), Decimal(0), "executed", T0 + 1700),  # < 1 s, next second
-        HistoryRow("10", Decimal(100), Decimal(0), "executed", T0 - 5000),  # before the ack
+        HistoryRow("10", Decimal(100), Decimal(0), "executed", T0 - 5001),  # past clock skew
+        HistoryRow("11", Decimal(100), Decimal(0), "executed", T0 - 244),  # skew, previous second
     ])
-    one, two, three, four, five, six, seven, eight, nine, ten = build_offers(rows, trades, history)
+    one, two, three, four, five, six, seven, eight, nine, ten, eleven = build_offers(
+        rows, trades, history)
     assert one.first_fill_mts == T0 + 40_000 and one.own_trade_ids == (900, 901)
     assert one.excluded is None
     assert two.first_fill_mts == T0 + 999 and two.excluded is None
@@ -281,6 +291,7 @@ def test_build_offers_fill_from_trades_or_an_exact_history_bound() -> None:
     assert seven.excluded == "unknown end"
     assert eight.excluded == "no venue ack"
     assert nine.excluded == "fill time unknown" and ten.excluded == "fill time unknown"
+    assert eleven.first_fill_mts == T0 - 244 and eleven.excluded is None
 
 
 def test_coverage_denominator_is_every_offer_not_only_filled_ones() -> None:
