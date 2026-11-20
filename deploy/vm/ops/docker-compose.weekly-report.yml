@@ -127,9 +127,7 @@ services:
       LD_LIBRARY_PATH: ""
       LD_AUDIT: ""
     volumes:
-      # Must already exist and be writable by uid 1000, like the reports directory
-      # (`sudo install -d -o 1000 -g 1001 -m 775 /home/ubuntu/bfx/tape`); the runner
-      # refuses when it is missing.
+      # Created by the runner (uid 1000, 0775) when missing, never by Docker.
       - type: bind
         source: /home/ubuntu/bfx/tape
         target: /tape
@@ -142,7 +140,7 @@ services:
       - sh
       - -c
       - |
-        timeout 2400 python -m scripts.ingest_public_trades --tape-root /tape --symbols fUSD,fUST || echo "WARN ingest_public_trades failed/timed out/stopped on 429 (finished days kept; next run resumes — non-blocking)"
+        timeout 2400 python -m scripts.ingest_public_trades --tape-root /tape --symbols fUSD,fUST || echo "WARN ingest_public_trades exit $$? (3=429 stop, 5=failed days, 7=locked, 124=timeout; finished days kept; next run resumes — non-blocking)"
     networks:
       bfx_default: {}
 

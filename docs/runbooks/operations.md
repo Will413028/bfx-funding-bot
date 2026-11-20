@@ -598,8 +598,9 @@ VM 上 `/home/ubuntu/bfx-funding-bot` 的 working tree **不再被讀取**（它
 - **成交紀錄日檔（trade tape）**：weekly-report 之前先跑 `tape-ingest` service，把 Bitfinex 公開 funding 成交紀錄
   （fUSD、fUST）每個已結束的 UTC 日寫成 `/home/ubuntu/bfx/tape/<symbol>/<YYYY-MM-DD>.csv.gz`，只供研究用，live bot 不讀。
   只有它能寫這個目錄（weekly-report 唯讀掛載），不帶 DB 連線字串；每 20 秒一個請求、第一次 429 就停、上限 2400 秒，
-  失敗只印 WARN，下次從目錄現況續抓。目錄必須已存在且 uid 1000 可寫
-  （`sudo install -d -o 1000 -g 1001 -m 775 /home/ubuntu/bfx/tape`），不存在時 runner 以 `tape_dir_missing` 拒跑。
+  某天失敗（空回應、格式錯、網路）就跳過、下次重抓；同一時間只允許一個收集程式（`<tape-root>/.lock`）。
+  失敗只印 WARN 與 exit code，下次從目錄現況續抓。目錄不存在時 runner 以 root 建立（uid 1000、0775）；
+  是 symlink 或不是目錄時以 `tape_dir_not_a_directory` 拒跑。
   這份資料沒有異地備份（計畫 2026-11-15 D5）：VM 毀損時從 API 重抓（約 3.5 天）。
   首次回補、匯入既有 CSV 或抽查某幾天與 API 是否一致，用同一個 image 跑一次性容器
   （`scripts.ingest_public_trades` 的 `--import-csv`／`--verify`，見檔頭說明），掛載與 hardening 照 `tape-ingest` service。

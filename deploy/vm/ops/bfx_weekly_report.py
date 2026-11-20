@@ -21,10 +21,12 @@ One run:
      Its DATABASE_URL is the research role `bfx_research` (migration 3c5e7a9b1d2f:
      writes only the research tables, never the ledger or trading state); bot.env
      is never read, and a missing research.env stops the run;
-  4. the reports and trade tape directories must already exist (real
-     directories, not symlinks): Compose 2.x and v5 disagree on how an unset
-     create_host_path reads, so the runner, not Docker, guarantees nothing gets
-     created;
+  4. the reports directory must already exist (a real directory, not a
+     symlink): Compose 2.x and v5 disagree on how an unset create_host_path
+     reads, so the runner, not Docker, guarantees nothing gets created. The
+     trade tape directory is created by the runner itself when missing (owned by
+     the image's uid 1000, mode 0775), so a release does not wait on a manual
+     step; a symlink there stops the run;
   5. `docker compose -p bfx-weekly-report -f <that file> run --rm tape-ingest`
      (the trade tape's daily files; its step is fail-soft inside the container
      and a non-zero exit here only logs a warning), then the same with
@@ -83,6 +85,14 @@ REPORTS_DIR = Path("/home/ubuntu/bfx/reports")
 # The tape-ingest bind source (compose_policy.WEEKLY_TAPE); runs before SERVICE.
 TAPE_DIR = Path("/home/ubuntu/bfx/tape")
 TAPE_SERVICE = "tape-ingest"
+TAPE_OWNER = (1000, 1001)  # image appuser, ubuntu group (as the reports directory)
+
+
+def ensure_tape_dir(path: Path) -> None:
+    """Create the tape directory for uid 1000 if it is missing (root only)."""
+    path.mkdir(mode=0o775)
+    os.chown(path, *TAPE_OWNER)
+    path.chmod(0o775)  # mkdir's mode is masked by UMask=0077
 # Read by bfx_backup_check.py --weekly-heartbeat; StateDirectory of both units.
 HEARTBEAT = Path("/var/lib/bfx-ops/weekly-report-heartbeat.json")
 
@@ -153,6 +163,7 @@ def build_plan(
     reports_dir: Path = REPORTS_DIR, compose_name: str = COMPOSE_FILE,
     project: str = PROJECT, service: str = SERVICE,
     tape_dir: Path | None = TAPE_DIR, pre_services: tuple[str, ...] = (TAPE_SERVICE,),
+    make_tape_dir: Callable[[Path], None] = ensure_tape_dir,
 ) -> Plan:
     """`tape_dir=None, pre_services=()` for a job without the trade tape (the public site)."""
     compose_file = ops_dir / compose_name
@@ -160,8 +171,14 @@ def build_plan(
         raise DeployError("weekly_compose_missing")
     if reports_dir.is_symlink() or not reports_dir.is_dir():
         raise DeployError("reports_dir_missing")
-    if tape_dir is not None and (tape_dir.is_symlink() or not tape_dir.is_dir()):
-        raise DeployError("tape_dir_missing")
+    if tape_dir is not None:
+        if tape_dir.is_symlink() or (tape_dir.exists() and not tape_dir.is_dir()):
+            raise DeployError("tape_dir_not_a_directory")
+        if not tape_dir.exists():
+            try:
+                make_tape_dir(tape_dir)
+            except OSError as exc:
+                raise DeployError(f"tape_dir_unusable:{exc.__class__.__name__}") from None
     revision = tooling_revision(ops_dir)
     view = ledger.read()
     deployed = view.last_success if view.exists else None

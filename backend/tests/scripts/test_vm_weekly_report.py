@@ -410,8 +410,9 @@ def test_heartbeat_path_is_the_one_backup_check_defaults_to() -> None:
     (lambda h, ledger: h["reports"].rmdir(), "reports_dir_missing"),
     (lambda h, ledger: (h["reports"].rmdir(), h["reports"].symlink_to(h["state"])),
      "reports_dir_missing"),
-    (lambda h, ledger: h["tape"].rmdir(), "tape_dir_missing"),
-    (lambda h, ledger: (h["tape"].rmdir(), h["tape"].symlink_to(h["state"])), "tape_dir_missing"),
+    (lambda h, ledger: (h["tape"].rmdir(), h["tape"].symlink_to(h["state"])),
+     "tape_dir_not_a_directory"),
+    (lambda h, ledger: (h["tape"].rmdir(), h["tape"].write_text("x")), "tape_dir_not_a_directory"),
 ])
 def test_plan_refuses_instead_of_guessing(
     host: dict[str, Path], mutate: Callable[[dict[str, Path], FakeLedger], object], code: str,
@@ -482,7 +483,8 @@ def test_tape_ingest_step_is_the_paced_fail_soft_collector() -> None:
     (step,) = command[2].splitlines()
     assert step.startswith("timeout 2400 python -m scripts.ingest_public_trades --tape-root /tape ")
     assert "--pace" not in step  # the script's 20 s default, never faster
-    assert step.endswith('(finished days kept; next run resumes — non-blocking)"')
+    assert step.endswith('finished days kept; next run resumes — non-blocking)"')
+    assert "exit $$?" in step  # the WARN names the real exit code
 
 
 def _timeouts(service: str) -> list[int]:
@@ -555,3 +557,28 @@ def test_a_failed_tape_ingest_is_logged_and_the_report_still_runs(
     assert weekly.run(plan, execute=execute, heartbeat=tmp_path / "hb.json") == 0
     assert [c[-1] for c in calls] == ["tape-ingest", "weekly-report"]
     assert "warning: tape-ingest exited 1" in capsys.readouterr().err
+
+
+def test_a_missing_tape_dir_is_created_not_a_reason_to_skip_the_report(host: dict[str, Path]) -> None:
+    host["tape"].rmdir()
+    made: list[Path] = []
+    weekly.build_plan(
+        ops_dir=host["ops"], ledger=FakeLedger([(REV, DIGEST, "deployed")]),
+        runtime_dir=host["runtime"], backend_repository=BACKEND, reports_dir=host["reports"],
+        tape_dir=host["tape"], secret_check=lambda _p: None,
+        make_tape_dir=lambda p: (made.append(p), p.mkdir()))
+    assert made == [host["tape"]] and host["tape"].is_dir()
+
+
+def test_tape_dir_creation_failure_is_named(host: dict[str, Path]) -> None:
+    host["tape"].rmdir()
+
+    def denied(_p: Path) -> None:
+        raise PermissionError
+
+    with pytest.raises(bfx.DeployError) as excinfo:
+        weekly.build_plan(
+            ops_dir=host["ops"], ledger=FakeLedger([(REV, DIGEST, "deployed")]),
+            runtime_dir=host["runtime"], backend_repository=BACKEND, reports_dir=host["reports"],
+            tape_dir=host["tape"], secret_check=lambda _p: None, make_tape_dir=denied)
+    assert excinfo.value.code == "tape_dir_unusable:PermissionError"

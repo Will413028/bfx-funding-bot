@@ -15,6 +15,9 @@ written only after the day has ended (plus SETTLE_MS) and only once complete
 (temporary file + rename), so an interrupted run leaves no partial day and the
 next run resumes. Existing files are never rewritten; `--verify` re-fetches
 existing days and fails (exit 4) when the trades differ, without overwriting.
+Days go newest first, alternating symbols. A day that fails (empty answer,
+malformed payload, network) stays missing and the run goes on (exit 5 at the
+end). One run per tape root at a time (flock on <tape-root>/.lock; exit 7).
 
 Rate limits (the VM shares its egress IP with the live bot, and Bitfinex blocks
 the whole IP for 60 s on a breach): one request every --pace seconds (default
@@ -29,7 +32,9 @@ Usage (in the image, working dir /app):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
+import fcntl
 import gzip
 import io
 import json
@@ -71,6 +76,23 @@ class StuckPageError(Exception):
     """A full page inside one millisecond: MTS paging cannot move past it."""
 
 
+class PayloadError(Exception):
+    """The API answered with something that is not a list of 5-field trades."""
+
+
+class EmptyDayError(Exception):
+    """A whole UTC day with no trades: never seen on fUSD/fUST since 2022 (step 1
+    spike), so an empty answer is treated as an API fault, not written."""
+
+
+class TapeLockedError(Exception):
+    """Another ingest run holds the tape root."""
+
+
+# Per-day faults: logged, the day stays missing (retried next run), the run goes on.
+DAY_ERRORS = (StuckPageError, PayloadError, EmptyDayError, urllib.error.URLError, TimeoutError)
+
+
 @dataclass(frozen=True, slots=True)
 class Day:
     value: date
@@ -105,7 +127,10 @@ def missing_days(root: Path, symbol: str, start: date, now_ms: int) -> list[date
     return days
 
 
-def _row(raw: Sequence[float | int]) -> Row:
+def _row(raw: object) -> Row:
+    if not isinstance(raw, list | tuple) or len(raw) != 5 \
+            or not all(isinstance(v, int | float) and not isinstance(v, bool) for v in raw):
+        raise PayloadError(f"not a trade: {str(raw)[:80]}")
     return int(raw[0]), int(raw[1]), float(raw[2]), float(raw[3]), int(raw[4])
 
 
@@ -133,6 +158,8 @@ def fetch_day(symbol: str, day: date, fetch: Fetch, sleep: Callable[[float], Non
         at_last = {r[0] for r in page if r[1] == last_mts}
         seen_at_cursor = at_last | (seen_at_cursor if last_mts == cursor else set())
         cursor = last_mts
+    if not rows:
+        raise EmptyDayError(f"{symbol} {day}: the API returned no trades")
     return sorted(rows.values(), key=lambda r: (r[1], r[0]))
 
 
@@ -163,7 +190,10 @@ def write_day(path: Path, rows: list[Row]) -> None:
         raise FileExistsError(path)
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_bytes(encode(rows))
-    os.replace(temporary, path)
+    try:
+        os.link(temporary, path)  # fails if the day appeared meanwhile; never replaces
+    finally:
+        temporary.unlink()
 
 
 def clear_temporaries(root: Path, symbol: str) -> None:
@@ -171,31 +201,59 @@ def clear_temporaries(root: Path, symbol: str) -> None:
         stale.unlink()
 
 
+@contextlib.contextmanager
+def tape_lock(root: Path) -> Iterator[None]:
+    """One ingest run per tape root (the weekly service and a one-off backfill can overlap)."""
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / ".lock").open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise TapeLockedError(str(root)) from None
+        yield
+
+
+@dataclass(slots=True)
+class CollectResult:
+    written: dict[str, int]
+    failed: list[str]  # "<symbol> <day>: <error>", each retried on the next run
+
+
 def collect(root: Path, symbols: Sequence[str], *, start: date, fetch: Fetch,
-            sleep: Callable[[float], None] = time.sleep, pace_s: float = DEFAULT_PACE_S,
+            sleep: Callable[[float], None] | None = None, pace_s: float = DEFAULT_PACE_S,
             now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
-            log: Callable[[str], None] = print) -> dict[str, int]:
-    """Fetch every missing finished day. Returns days written per symbol."""
-    written: dict[str, int] = {}
-    requested = False
+            log: Callable[[str], None] = print) -> CollectResult:
+    """Fetch every missing finished day, newest first, alternating symbols, so a long
+    backlog on one symbol never starves the other or the latest week. A day that fails
+    is logged and left missing; a 429 stops everything."""
+    sleep = sleep or time.sleep
+    result = CollectResult(dict.fromkeys(symbols, 0), [])
+    queues: list[tuple[str, list[date]]] = []
     for symbol in symbols:
         clear_temporaries(root, symbol)
-        written[symbol] = 0
-        for day in missing_days(root, symbol, start, now_ms()):
-            if requested:
-                sleep(pace_s)
-            requested = True
+        queues.append((symbol, sorted(missing_days(root, symbol, start, now_ms()), reverse=True)))
+    order = [(symbol, days[i]) for i in range(max((len(d) for _, d in queues), default=0))
+             for symbol, days in queues if i < len(days)]
+    for index, (symbol, day) in enumerate(order):
+        if index:
+            sleep(pace_s)
+        try:
             rows = fetch_day(symbol, day, fetch, sleep, pace_s)
-            write_day(day_path(root, symbol, day), rows)
-            written[symbol] += 1
-            log(f"{symbol} {day} rows={len(rows)}")
-    return written
+        except DAY_ERRORS as exc:
+            result.failed.append(f"{symbol} {day}: {exc.__class__.__name__}: {exc}")
+            log(f"{symbol} {day} FAILED {exc.__class__.__name__}: {exc}")
+            continue
+        write_day(day_path(root, symbol, day), rows)
+        result.written[symbol] += 1
+        log(f"{symbol} {day} rows={len(rows)}")
+    return result
 
 
 def verify(root: Path, symbols: Sequence[str], days: Sequence[date], *, fetch: Fetch,
-           sleep: Callable[[float], None] = time.sleep, pace_s: float = DEFAULT_PACE_S,
+           sleep: Callable[[float], None] | None = None, pace_s: float = DEFAULT_PACE_S,
            log: Callable[[str], None] = print) -> int:
     """Re-fetch existing days; raise TapeMismatchError on any difference. Never writes."""
+    sleep = sleep or time.sleep
     checked = 0
     for symbol in symbols:
         for day in days:
@@ -215,20 +273,28 @@ def verify(root: Path, symbols: Sequence[str], days: Sequence[date], *, fetch: F
 
 
 def _csv_rows(lines: Iterable[str]) -> Iterator[Row]:
-    for line in lines:
-        f = line.rstrip("\n").split(",")
-        if f[0] == "id":
+    for number, line in enumerate(lines, start=1):
+        text = line.strip()
+        if not text or text.startswith("id,"):
             continue
-        yield int(f[0]), int(f[1]), float(f[2]), float(f[3]), int(f[4])
+        f = text.split(",")
+        try:
+            if len(f) != 5:
+                raise ValueError
+            yield int(f[0]), int(f[1]), float(f[2]), float(f[3]), int(f[4])
+        except ValueError:
+            raise ValueError(f"malformed line {number}: {text[:80]!r}") from None
 
 
 def import_csv(root: Path, symbol: str, lines: Iterable[str], *, now_ms: int,
                log: Callable[[str], None] = print) -> int:
     """Split one MTS-ordered tape CSV (spike output) into day files.
 
-    Streams: holds one day at a time. Skips days not yet finished and days that
-    already have a file. The source must be ordered by MTS (the spike fetched with
-    sort=1); a day seen twice is an error, not a merge.
+    Streams: holds one day at a time. Never writes the source's first or last day
+    (the spike started and stopped at arbitrary moments, so they may be partial: a
+    later collect fetches them whole from the API), days not yet finished, or days
+    that already have a file. The source must be ordered by MTS (the spike fetched
+    with sort=1); a day seen twice is an error, not a merge.
     """
     clear_temporaries(root, symbol)
     last = last_finished_day(now_ms)
@@ -237,9 +303,11 @@ def import_csv(root: Path, symbol: str, lines: Iterable[str], *, now_ms: int,
     done: set[date] = set()
     rows: dict[int, Row] = {}
 
+    first: date | None = None
+
     def flush() -> None:
         nonlocal written
-        if current is None or current > last:
+        if current is None or current > last or current == first:
             return
         path = day_path(root, symbol, current)
         if path.exists():
@@ -251,14 +319,16 @@ def import_csv(root: Path, symbol: str, lines: Iterable[str], *, now_ms: int,
     for row in _csv_rows(lines):
         day = datetime.fromtimestamp(row[1] / 1000, UTC).date()
         if day != current:
-            flush()
+            if current is not None:
+                flush()  # never reached for the last day: the loop ends first
+            else:
+                first = day
             if day in done:
                 raise ValueError(f"{symbol}: source not ordered by mts ({day} seen twice)")
             if current is not None:
                 done.add(current)
             current, rows = day, {}
         rows[row[0]] = row
-    flush()
     return written
 
 
@@ -270,14 +340,14 @@ def http_fetch(symbol: str, start_ms: int, end_ms: int) -> list[list[float | int
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
                 payload = json.load(response)
-            if not isinstance(payload, list):
-                raise ValueError(f"unexpected payload for {symbol}")
+            if not isinstance(payload, list) or (payload and payload[0] == "error"):
+                raise PayloadError(f"{symbol}: {str(payload)[:120]}")
             return payload
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 raise RateLimitedError(url) from None
             if exc.code < 500 or attempt == TRANSIENT_RETRIES:
-                raise
+                raise PayloadError(f"{symbol}: HTTP {exc.code}") from None
         except (urllib.error.URLError, TimeoutError):
             if attempt == TRANSIENT_RETRIES:
                 raise
@@ -312,29 +382,49 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
     try:
-        if args.import_csv is not None:
-            if not args.symbol:
-                print("--import-csv needs --symbol", file=sys.stderr)
-                return 2
-            with args.import_csv.open(encoding="utf-8") as stream:
-                n = import_csv(args.tape_root, args.symbol, stream, now_ms=int(time.time() * 1000))
-            print(f"imported {n} days")
-        elif args.verify is not None:
-            n = verify(args.tape_root, symbols, _day_range(args.verify), fetch=http_fetch,
-                       pace_s=args.pace)
-            print(f"verified {n} day files")
-        else:
-            written = collect(args.tape_root, symbols, start=args.start, fetch=http_fetch,
-                              pace_s=args.pace)
-            print(f"written {written}")
+        with tape_lock(args.tape_root):
+            return _run(args, symbols)
+    except TapeLockedError:
+        print("another ingest run holds the tape root; nothing done", file=sys.stderr)
+        return 7
     except RateLimitedError:
         print("HTTP 429: stopped (finished days are kept; the next run resumes)", file=sys.stderr)
         return 3
     except TapeMismatchError as exc:
         print(f"tape mismatch, nothing overwritten: {exc}", file=sys.stderr)
         return 4
-    return 0
+    except DAY_ERRORS as exc:
+        print(f"verify failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+        return 5
 
+
+def _run(args: argparse.Namespace, symbols: list[str]) -> int:
+    if args.import_csv is not None:
+        if not args.symbol:
+            print("--import-csv needs --symbol", file=sys.stderr)
+            return 2
+        with args.import_csv.open(encoding="utf-8") as stream:
+            try:
+                n = import_csv(args.tape_root, args.symbol, stream,
+                               now_ms=int(time.time() * 1000))
+            except ValueError as exc:
+                print(f"import stopped: {exc}", file=sys.stderr)
+                return 6
+        print(f"imported {n} days")
+        return 0
+    if args.verify is not None:
+        n = verify(args.tape_root, symbols, _day_range(args.verify), fetch=http_fetch,
+                   pace_s=args.pace)
+        print(f"verified {n} day files")
+        return 0
+    result = collect(args.tape_root, symbols, start=args.start, fetch=http_fetch, pace_s=args.pace)
+    print(f"written {result.written}")
+    if result.failed:
+        print(f"{len(result.failed)} day(s) failed and stay missing:", file=sys.stderr)
+        for line in result.failed:
+            print(f"  {line}", file=sys.stderr)
+        return 5
+    return 0
 
 if __name__ == "__main__":
     raise SystemExit(main())
