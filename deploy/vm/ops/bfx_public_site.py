@@ -246,7 +246,8 @@ def build_plan(*, ops_dir: Path, ledger: object, runtime_dir: Path,
     return bfx_weekly_report.build_plan(
         ops_dir=ops_dir, ledger=ledger, runtime_dir=runtime_dir,
         backend_repository=backend_repository, secret_check=bfx_deploy.protected_secret_file,
-        reports_dir=BUILD_DIR, compose_name=COMPOSE_FILE, project=PROJECT, service=SERVICE)
+        reports_dir=BUILD_DIR, compose_name=COMPOSE_FILE, project=PROJECT, service=SERVICE,
+        tape_dir=None, pre_services=())
 
 
 def urllib_transport(method: str, url: str, headers: Mapping[str, str],

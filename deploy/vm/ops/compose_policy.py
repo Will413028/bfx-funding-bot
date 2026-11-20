@@ -38,10 +38,12 @@ VM bfx-deploy only confirms each container runs the recorded digest and identity
 
 `--kind weekly-report` checks deploy/vm/ops/docker-compose.weekly-report.yml
 the same way (CI renders it with placeholder values for the variables the
-runner, bfx_weekly_report.py, supplies): one one-shot service on the digest
-image with the app's hardening, the reports bind mount as its only writable
-host path, a small /tmp tmpfs, no env files (the runner passes exactly the keys
-the steps read) and no published ports.
+runner, bfx_weekly_report.py, supplies): exactly two one-shot services on the
+digest image with the app's hardening, a small /tmp tmpfs, no env files (the
+runner passes exactly the keys the steps read) and no published ports. Their bind
+mounts are pinned per service (WEEKLY_SERVICES): `weekly-report` writes only the
+reports directory and reads the trade tape directory read-only; `tape-ingest`
+writes only the tape directory and gets no database URL or account id.
 
 `--kind public-site` checks deploy/vm/ops/docker-compose.public-site.yml with the
 same rules (the same plan supplies it); its one writable host path is the
@@ -66,6 +68,7 @@ import argparse
 import json
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 # Every app release has the bot and the web API (9d-5 removed the frontend service).
@@ -150,6 +153,9 @@ WEEKLY_SERVICE = "weekly-report"
 WEEKLY_ENV = ("DATABASE_URL", "BFX_EXCHANGE_ACCOUNT_ID", "BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION")
 WEEKLY_TMPFS = ["/tmp:rw,noexec,nosuid,size=64m"]
 WEEKLY_REPORTS = {"type": "bind", "source": "/home/ubuntu/bfx/reports", "target": "/reports"}
+WEEKLY_TAPE = {"type": "bind", "source": "/home/ubuntu/bfx/tape", "target": "/tape"}
+TAPE_SERVICE = "tape-ingest"
+TAPE_ENV = ("BFX_IMAGE_DIGEST", "BFX_SOURCE_REVISION")
 PUBLIC_SITE_PROJECT = "bfx-public-site"
 PUBLIC_SITE_SERVICE = "public-site-build"
 PUBLIC_SITE_OUT = {"type": "bind", "source": "/run/bfx-public-site/build", "target": "/out"}
@@ -174,6 +180,33 @@ OPERATOR_ENV_KEYS = frozenset({*OPERATOR_INTERPOLATED, "PYTHONDONTWRITEBYTECODE"
                                *LOADER_INJECTION, *PYTHON_INJECTION})
 OPERATOR_ENV_FILES = {OPERATOR_SERVICE: (f"/{RUNTIME_REFERENCE}operator.env",)}
 OPERATOR_FORBIDDEN_KEYS = (*FORBIDDEN_KEYS, "container_name", "ports", "command", "healthcheck")
+
+
+@dataclass(frozen=True, slots=True)
+class JobMount:
+    name: str  # the violation name when this mount is missing or wrong
+    spec: Mapping[str, str]
+    read_only: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class JobService:
+    mounts: tuple[JobMount, ...]
+    env: tuple[str, ...]
+    forbidden_env: tuple[str, ...] = ()
+
+
+# The weekly job's two services (docker-compose.weekly-report.yml). Only tape-ingest
+# can write the trade tape; it holds no database URL (plan 2026-11-15 step 2).
+WEEKLY_SERVICES: Mapping[str, JobService] = {
+    WEEKLY_SERVICE: JobService(
+        mounts=(JobMount("reports_mount", WEEKLY_REPORTS),
+                JobMount("tape_mount_read_only", WEEKLY_TAPE, read_only=True)),
+        env=WEEKLY_ENV),
+    TAPE_SERVICE: JobService(
+        mounts=(JobMount("tape_mount", WEEKLY_TAPE),),
+        env=TAPE_ENV, forbidden_env=("DATABASE_URL", "BFX_EXCHANGE_ACCOUNT_ID")),
+}
 
 
 # The bot's and the web API's log on the host: json-file, capped (ASVS V16.1.1).
@@ -268,9 +301,10 @@ def ingress_violations(service: str, spec: Mapping[str, Any]) -> list[str]:
     return found
 
 
-def reports_mount_ok(mount: object, expected: Mapping[str, str] = WEEKLY_REPORTS) -> bool:
-    """Exactly the reports dir -> /reports (or `expected`), a writable bind, never
-    created by Docker.
+def reports_mount_ok(mount: object, expected: Mapping[str, str] = WEEKLY_REPORTS,
+                     *, read_only: bool = False) -> bool:
+    """Exactly the reports dir -> /reports (or `expected`), a writable bind (read-only
+    when `read_only`), never created by Docker.
 
     Compose versions render `create_host_path: false` differently: v5 prints it
     (`"bind": {"create_host_path": false}`), 2.38 omits a false value and prints
@@ -285,7 +319,7 @@ def reports_mount_ok(mount: object, expected: Mapping[str, str] = WEEKLY_REPORTS
         return False
     if {k: mount.get(k) for k in expected} != expected:
         return False
-    if set(mount) - {*expected, "bind", "read_only"} or mount.get("read_only", False) is not False:
+    if set(mount) - {*expected, "bind", "read_only"} or mount.get("read_only", False) is not read_only:
         return False
     bind = mount.get("bind", {})
     return isinstance(bind, dict) and not set(bind) - {"create_host_path"} \
@@ -293,16 +327,19 @@ def reports_mount_ok(mount: object, expected: Mapping[str, str] = WEEKLY_REPORTS
 
 
 def weekly_violations(
-    rendered: Mapping[str, Any], *, project: str = WEEKLY_PROJECT, service: str = WEEKLY_SERVICE,
+    rendered: Mapping[str, Any], *, project: str = WEEKLY_PROJECT, service: str | None = None,
     mount: Mapping[str, str] = WEEKLY_REPORTS,
 ) -> list[str]:
     """The weekly-report job file (deploy/vm/ops/docker-compose.weekly-report.yml), or a
-    one-shot job built the same way (the public site's build)."""
+    one-shot job of one `service` built the same way with `mount` as its only writable
+    path (the public site's build)."""
+    rules = dict(WEEKLY_SERVICES) if service is None else {
+        service: JobService(mounts=(JobMount("reports_mount", mount),), env=WEEKLY_ENV)}
     found = [f"top_level_key:{key}" for key in sorted(set(rendered) - WEEKLY_TOP_LEVEL_KEYS)]
     if rendered.get("name") != project:
         found.append("project_name")
     services = rendered.get("services") or {}
-    if set(services) != {service}:
+    if set(services) != set(rules):
         found.append("services")
     if rendered.get("volumes"):
         found.append("volumes")
@@ -310,9 +347,15 @@ def weekly_violations(
     if set(rendered.get("networks") or {}) != {NETWORK} or network.get("external") is not True \
             or network.get("name") != NETWORK:
         found.append("external_network")
-    spec = services.get(service)
-    if not isinstance(spec, dict):
-        return found
+    for name, rule in rules.items():
+        spec = services.get(name)
+        if isinstance(spec, dict):
+            found += _job_service_violations(name, spec, rule)
+    return found
+
+
+def _job_service_violations(service: str, spec: Mapping[str, Any], rule: JobService) -> list[str]:
+    found: list[str] = []
     env = spec.get("environment") or {}
 
     def need(ok: bool, name: str) -> None:
@@ -338,9 +381,18 @@ def weekly_violations(
     for key in sorted(set(spec) - WEEKLY_KEYS):
         found.append(f"{service}:unexpected_key:{key}")
     volumes = spec.get("volumes") or []
-    need(len(volumes) == 1 and reports_mount_ok(volumes[0], mount), "reports_mount")
+    targets = [m.spec["target"] for m in rule.mounts]
+    for job_mount in rule.mounts:
+        matching = [v for v in volumes
+                    if isinstance(v, dict) and v.get("target") == job_mount.spec["target"]]
+        need(len(matching) == 1 and reports_mount_ok(matching[0], job_mount.spec,
+                                                     read_only=job_mount.read_only),
+             job_mount.name)
+    need(all(isinstance(v, dict) and v.get("target") in targets for v in volumes),
+         "no_extra_volumes")
     need(set(spec.get("networks") or {}) == {NETWORK}, "network")
-    need(all(env.get(key) for key in WEEKLY_ENV), "runtime_env")
+    need(all(env.get(key) for key in rule.env), "runtime_env")
+    need(not any(key in env for key in rule.forbidden_env), "no_database_env")
     need(all(env.get(key) == "" for key in LOADER_INJECTION), "loader_injection_blanked")
     need(all(env.get(key) == "" for key in PYTHON_INJECTION)
          and env.get("PYTHONDONTWRITEBYTECODE") == "1", "interpreter_injection_blanked")
