@@ -22,9 +22,7 @@ Post-hoc changes after the first run failed (Will 2026-11-20, plan step 4 D6;
 the thresholds above are unchanged):
 
 - placement is the venue ack (`transport_outcome_journal.completed_at_ms`), not
-  the start of the send, and coverage allows the tape's 1-second resolution
-  (a fill stamped up to `VENUE_CLOCK_TOLERANCE_MS` before the ack counts as
-  immediate: venue times are whole seconds on the venue's clock);
+  the start of the send, and coverage allows the tape's 1-second resolution;
 - only trades of our *other* offers leave the tape: the borrower who took the
   replayed offer is demand that exists either way (at our rate it reaches only
   the optimistic bound and the queue estimate, so the conservative bound stays
@@ -54,6 +52,13 @@ unchanged):
 - placement is only an `ack` transport outcome; other outcomes record when the
   send gave up, not when the venue accepted, so those offers are left out;
 - crossed bids come only from a snapshot taken at most 10 s before placement.
+
+Venue clock correction (2026-11-20, after the third run; thresholds unchanged):
+an own fill stamped up to `VENUE_CLOCK_TOLERANCE_MS` before the ack counts as
+at placement (venue times are whole seconds on the venue's clock; measured up
+to 1,044 ms), and one stamped earlier leaves the fill time unknown. The replay
+window, crossing snapshot and queue adjustment still anchor on the ack, so a
+snapshot taken between the real placement and the ack can miss crossed bids.
 
 Run from backend/ (env: DATABASE_URL; read-only, the `bfx_research` role suffices):
   uv run python -m scripts.report_replay_validation --tape-root /tape [--out FILE]
@@ -463,6 +468,8 @@ def build_offers(offer_rows: Iterable[tuple[str, str, int, Decimal, int, Decimal
         first = trade_fill.get(oid)
         by = facts.fill_by_mts if facts else None
         reasons = [] if acked else ["no venue ack"]
+        if first is not None and first < placed - VENUE_CLOCK_TOLERANCE_MS:
+            reasons.append("fill time unknown")  # before placement: skew past tolerance
         if by is not None and (first is None or by < first):
             if at_placement(by, placed):
                 first = by

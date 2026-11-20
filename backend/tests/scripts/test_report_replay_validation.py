@@ -165,8 +165,21 @@ def test_fill_stamped_before_the_ack_within_venue_clock_skew_is_immediate(tape_r
                own_ids=[]).actual_ms == 0
     assert run(tape_root, own(first_fill=acked - VENUE_CLOCK_TOLERANCE_MS, placed_mts=acked), [],
                own_ids=[]).actual_ms == 0
-    assert run(tape_root, own(first_fill=acked - VENUE_CLOCK_TOLERANCE_MS - 1, placed_mts=acked),
-               [], own_ids=[]).actual_ms is None
+    end_of_second = T0 + 999
+    assert run(tape_root, own(first_fill=end_of_second, placed_mts=acked), [],
+               own_ids=[]).actual_ms == 499
+    assert run(tape_root, own(first_fill=T0 + 300, placed_mts=acked), [],
+               own_ids=[]).actual_ms == 0
+
+
+def test_own_fill_before_the_clock_tolerance_leaves_the_fill_time_unknown() -> None:
+    placed = T0 + 10_000
+    rows = [(oid, "fUST", placed, RATE, 2, Decimal(100), True) for oid in ("1", "2")]
+    trades = [(1, 900, placed - VENUE_CLOCK_TOLERANCE_MS - 1),
+              (2, 901, placed - VENUE_CLOCK_TOLERANCE_MS)]
+    early, edge = build_offers(rows, trades, {})
+    assert early.excluded == "fill time unknown"
+    assert edge.excluded is None
 
 
 def test_replay_window_opens_at_the_acks_whole_second(tmp_path: Path) -> None:
