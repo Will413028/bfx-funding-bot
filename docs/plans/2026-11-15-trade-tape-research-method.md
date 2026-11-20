@@ -96,7 +96,7 @@
   - 驗收：golden 測試（固定小段成交紀錄＋固定掛單 → 固定成交量與時間）；mutation：期限不相容的成交也算、正號成交也算、同價成交在保守邊界也算、部分成交改成全額、拿掉缺日的 `BacktestIncomplete`，各自要讓測試失敗；全量 replay 一次的耗時記入進度表。
   - 停止條件：replay 一次 WFO 掃描的耗時讓每週工作超出預算 → 回報，評估 Parquet（延後項）。
 
-- [ ] **4. 用自己成交驗證 replay**（被擋於：無；D4＝A 已拍，門檻已預登記如下）——2026-11-20 第一次執行 FAIL（65.8%），D6 事後調整後 81.6%，但 `/code-review` 第 2 輪找到可能翻盤的量法問題，判定未定，見 `step4-validation.md`
+- [ ] **4. 用自己成交驗證 replay**（被擋於：無；D4＝A 已拍，門檻已預登記如下）——2026-11-20 第一次執行 FAIL（65.8%）；D6、D7 兩次事後調整後 89.5%，只當暫時放行；正式驗收等恢復放貸後的新樣本（D7），見 `step4-validation.md`
   - 檔案：新增 `backend/scripts/report_replay_validation.py` 與其測試；彙總報告放附件 `step4-validation.md`（`docs/research/` 被 `.gitignore` 擋住，逐張明細依本機個人脈絡檔放 repo 外）。
   - 範圍：`backend/scripts/report_replay_validation.py`：(0) 從 2026-07-19 起的 book 快照推出同價排在前面的量，接成 `run_backtest` 的 `same_rate_queue_ahead`（可重用 `lending/tracking/queue_fill.py` 的 `queue_ahead_of`），D4 選 A 時排隊誤差靠它；(a) 把自己的歷史 offer（利率、期限、掛出時間、金額）丟進 replay，比較 replay 判定的成交時間與實際成交時間；(b) 保守與樂觀邊界的寬度分佈（邊界太寬代表同價成交佔比高，排隊位置是主要不確定性）。replay 時剔除自己的成交（join trade id），避免自己對照自己。報告寫進 `docs/research/`。
   - 消費端：無（新報告）。
@@ -110,7 +110,7 @@
   - 放行規則（步驟 5 的「通過」）：依 D4 預登記的門檻。自己成交達不到樣本下限時，報告寫明「未達樣本下限」，只看 (b) 放行，(a) 由步驟 7 每週追蹤。
   - 停止條件：(a) 達樣本下限卻不過門檻 → 不進步驟 5，回報並比對業界排隊模型。
 
-- [ ] **5. runner 改走 replay，刪除期望值記帳、linear 與 K 線 learner**（被擋於：D3、步驟 4 通過）
+- [ ] **5. runner 改走 replay，刪除期望值記帳、linear 與 K 線 learner**（被擋於：D3、步驟 4 用新樣本通過（D7））
   - 檔案：刪除與修改依盤點「去向」欄（每列已寫刪除或改寫）；另修改 `deploy/vm/ops/docker-compose.weekly-report.yml`、`deploy/vm/systemd/bfx-weekly-report.service`、`backend/ARCHITECTURE.md`、相關 ADR。
   - 範圍：照盤點「去向」欄逐列落地：刪 `compute_fill_prob`、`fill_alpha`、`fill_model` Literal 與 empirical／linear 分支、`EMPIRICAL_SOURCES`、`FillRateLearner`／`learn_fill_rate.py`、三支一次性 runner；其餘 runner 改走 replay，刪 `--fill-model`；`period_structure.py:278`、`band_sweep.py:301` 改印 replay 與邊界；每週工作刪 linear 那步（:86）、:85 與 `run_oos_profitability`（:87）改 replay，:84 book learner 保留（live artifact）；報告檔名 `*-period-structure-book.json` 改為 `*-period-structure-replay.json`，`diff_research_report` 對新檔名從零開始比對（舊檔留在 `docs/research/` 當歷史）；`ARCHITECTURE.md` 回測與 fill model 段落改寫；提到被刪機制的 ADR（`rg -ln "linear-baseline|fill_alpha|learn_fill_rate" docs/adr`）各加一行指向 ADR 2026-11-20；`BacktestIncompleteReason` 刪 `fill_model_*` 與 `_raise_for_unavailable`；quality ratchet 測試數下降時用 `Ratchet-Reason:`／`Removed-Test:` trailer。DB 既有 candle artifact 保留不刪（artifact 不可變）。
   - 消費端：`rg -ln "linear-baseline|fill_alpha|learn_fill_rate|FillRateLearner|run_phase3b_wfo_matrix|run_phase4_3|explore_mr_param|compute_fill_prob|--fill-model|EMPIRICAL_SOURCES" --hidden -g '!.git' .`
@@ -153,7 +153,9 @@
 
 - **D6 步驟 4 第一次執行 FAIL 之後怎麼辦**（狀態：已決 2026-11-20，Will：照建議）：門檻不變；補 replay 模型與量法後，用同一批 offer 重跑，報告標「事後調整」，通過也只當暫時放行，正式驗收等恢復放貸後的新樣本（延後項「用 live 成交做校準」與步驟 7）。補的內容：掛出時間改用 venue ack（`transport_outcome_journal.completed_at_ms`），涵蓋判定容差 1 秒（tape 時間戳是整秒）；只剔除「其他」自己 offer 的成交，被 replay 的那張自己的成交留作需求（同價，只影響樂觀邊界與排隊估計）；`replay_offer(crossing_bid_amount=...)`：掛出前快照裡會被穿過的 bid 立即成交；實際首次成交與取消時間另取掛單歷史（`bfx_operator` 唯讀匯出，Will 核准），取消的 offer 只 replay 到取消時刻，沒成交又查不到歷史的 offer 排除並計數。第一次執行的結果保留在 `step4-validation.md`。
 
-拍板順序：D1–D6 全部已拍。
+- **D7 第 2 輪 review 找到量法 blocking 之後怎麼辦**（狀態：已決 2026-11-20，Will：照建議）：同意第三輪修正，修完 5 項 blocking 與 1 項 should 後重跑同一批 38 張，標「第二次事後調整」，只當參考；模型改進照樣合進 `dev`。步驟 5 的放行條件改成：恢復放貸後，用新的自己成交（至少 30 張、量法在開跑前凍結於本分支的 `report_replay_validation.py`）重跑並通過同一組門檻。
+
+拍板順序：D1–D7 全部已拍。
 
 ## 進度
 
@@ -165,7 +167,7 @@
 | 1b replay 前置事實 | 完成 | 正式 DB 唯讀匯出（Will 核准）、`period_join.py`、`replay_cost.py` 兩幣；停止條件 (0) 觸發，Will 選 A | 無 | 本 PR |
 | 2 每日檔案與收集 | 完成 | 單元 5469 passed（`-n auto`）、`mypy src/`、ruff、quality ratchet；mutation 27 個全殺（`abs()` 加回、研究 service 可寫 tape、未結束當日寫檔、429/403/ratelimit body 重試、同 MTS 去重、覆寫既有日檔、空日寫檔、匯入頭尾日、缺鎖、連續失敗不停等）；compose policy 測試以本機 docker compose render；`/code-review` 與契約審查兩輪：findings 13（blocking 1），fixed 11、recorded 2（nit：`--dry-run` 也會建 tape 目錄；chown 失敗會留下 root 擁有的目錄），rejected 0 ；CI（含 integration）綠；發版 PR #428 部署 `ede0482b`（`migrations=none`，ledger #530）；VM 上 `--import-csv` 兩幣各 1,778 天（2022-01-02..2026-11-14，來源頭尾日依設計不寫），`--verify` 抽 2022-06-15、2024-09-03、2026-11-14 兩幣 6 個日檔全部一致，再以收集補上 2022-01-01 與 2026-11-15..19；目前兩幣各 1,784 天、無缺日，共 1.2 GB | 每週 `tape-ingest` 的第一次實跑（下週一 04:17 UTC） | PR #427、#428 |
 | 3 replay 引擎 | 完成 | 單元 5492 passed（`-n auto`）、`mypy src/`、ruff、quality ratchet；golden 測試；mutation 3 輪共 31 個，非等價的全殺（期限不相容、正號、同價進保守、部分成交改全額、拿掉缺日 Incomplete、t0 含當下、偷看當小時成交、等待截短當成沒成交、閒置未截在 window 內、float 容差、排序檢查、排隊量等；存活 1 個是等價 mutant：負號篩過後 `-x`＝`abs(x)`）；`/code-review` 兩輪＋契約審查一輪：findings 21（blocking 0），fixed 19、recorded 2（K 線缺小時時 cooldown 以根數計的既有假設；從 book 快照推排隊量移到步驟 4），rejected 0；全量 replay 耗時（VM 一次性容器，`spike/replay_bench.py`，每小時一張 2 天期掛單、等 24h、兩個邊界）：fUST 42,768 張 88.7 秒、fUSD 225.8 秒，合計約 314 秒／設定，RSS 峰值 489 MB；期限四臂約 1,256 秒，在每週 1,800 秒內，停止條件未觸發 | CI（含 integration）待 PR | 本 PR |
-| 4 replay 驗證 | 進行中（D6 重跑 81.6% 不可採信：第 2 輪 review 有 5 項 blocking 待 Will 決定） | 預登記；第一次執行 FAIL（涵蓋率 65.8%）；D6 補模型後重跑 PASS（81.6%＝31/38，邊際 1 張；排隊誤差中位數 0 分），見 `step4-validation.md`；單元 5530 passed（`-n auto`）、`mypy src/`、ruff、quality ratchet；mutation 第一輪 16 個、D6 20 個（含引擎 `crossing_bid_amount` 3 個），補強測試後全殺；`/code-review` 第 1 輪 findings 8：修 3、記錄 1、D6 處理 4 | CI（PR 未開）；第 2 輪 findings 8（blocking 5：replay 窗口漏掉 ack 同秒的成交、掛單歷史的 mts_updated 不是首次成交時間、非 ack 的 transport 時間被當成掛出、無時間戳的歷史被當成已知結束、amount_original 為空的取消被當成乾淨取消；should 1：吃 bid 用 5 分鐘舊快照；nit 2），依兩輪上限停止修正 | 本分支 |
+| 4 replay 驗證 | 進行中（程式完成；同批 38 張第二次事後調整後 89.5%＝34/38，只當參考；正式驗收等新樣本，D7） | 預登記；第一次執行 FAIL（65.8%）；D6 重跑 81.6% 經第 2 輪 review 判為不可採信；D7 修正後重跑 89.5%（排隊誤差中位數 0 分），見 `step4-validation.md`；單元、`mypy src/`、ruff；mutation 第一輪 16、D6 20、D7 10 個，全殺；`/code-review` 第 1 輪 findings 8：修 3、記錄 1、D6 處理 4；第 2 輪 findings 8（blocking 5）：D7 修 7（5 blocking、should、nit `keep`）、nit 缺日檢查也修；第 3 輪 findings 7（blocking 4）：修 3、記錄 2、駁回 2，修完重跑仍 89.5%；單元 5534 passed（`-n auto`） | CI（PR 待開）；新樣本驗收（恢復放貸後） | 本分支 |
 | 5 刪期望值記帳與 linear | 未開始 | | | |
 | 6 決策空間搜尋 | 未開始 | | | |
 | 7 每週驗證 | 未開始 | | | |
