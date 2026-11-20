@@ -96,7 +96,7 @@
   - 驗收：golden 測試（固定小段成交紀錄＋固定掛單 → 固定成交量與時間）；mutation：期限不相容的成交也算、正號成交也算、同價成交在保守邊界也算、部分成交改成全額、拿掉缺日的 `BacktestIncomplete`，各自要讓測試失敗；全量 replay 一次的耗時記入進度表。
   - 停止條件：replay 一次 WFO 掃描的耗時讓每週工作超出預算 → 回報，評估 Parquet（延後項）。
 
-- [ ] **4. 用自己成交驗證 replay**（被擋於：無；D4＝A 已拍，門檻已預登記如下）
+- [ ] **4. 用自己成交驗證 replay**（被擋於：無；D4＝A 已拍，門檻已預登記如下）——2026-11-20 第一次執行 FAIL（涵蓋率 65.8%），見 `step4-validation.md`；停止條件 (a) 觸發
   - 檔案：新增 `backend/scripts/report_replay_validation.py` 與其測試、`docs/research/` 報告。
   - 範圍：`backend/scripts/report_replay_validation.py`：(0) 從 2026-07-19 起的 book 快照推出同價排在前面的量，接成 `run_backtest` 的 `same_rate_queue_ahead`（可重用 `lending/tracking/queue_fill.py` 的 `queue_ahead_of`），D4 選 A 時排隊誤差靠它；(a) 把自己的歷史 offer（利率、期限、掛出時間、金額）丟進 replay，比較 replay 判定的成交時間與實際成交時間；(b) 保守與樂觀邊界的寬度分佈（邊界太寬代表同價成交佔比高，排隊位置是主要不確定性）。replay 時剔除自己的成交（join trade id），避免自己對照自己。報告寫進 `docs/research/`。
   - 消費端：無（新報告）。
@@ -163,7 +163,7 @@
 | 1b replay 前置事實 | 完成 | 正式 DB 唯讀匯出（Will 核准）、`period_join.py`、`replay_cost.py` 兩幣；停止條件 (0) 觸發，Will 選 A | 無 | 本 PR |
 | 2 每日檔案與收集 | 完成 | 單元 5469 passed（`-n auto`）、`mypy src/`、ruff、quality ratchet；mutation 27 個全殺（`abs()` 加回、研究 service 可寫 tape、未結束當日寫檔、429/403/ratelimit body 重試、同 MTS 去重、覆寫既有日檔、空日寫檔、匯入頭尾日、缺鎖、連續失敗不停等）；compose policy 測試以本機 docker compose render；`/code-review` 與契約審查兩輪：findings 13（blocking 1），fixed 11、recorded 2（nit：`--dry-run` 也會建 tape 目錄；chown 失敗會留下 root 擁有的目錄），rejected 0 ；CI（含 integration）綠；發版 PR #428 部署 `ede0482b`（`migrations=none`，ledger #530）；VM 上 `--import-csv` 兩幣各 1,778 天（2022-01-02..2026-11-14，來源頭尾日依設計不寫），`--verify` 抽 2022-06-15、2024-09-03、2026-11-14 兩幣 6 個日檔全部一致，再以收集補上 2022-01-01 與 2026-11-15..19；目前兩幣各 1,784 天、無缺日，共 1.2 GB | 每週 `tape-ingest` 的第一次實跑（下週一 04:17 UTC） | PR #427、#428 |
 | 3 replay 引擎 | 完成 | 單元 5492 passed（`-n auto`）、`mypy src/`、ruff、quality ratchet；golden 測試；mutation 3 輪共 31 個，非等價的全殺（期限不相容、正號、同價進保守、部分成交改全額、拿掉缺日 Incomplete、t0 含當下、偷看當小時成交、等待截短當成沒成交、閒置未截在 window 內、float 容差、排序檢查、排隊量等；存活 1 個是等價 mutant：負號篩過後 `-x`＝`abs(x)`）；`/code-review` 兩輪＋契約審查一輪：findings 21（blocking 0），fixed 19、recorded 2（K 線缺小時時 cooldown 以根數計的既有假設；從 book 快照推排隊量移到步驟 4），rejected 0；全量 replay 耗時（VM 一次性容器，`spike/replay_bench.py`，每小時一張 2 天期掛單、等 24h、兩個邊界）：fUST 42,768 張 88.7 秒、fUSD 225.8 秒，合計約 314 秒／設定，RSS 峰值 489 MB；期限四臂約 1,256 秒，在每週 1,800 秒內，停止條件未觸發 | CI（含 integration）待 PR | 本 PR |
-| 4 replay 驗證 | 未開始 | | | |
+| 4 replay 驗證 | 進行中（第一次執行 FAIL，停止條件 (a) 觸發，待 Will 決定） | 預登記（commit `docs(plans): pre-register…`）；單元 5510 passed（`-n auto`）、`mypy src/`、ruff、quality ratchet；mutation 16 個全殺（分母換成已成交數、不剔除自己成交、涵蓋判定三處、缺成交的釘值、同價層與扣除自己、快照選取與容差、樣本下限、三個門檻判斷、等待截止、排隊只算有快照）；正式 DB 唯讀計數與報告（Will 核准）：2 天桶 38 張、32 張成交、涵蓋率 65.8% < 80% → FAIL，排隊誤差中位數 0 分；失敗分類見 `step4-validation.md` | `/code-review`、CI（PR 未開）；類別 C 的取消時間未查（`bfx_research` 無權限） | 本分支 |
 | 5 刪期望值記帳與 linear | 未開始 | | | |
 | 6 決策空間搜尋 | 未開始 | | | |
 | 7 每週驗證 | 未開始 | | | |
