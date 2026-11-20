@@ -75,6 +75,9 @@ class TapeDays:
         _header, _, body = text.partition("\n")
         tape = (np.loadtxt(io.StringIO(body), delimiter=",", dtype=np.float64, ndmin=2)
                 if body.strip() else _EMPTY)
+        # `window` slices with searchsorted, which needs mts-sorted rows.
+        if np.any(np.diff(tape[:, _COL_MTS]) < 0):
+            raise ValueError(f"tape day file is not sorted by mts: {path}")
         self._cache[day] = tape
         while len(self._cache) > self._cache_days:
             self._cache.popitem(last=False)
@@ -83,8 +86,6 @@ class TapeDays:
     def window(self, start_mts: int, end_mts: int) -> Tape:
         """Rows with start_mts < mts <= end_mts, across day files."""
         first, last = _utc_day(start_mts), _utc_day(end_mts)
-        # Keep every day of the window cached so hourly offers do not re-parse.
-        self._cache_days = max(self._cache_days, (last - first).days + 2)
         span = (first, last)
         if self._span is None or self._span[0] != span:
             parts = []
@@ -137,9 +138,11 @@ def _path(mts: npt.NDArray[np.float64], cumulative: npt.NDArray[np.float64],
     first = int(mts[int(np.argmax(cumulative > 0))])
     # Same tolerance as the 1e-8 rounding of `total`: float sums of 8-decimal
     # amounts can land a hair under the exact total.
-    full_idx = np.flatnonzero(cumulative >= float(amount) - 1e-8)
+    # The error grows with the summed magnitude, hence the relative term.
+    target = float(amount)
+    full_idx = np.flatnonzero(cumulative >= target * (1 - 1e-12) - 1e-8)
     full = int(mts[int(full_idx[0])]) if full_idx.size else None
-    return FillPath(min(total, amount), first, full)
+    return FillPath(amount if full is not None else min(total, amount), first, full)
 
 
 def replay_offer(
@@ -152,6 +155,8 @@ def replay_offer(
     """Fill bounds for `offer` resting at most `max_wait_ms` after placement."""
     if offer.amount <= 0 or max_wait_ms <= 0:
         raise ValueError("offer amount and max_wait_ms must be positive")
+    if same_rate_queue_ahead is not None and not same_rate_queue_ahead >= 0:
+        raise ValueError(f"same_rate_queue_ahead must be >= 0, got {same_rate_queue_ahead}")
     rows = tape.window(offer.placed_mts, offer.placed_mts + max_wait_ms)
     rate = float(offer.rate)
     eligible = rows[(rows[:, _COL_AMOUNT] < 0) & (rows[:, _COL_PERIOD] <= offer.period_days)

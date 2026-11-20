@@ -185,8 +185,9 @@ def run_backtest(
     each decision as a hypothetical offer replayed against the public trade tape
     (`backtest/replay.py`): the chosen bound's filled fraction earns the rate, the
     lock starts when the offer finishes filling, and an offer never fully filled
-    rests `replay_max_wait_h` (capped at the record window end) before the
-    strategy decides again. The offer is placed when the decision candle closes.
+    rests `replay_max_wait_h` before the strategy decides again. A decision whose
+    full wait would pass the record window end is not placed, so the last
+    `replay_max_wait_h` hours of each window never trade. The offer is placed when the decision candle closes.
     `idle_hours` counts the waits plus the unfilled share of each lock.
     `same_rate_queue_ahead` (optional) returns the same-rate queue ahead of an
     offer, from book snapshots where they exist; `queue_fill_rate` averages the
@@ -202,8 +203,10 @@ def run_backtest(
     replaying = config.fill_model == "tape-replay"
     if replaying and tape is None:
         raise ValueError("fill_model='tape-replay' requires tape")
-    if not replaying and (tape is not None or same_rate_queue_ahead is not None):
+    if not replaying and tape is not None:
         raise ValueError("tape is only used with fill_model='tape-replay'")
+    if not replaying and same_rate_queue_ahead is not None:
+        raise ValueError("same_rate_queue_ahead is only used with fill_model='tape-replay'")
     if replaying and (fill_model is not None or fill_models_by_agg is not None
                       or market_candles is not None or market_series_by_agg is not None):
         raise ValueError("tape-replay prices fills from the tape: no fill models or market series")
@@ -286,11 +289,12 @@ def run_backtest(
             # decide() read this candle's close, known only when the hour ends:
             # the offer rests from then on, never on trades inside its own hour.
             placed_mts = candle.mts + _MS_PER_HOUR
-            # Rest at most until the record window ends; the tape is only needed
-            # through effective_end, and a lock past it earns nothing anyway.
-            window_ms = min(max_wait_ms, effective_end - placed_mts)
-            if window_ms <= 0:
+            # A decision whose full wait would run past the record window is not
+            # placed: a shortened wait would read as a market non-fill and bias
+            # fill_rate down. The tape is then only needed through effective_end.
+            if placed_mts + max_wait_ms > effective_end:
                 continue
+            window_ms = max_wait_ms
             offer = HypotheticalOffer(rate=decision.rate, period_days=decision.period_days,
                                       placed_mts=placed_mts, amount=config.replay_offer_amount)
             queue_ahead = same_rate_queue_ahead(offer) if same_rate_queue_ahead else None
@@ -345,9 +349,13 @@ def run_backtest(
         gross_equity = gross_equity * (Decimal("1") + gross_rate * period)
         net_rate = gross_rate * one_minus_fee
         net_equity = net_equity * (Decimal("1") + net_rate * period)
-        if replaying:
-            # The unfilled share of a partly filled offer sits out the lock too.
-            idle_ms += int((Decimal(1) - fill_prob) * period * _MS_PER_DAY) if fill_prob > 0 else 0
+        if replaying and fill_prob > 0:
+            # The unfilled share of a partly filled offer sits out the lock too,
+            # clipped to the record window whether or not interest is truncated.
+            in_window_days = min(Decimal(decision.period_days),
+                                 max(Decimal(effective_end - lock_start_mts) / _MS_PER_DAY,
+                                     Decimal(0)))
+            idle_ms += int((Decimal(1) - fill_prob) * in_window_days * _MS_PER_DAY)
 
         n_trades += 1
         fill_prob_sum += fill_prob

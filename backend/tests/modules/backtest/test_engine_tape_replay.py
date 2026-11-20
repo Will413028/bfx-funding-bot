@@ -30,7 +30,7 @@ class _Fixed(Strategy):
         return LendDecision(mts=candle.mts, rate=RATE, period_days=2)
 
 
-def _candles(n: int = 72) -> list[FundingCandle]:
+def _candles(n: int = 96) -> list[FundingCandle]:
     return [FundingCandle(symbol="fUST", timeframe="1h", period_agg="p2",
                           mts=T0 + i * H, close=RATE) for i in range(n)]
 
@@ -47,8 +47,9 @@ def tape(tmp_path: Path) -> TapeDays:
     ])
     write_day(tmp_path, "fUST", date(2026, 1, 11), [])
     # The second offer (placed +53h) only meets a trade at exactly our rate.
-    # Candles end at +71h, so its wait is capped at 18h and no 01-13 file is needed.
+    # Candles end at +95h: later decisions' 24h waits would pass it, so none is placed.
     write_day(tmp_path, "fUST", date(2026, 1, 12), [(3, T0 + 54 * H, -1000.0, 0.0002, 2)])
+    write_day(tmp_path, "fUST", date(2026, 1, 13), [])
     return TapeDays(tmp_path, "fUST")
 
 
@@ -63,7 +64,7 @@ def test_conservative_bound_books_tape_fills_and_idle_time(tape: TapeDays) -> No
     assert result.replay_bound == "conservative"
     assert result.n_trades == 2
     assert result.fill_rate == Decimal("0.5")  # second offer unfilled
-    assert result.idle_hours == Decimal("21")  # 2h wait + 1h candle + 18h capped rest
+    assert result.idle_hours == Decimal("27")  # 2h wait + (1h to the close + 24h rest)
     assert result.gross_monthly_return_pct > 0
 
 
@@ -93,6 +94,7 @@ def test_partly_filled_offer_counts_unfilled_share_of_lock_as_idle(tmp_path: Pat
     write_day(tmp_path, "fUST", date(2026, 1, 10), [(1, T0 + 2 * H, -250.0, 0.0003, 2)])
     write_day(tmp_path, "fUST", date(2026, 1, 11), [])
     write_day(tmp_path, "fUST", date(2026, 1, 12), [])
+    write_day(tmp_path, "fUST", date(2026, 1, 13), [])
     result = run_backtest(_candles(), _Fixed(), _config(), tape=TapeDays(tmp_path, "fUST"))
     assert result.fill_rate == Decimal("0.25")
     # 1h to the close + 24h wait, then 75% of the 48h lock idle.
@@ -115,3 +117,27 @@ def test_replay_rejects_unused_pricing_inputs(tape: TapeDays) -> None:
 def test_replay_bound_is_validated_at_runtime() -> None:
     with pytest.raises(ValueError, match="replay_bound"):
         BacktestConfig(fill_model="tape-replay", replay_bound=cast(Any, "conservativ"))
+
+
+def test_decision_whose_wait_passes_window_end_is_not_placed(tape: TapeDays) -> None:
+    # Window ends at +70h: the +52h decision (placed +53h, waits to +77h) is skipped
+    # instead of booked as a market non-fill on a shortened wait.
+    result = run_backtest(_candles(), _Fixed(), _config(), tape=tape,
+                          record_end_mts=T0 + 70 * H)
+    assert result.n_trades == 1
+    assert result.fill_rate == Decimal("1")
+
+
+def test_partial_lock_idle_is_clipped_to_window(tmp_path: Path) -> None:
+    write_day(tmp_path, "fUST", date(2026, 1, 10), [(1, T0 + 2 * H, -250.0, 0.0003, 2)])
+    write_day(tmp_path, "fUST", date(2026, 1, 11), [])
+    # Window ends at +40h: the 48h lock starting at +25h has 15h inside it.
+    result = run_backtest(_candles(), _Fixed(), _config(), tape=TapeDays(tmp_path, "fUST"),
+                          record_end_mts=T0 + 40 * H)
+    assert result.idle_hours == Decimal("25") + Decimal("0.75") * 15
+
+
+def test_queue_provider_rejected_outside_replay() -> None:
+    with pytest.raises(ValueError, match="same_rate_queue_ahead"):
+        run_backtest(_candles(), _Fixed(), BacktestConfig(fill_model="linear-baseline"),
+                     same_rate_queue_ahead=lambda offer: Decimal(0))

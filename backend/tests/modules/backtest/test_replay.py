@@ -123,3 +123,25 @@ def test_float_sum_a_hair_short_still_counts_as_full_fill(tmp_path: Path) -> Non
     assert np.cumsum([0.1] * 10)[-1] < 1.0  # the float trap this guards
     assert r.conservative.filled == Decimal("1")
     assert r.conservative.full_fill_mts == T0 + 10 * 60_000
+
+
+def test_large_offer_float_error_still_counts_as_full_fill(tmp_path: Path) -> None:
+    rows = [(i, T0 + (i + 1) * 1_000, -1000.12345678, 0.0003, 2) for i in range(1000)]
+    write_day(tmp_path, "fUSD", DAY, rows)
+    amount = Decimal("1000.12345678") * 1000
+    r = replay_offer(offer(period=2, amount=str(amount)), TapeDays(tmp_path, "fUSD"),
+                     max_wait_ms=H)
+    assert r.conservative.filled == amount
+    assert r.conservative.full_fill_mts == T0 + 1000 * 1_000
+
+
+def test_unsorted_day_file_is_rejected(tmp_path: Path) -> None:
+    write_day(tmp_path, "fUST", DAY, [(1, T0 + 2 * H, -1.0, 0.0003, 2),
+                                      (2, T0 + 1 * H, -1.0, 0.0003, 2)])
+    with pytest.raises(ValueError, match="not sorted"):
+        TapeDays(tmp_path, "fUST").day(DAY)
+
+
+def test_negative_queue_ahead_is_rejected(tape: TapeDays) -> None:
+    with pytest.raises(ValueError, match="same_rate_queue_ahead"):
+        replay_offer(offer(), tape, max_wait_ms=H, same_rate_queue_ahead=Decimal("-1"))
