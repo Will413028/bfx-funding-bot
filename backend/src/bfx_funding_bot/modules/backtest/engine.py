@@ -1,10 +1,12 @@
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from decimal import Decimal
-from typing import Literal, NoReturn
+from typing import NoReturn
 
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig, compute_fill_prob
+from bfx_funding_bot.modules.backtest.incomplete import BacktestIncomplete as BacktestIncomplete
+from bfx_funding_bot.modules.backtest.replay import HypotheticalOffer, TapeDays, replay_offer
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult
 from bfx_funding_bot.modules.lending.tracking.artifact import FillModelUnavailable
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
@@ -15,12 +17,8 @@ from bfx_funding_bot.modules.performance.sortino import (
 )
 from bfx_funding_bot.modules.strategy import LendDecision, Strategy
 
-BacktestIncompleteReason = Literal[
-    "fill_model_missing", "fill_model_low_confidence", "fill_model_scope_mismatch",
-    "market_series_gap",
-]
-
 _MS_PER_DAY = Decimal(86_400_000)
+_MS_PER_HOUR = 3_600_000
 _AGGREGATE_SERIES_KEY = "a30"
 # Empirical evidence sources the engine accepts. "candle" = G13 path-crossing,
 # "book" = queue-position replay over recorded funding books. Rows and artifacts
@@ -43,14 +41,6 @@ def resolve_market_series_key(period_days: int, available: Mapping[str, object])
     raise KeyError(
         f"no market series for period {period_days}: have {sorted(available)}"
     )
-
-
-class BacktestIncomplete(RuntimeError):  # noqa: N818 - contract name is prescribed
-    """A requested empirical backtest lacks usable versioned fill evidence."""
-
-    def __init__(self, reason: BacktestIncompleteReason) -> None:
-        super().__init__(reason)
-        self.reason = reason
 
 
 def _raise_for_unavailable(evidence: FillModelUnavailable) -> NoReturn:
@@ -163,6 +153,8 @@ def run_backtest(
     market_candles: list[FundingCandle] | None = None,
     market_series_by_agg: Mapping[str, list[FundingCandle]] | None = None,
     fill_models_by_agg: Mapping[str, FillRateModel] | None = None,
+    tape: TapeDays | None = None,
+    same_rate_queue_ahead: Callable[[HypotheticalOffer], Decimal | None] | None = None,
 ) -> BacktestResult:
     """Run a strategy over a candle series and return summary metrics.
 
@@ -188,6 +180,19 @@ def run_backtest(
     `resolve_market_series_key`. A strategy that observes the a30 series but
     posts 2-day offers is then scored against the 2-day market it actually
     competes in, instead of being credited the aggregate rate for a 2-day lock.
+
+    `tape` (required by, and only allowed with, `fill_model="tape-replay"`) books
+    each decision as a hypothetical offer replayed against the public trade tape
+    (`backtest/replay.py`): the chosen bound's filled fraction earns the rate, the
+    lock starts when the offer finishes filling, and an offer never fully filled
+    rests `replay_max_wait_h` before the strategy decides again. A decision whose
+    full wait would pass the record window end is not placed, so the last
+    `replay_max_wait_h` hours of each window never trade. The offer is placed when the decision candle closes.
+    `idle_hours` counts the waits plus the unfilled share of each lock.
+    `same_rate_queue_ahead` (optional) returns the same-rate queue ahead of an
+    offer, from book snapshots where they exist; `queue_fill_rate` averages the
+    queue estimate over the offers it covered. A missing tape day raises
+    `BacktestIncomplete("tape_day_missing")`.
     """
     if market_candles is not None and market_series_by_agg is not None:
         raise ValueError("pass market_candles or market_series_by_agg, not both")
@@ -195,6 +200,16 @@ def run_backtest(
         raise ValueError("pass fill_model or fill_models_by_agg, not both")
     if fill_models_by_agg is not None and market_series_by_agg is None:
         raise ValueError("fill_models_by_agg requires market_series_by_agg")
+    replaying = config.fill_model == "tape-replay"
+    if replaying and tape is None:
+        raise ValueError("fill_model='tape-replay' requires tape")
+    if not replaying and tape is not None:
+        raise ValueError("tape is only used with fill_model='tape-replay'")
+    if not replaying and same_rate_queue_ahead is not None:
+        raise ValueError("same_rate_queue_ahead is only used with fill_model='tape-replay'")
+    if replaying and (fill_model is not None or fill_models_by_agg is not None
+                      or market_candles is not None or market_series_by_agg is not None):
+        raise ValueError("tape-replay prices fills from the tape: no fill models or market series")
     if config.fill_model == "empirical":
         if fill_models_by_agg is not None:
             assert market_series_by_agg is not None  # guarded above
@@ -211,6 +226,8 @@ def run_backtest(
             n_trades=0, fill_rate=Decimal("0"),
             sortino=Decimal("0"),
             model_kind=config.fill_model,
+            replay_bound=config.replay_bound if replaying else None,
+            idle_hours=Decimal("0") if replaying else None,
         )
 
     sorted_candles = sorted(candles, key=lambda c: c.mts)
@@ -240,6 +257,10 @@ def run_backtest(
     n_trades = 0
     n_window_candles = 0  # candles inside [effective_start, effective_end] regardless of cooldown
     fill_prob_sum = Decimal("0")
+    idle_ms = 0
+    queue_fill_sum = Decimal("0")
+    queue_trades = 0
+    max_wait_ms = config.replay_max_wait_h * 3_600_000
     cooldown_until_idx = -1
     # Assumes 1h candles: gap_minutes / 60 gives candle count. Other timeframes (5m, 1D) miscount.
     gap_candles = math.ceil(config.gap_minutes / 60)
@@ -262,40 +283,83 @@ def run_backtest(
         if decision is None:
             continue
 
-        if series_maps is not None:
-            series_key = resolve_market_series_key(decision.period_days, series_maps)
-            priced = series_maps[series_key].get(candle.mts)
-            if priced is None:
-                raise BacktestIncomplete("market_series_gap")
-            pricing_candle = priced
-            series_used[series_key] = series_used.get(series_key, 0) + 1
-        elif market_by_mts is not None:
-            priced = market_by_mts.get(candle.mts)
-            if priced is None:
-                raise BacktestIncomplete("market_series_gap")
-            pricing_candle = priced
+        lock_start_mts = candle.mts
+        if replaying:
+            assert tape is not None  # guarded above
+            # decide() read this candle's close, known only when the hour ends:
+            # the offer rests from then on, never on trades inside its own hour.
+            placed_mts = candle.mts + _MS_PER_HOUR
+            # A decision whose full wait would run past the record window is not
+            # placed: a shortened wait would read as a market non-fill and bias
+            # fill_rate down. The tape is then only needed through effective_end.
+            if placed_mts + max_wait_ms > effective_end:
+                continue
+            window_ms = max_wait_ms
+            offer = HypotheticalOffer(rate=decision.rate, period_days=decision.period_days,
+                                      placed_mts=placed_mts, amount=config.replay_offer_amount)
+            queue_ahead = same_rate_queue_ahead(offer) if same_rate_queue_ahead else None
+            replayed = replay_offer(offer, tape, max_wait_ms=window_ms,
+                                    same_rate_queue_ahead=queue_ahead)
+            if config.replay_bound == "conservative":
+                path = replayed.conservative
+            elif config.replay_bound == "optimistic":
+                path = replayed.optimistic
+            else:  # pragma: no cover - BacktestConfig validates the literal.
+                raise ValueError(f"unsupported replay_bound: {config.replay_bound!r}")
+            fill_prob = path.filled / config.replay_offer_amount
+            if replayed.queue_estimate is not None:
+                queue_fill_sum += replayed.queue_estimate.filled / config.replay_offer_amount
+                queue_trades += 1
+            gross_rate = decision.rate * fill_prob
+            wait_ms = (path.full_fill_mts - candle.mts if path.full_fill_mts is not None
+                       else placed_mts - candle.mts + window_ms)
+            idle_ms += wait_ms
+            lock_start_mts = candle.mts + wait_ms
+            lock_candles = decision.period_days * 24 if fill_prob > 0 else 0
+            next_cooldown = i + math.ceil(wait_ms / _MS_PER_HOUR) + lock_candles + gap_candles
         else:
-            pricing_candle = candle
-        trade_model = fill_model
-        if fill_models_by_agg is not None:
-            trade_model = fill_models_by_agg.get(pricing_candle.period_agg)
-            if trade_model is None and config.fill_model == "empirical":
-                # Strict: a series without book evidence cannot borrow another's.
-                raise BacktestIncomplete("fill_model_missing")
-        gross_rate, fill_prob = _apply_friction(
-            decision, pricing_candle, config, trade_model
-        )
+            if series_maps is not None:
+                series_key = resolve_market_series_key(decision.period_days, series_maps)
+                priced = series_maps[series_key].get(candle.mts)
+                if priced is None:
+                    raise BacktestIncomplete("market_series_gap")
+                pricing_candle = priced
+                series_used[series_key] = series_used.get(series_key, 0) + 1
+            elif market_by_mts is not None:
+                priced = market_by_mts.get(candle.mts)
+                if priced is None:
+                    raise BacktestIncomplete("market_series_gap")
+                pricing_candle = priced
+            else:
+                pricing_candle = candle
+            trade_model = fill_model
+            if fill_models_by_agg is not None:
+                trade_model = fill_models_by_agg.get(pricing_candle.period_agg)
+                if trade_model is None and config.fill_model == "empirical":
+                    # Strict: a series without book evidence cannot borrow another's.
+                    raise BacktestIncomplete("fill_model_missing")
+            gross_rate, fill_prob = _apply_friction(
+                decision, pricing_candle, config, trade_model
+            )
+            next_cooldown = i + decision.period_days * 24 + gap_candles
         period = Decimal(decision.period_days)
         if config.truncate_at_window_end:
-            remaining_days = Decimal(effective_end - candle.mts) / _MS_PER_DAY
+            remaining_days = Decimal(effective_end - lock_start_mts) / _MS_PER_DAY
             period = min(period, max(remaining_days, Decimal("0")))
         gross_equity = gross_equity * (Decimal("1") + gross_rate * period)
         net_rate = gross_rate * one_minus_fee
         net_equity = net_equity * (Decimal("1") + net_rate * period)
+        if replaying and fill_prob > 0:
+            # The unfilled share of a partly filled offer sits out the lock too,
+            # clipped to the record window whether or not interest is truncated.
+            in_window_days = min(Decimal(decision.period_days),
+                                 max(Decimal(effective_end - lock_start_mts) / _MS_PER_DAY,
+                                     Decimal(0)))
+            idle_ms += int((Decimal(1) - fill_prob) * in_window_days * _MS_PER_DAY)
 
         n_trades += 1
         fill_prob_sum += fill_prob
-        cooldown_until_idx = i + decision.period_days * 24 + gap_candles
+        cooldown_until_idx = next_cooldown
 
         if net_equity > peak:
             peak = net_equity
@@ -303,7 +367,7 @@ def run_backtest(
         if dd > max_dd:
             max_dd = dd
 
-        equity_timeline.append((candle.mts, net_equity))
+        equity_timeline.append((lock_start_mts, net_equity))
 
     if effective_end > effective_start:
         total_hours = Decimal(effective_end - effective_start) / Decimal(3_600_000)
@@ -348,6 +412,9 @@ def run_backtest(
             if fill_models_by_agg is not None
             else None
         ),
+        replay_bound=config.replay_bound if replaying else None,
+        idle_hours=Decimal(idle_ms) / _MS_PER_HOUR if replaying else None,
+        queue_fill_rate=(queue_fill_sum / Decimal(queue_trades)) if queue_trades else None,
     )
 
 

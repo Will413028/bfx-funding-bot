@@ -88,7 +88,7 @@
   - 需要人做的事：發版（`dev`→`main` PR 合併＝部署，需 Will 核准）；發版後在 VM 用 `--import-csv` 把步驟 1 留下的 CSV 切成日檔（來源的第一天與最後一天不寫，由收集補抓），再用 `--verify` 抽 3 天與 API 重抓比對；其餘缺的日子由每週收集或一次性容器補完。tape 目錄由 runner 自動建立，不需事先手動建。
   - 完成後的狀態：回補完成前，步驟 3 只能用部分歷史。
 
-- [ ] **3. replay 引擎**（被擋於：步驟 1b、步驟 2）
+- [x] **3. replay 引擎**（被擋於：步驟 1b、步驟 2）——完成 2026-11-20，見進度表；排隊估計的介面（`run_backtest(same_rate_queue_ahead=...)`、`queue_fill_rate`）已有，從 book 快照推出排隊量移到步驟 4
   - 檔案：新增 `backend/src/bfx_funding_bot/modules/backtest/replay.py` 與其測試、golden fixture；修改 `backtest/engine.py`、`backtest/config.py`、`backend/ARCHITECTURE.md`。
   - 範圍：新增 `backend/src/bfx_funding_bot/modules/backtest/replay.py`：輸入策略決策序列與成交紀錄，對每張假想掛單（利率 r、期限 P、掛出時間 t0、金額 s）輸出成交量、成交時間、閒置時間。規則：只看 t0 之後、借方主動（負號）、公開 PERIOD ≤ P（步驟 1b 第 1 節，兩種 PERIOD 語意下都成立）的成交；利率 > r 的成交依累積量成交（部分成交）；利率 = r 的成交，保守邊界不計、樂觀邊界全計，2026-07-19 之後有 book 快照時另給排隊模型估計值（可重用 `lending/tracking/queue_fill.py`）；引擎新增 replay 記帳路徑，與現有期望值路徑並存（`_apply_friction` 與 runner 的 `--fill-model` 在步驟 5 才刪，讓步驟 4 的驗證能在刪除前放行）；成交紀錄缺日時 `BacktestIncomplete`，`BacktestIncompleteReason` 新增對應原因。FRR 成交無法辨識（步驟 1b 第 5 節），不排除，報告的已知限制寫明會偏樂觀；fUST 15 天以上的期限每日成交量 p10 只有 150–472（步驟 1b 第 2 節），報告的已知限制寫明沒有市場衝擊模型。`backend/ARCHITECTURE.md` 的回測段落同步改寫。
   - 消費端：`rg -n "run_backtest\(|_apply_friction|BacktestConfig\(" backend/src backend/scripts backend/tests`。
@@ -98,7 +98,7 @@
 
 - [ ] **4. 用自己成交驗證 replay**（被擋於：D4、步驟 3）
   - 檔案：新增 `backend/scripts/report_replay_validation.py` 與其測試、`docs/research/` 報告。
-  - 範圍：`backend/scripts/report_replay_validation.py`：(a) 把自己的歷史 offer（利率、期限、掛出時間、金額）丟進 replay，比較 replay 判定的成交時間與實際成交時間；(b) 保守與樂觀邊界的寬度分佈（邊界太寬代表同價成交佔比高，排隊位置是主要不確定性）。replay 時剔除自己的成交（join trade id），避免自己對照自己。報告寫進 `docs/research/`。
+  - 範圍：`backend/scripts/report_replay_validation.py`：(0) 從 2026-07-19 起的 book 快照推出同價排在前面的量，接成 `run_backtest` 的 `same_rate_queue_ahead`（可重用 `lending/tracking/queue_fill.py` 的 `queue_ahead_of`），D4 選 A 時排隊誤差靠它；(a) 把自己的歷史 offer（利率、期限、掛出時間、金額）丟進 replay，比較 replay 判定的成交時間與實際成交時間；(b) 保守與樂觀邊界的寬度分佈（邊界太寬代表同價成交佔比高，排隊位置是主要不確定性）。replay 時剔除自己的成交（join trade id），避免自己對照自己。報告寫進 `docs/research/`。
   - 消費端：無（新報告）。
   - 不能動：既有報告。
   - 驗收：報告產出且每個數字附指令；單元測試覆蓋指標計算（把分母換掉要失敗；不剔除自己成交要失敗）。
@@ -157,7 +157,7 @@
 | 1 Spike 完整量測 | 完成 | 全量抓取兩幣、`--summarize`、一週增量量測、PG18 每列大小；基線（`feaa9743`）：單元 5415 passed、mypy、ruff、quality ratchet 全綠 | 無 | PR #423 |
 | 1b replay 前置事實 | 完成 | 正式 DB 唯讀匯出（Will 核准）、`period_join.py`、`replay_cost.py` 兩幣；停止條件 (0) 觸發，Will 選 A | 無 | 本 PR |
 | 2 每日檔案與收集 | 完成 | 單元 5469 passed（`-n auto`）、`mypy src/`、ruff、quality ratchet；mutation 27 個全殺（`abs()` 加回、研究 service 可寫 tape、未結束當日寫檔、429/403/ratelimit body 重試、同 MTS 去重、覆寫既有日檔、空日寫檔、匯入頭尾日、缺鎖、連續失敗不停等）；compose policy 測試以本機 docker compose render；`/code-review` 與契約審查兩輪：findings 13（blocking 1），fixed 11、recorded 2（nit：`--dry-run` 也會建 tape 目錄；chown 失敗會留下 root 擁有的目錄），rejected 0 ；CI（含 integration）綠；發版 PR #428 部署 `ede0482b`（`migrations=none`，ledger #530）；VM 上 `--import-csv` 兩幣各 1,778 天（2022-01-02..2026-11-14，來源頭尾日依設計不寫），`--verify` 抽 2022-06-15、2024-09-03、2026-11-14 兩幣 6 個日檔全部一致，再以收集補上 2022-01-01 與 2026-11-15..19；目前兩幣各 1,784 天、無缺日，共 1.2 GB | 每週 `tape-ingest` 的第一次實跑（下週一 04:17 UTC） | PR #427、#428 |
-| 3 replay 引擎 | 未開始 | | | |
+| 3 replay 引擎 | 完成 | 單元 5492 passed（`-n auto`）、`mypy src/`、ruff、quality ratchet；golden 測試；mutation 3 輪共 31 個，非等價的全殺（期限不相容、正號、同價進保守、部分成交改全額、拿掉缺日 Incomplete、t0 含當下、偷看當小時成交、等待截短當成沒成交、閒置未截在 window 內、float 容差、排序檢查、排隊量等；存活 1 個是等價 mutant：負號篩過後 `-x`＝`abs(x)`）；`/code-review` 兩輪＋契約審查一輪：findings 21（blocking 0），fixed 19、recorded 2（K 線缺小時時 cooldown 以根數計的既有假設；從 book 快照推排隊量移到步驟 4），rejected 0；全量 replay 耗時（VM 一次性容器，`spike/replay_bench.py`，每小時一張 2 天期掛單、等 24h、兩個邊界）：fUST 42,768 張 88.7 秒、fUSD 225.8 秒，合計約 314 秒／設定，RSS 峰值 489 MB；期限四臂約 1,256 秒，在每週 1,800 秒內，停止條件未觸發 | CI（含 integration）待 PR | 本 PR |
 | 4 replay 驗證 | 未開始 | | | |
 | 5 刪期望值記帳與 linear | 未開始 | | | |
 | 6 決策空間搜尋 | 未開始 | | | |
