@@ -12,7 +12,7 @@ from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import (
     BacktestIncomplete,
-    _held_ms_until_refinance,
+    held_ms_until_refinance,
     run_backtest,
 )
 from bfx_funding_bot.modules.backtest.replay import TapeDays
@@ -236,7 +236,7 @@ def _held(closes: list[str | None], *, lock_start: int, rate: str = "0.0002",
           term_h: int = 48) -> int:
     reference = ([T0 + i * H for i in range(len(closes))],
                  [Decimal(c) if c is not None else None for c in closes])
-    return _held_ms_until_refinance(reference, lock_start_mts=lock_start,
+    return held_ms_until_refinance(reference, lock_start_mts=lock_start,
                                     locked_rate=Decimal(rate), margin=Decimal("0.2"),
                                     term_ms=term_h * H)
 
@@ -264,7 +264,7 @@ def test_a_lock_the_reference_does_not_cover_cannot_be_scored(tape: TapeDays) ->
     # A series that only resumes after the lock would have ended says nothing about it.
     reference = ([T0, T0 + H, T0 + 60 * H], [Decimal("0.0002")] * 3)
     with pytest.raises(BacktestIncomplete) as exc:
-        _held_ms_until_refinance(reference, lock_start_mts=T0 + 5 * H,
+        held_ms_until_refinance(reference, lock_start_mts=T0 + 5 * H,
                                  locked_rate=Decimal("0.0002"), margin=Decimal("0.2"),
                                  term_ms=48 * H)
     assert exc.value.reason == "market_series_gap"

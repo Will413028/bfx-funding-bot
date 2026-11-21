@@ -144,7 +144,7 @@ def _apply_friction(
     return gross_rate, fill_prob
 
 
-def _held_ms_until_refinance(
+def held_ms_until_refinance(
     reference: tuple[list[int], list[Decimal | None]],
     *,
     lock_start_mts: int,
@@ -192,7 +192,7 @@ def _replay_lock_ms(
     if reference is None:
         return term_ms
     assert config.replay_refinance_margin is not None  # run_backtest pairs the two
-    return _held_ms_until_refinance(
+    return held_ms_until_refinance(
         reference, lock_start_mts=lock_start_mts, locked_rate=decision.rate,
         margin=config.replay_refinance_margin, term_ms=term_ms)
 
