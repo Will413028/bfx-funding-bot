@@ -30,7 +30,7 @@ import asyncio
 import json
 import logging
 import sys
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -84,6 +84,9 @@ TOPIC_PERIOD_ARMS = "period-arms"
 TOPIC_GRID = "grid"
 BASELINE_WAIT_H = 24
 MIN_PERIOD_DAYS, MAX_PERIOD_DAYS = 2, 120  # Bitfinex funding offer tenors
+# Every arm stops placing offers the longest wait before each month end, so a long
+# wait eats the month for all of them: a week is the most a monthly window can carry.
+MAX_WAIT_HOURS = 168
 
 STANDING_CAVEATS = (
     "Replay not formally accepted: it was checked against 38 of our own fUST 2-day offers "
@@ -128,11 +131,18 @@ def _baseline_arm() -> SearchArm:
                      BASELINE_WAIT_H)
 
 
+def grid_series_keys(grid: Grid, available: Collection[str]) -> dict[int, str]:
+    """Tenor -> the series its arms observe: the tenor's own, else the a30 aggregate."""
+    return {period: resolve_market_series_key(period, dict.fromkeys(available))
+            for period in sorted({p for _offset, p, _wait in grid.grid_points()})}
+
+
 def grid_arms(grid: Grid, series: dict[str, list[FundingCandle]]) -> list[SearchArm]:
     """The baseline plus one arm per grid point, observing the tenor's own series."""
     arms = [_baseline_arm()]
+    keys = grid_series_keys(grid, series)
     for offset, period, wait_h in grid.grid_points():
-        key = resolve_market_series_key(period, series)
+        key = keys[period]
         arms.append(SearchArm(
             ArmSpec(f"mkt_p{period}_off{offset}_w{wait_h}", key,
                     partial(_market_rate, period, offset)),
@@ -187,6 +197,15 @@ def prepare_symbol(
 ) -> PreparedSymbol:
     """Everything that can fail before a replay starts: series, tape, windows, arms."""
     series = dict(raw_series)
+    grid_keys: dict[int, str] = {}
+    if setup.grid is not None:
+        try:
+            grid_keys = grid_series_keys(setup.grid, series)
+        except KeyError as error:
+            raise SystemExit(f"{symbol}: {error.args[0]}") from error
+        # A series no arm observes must not shorten the joint coverage.
+        series = {key: candles for key, candles in series.items()
+                  if key == "p2" or key in grid_keys.values()}
     if "p30" in series:
         series["p30"] = to_hourly_grid(series["p30"], max_gap_hours=setup.p30_staleness_hours)
     series = clamp_to_joint_coverage(series)
@@ -204,14 +223,17 @@ def prepare_symbol(
                          f"({days[0]} .. {days[-1]})")
 
     if setup.grid is not None:
-        try:
-            arms: list[SearchArm] = grid_arms(setup.grid, series)
-        except KeyError as error:
-            raise SystemExit(f"{symbol}: {error.args[0]}") from error
-        notes: list[str] = []
+        arms: list[SearchArm] = grid_arms(setup.grid, series)
+        notes: list[str] = [
+            f"{period}-day arms quote off the {key} aggregate: no p{period} series"
+            for period, key in grid_keys.items() if key != f"p{period}"
+        ]
     else:
         arms, notes = period_arms(symbol=symbol, series=series, cells=setup.cells,
                                   ap_cells=setup.ap_cells, ap=setup.ap)
+    tail_h = max(arm.max_wait_h for arm in arms)
+    notes.append(f"no offer is placed in the last {tail_h}h of a test month (the longest wait "
+                 "among the arms, shared by all of them)")
     missing = (days[-1] - days[0]).days + 1 - len(days)
     notes.append(f"tape: {days[0]} .. {days[-1]}"
                  + (f" with {missing} days missing" if missing else "")
@@ -320,8 +342,8 @@ def _parse_grid(p: argparse.ArgumentParser, args: argparse.Namespace) -> Grid:
         p.error("--offsets must be finite and above -1")
     if not all(MIN_PERIOD_DAYS <= period <= MAX_PERIOD_DAYS for period in grid.periods):
         p.error(f"--periods must be within {MIN_PERIOD_DAYS}..{MAX_PERIOD_DAYS} days")
-    if not all(wait >= 1 for wait in grid.wait_hours):
-        p.error("--wait-hours must be at least 1")
+    if not all(1 <= wait <= MAX_WAIT_HOURS for wait in grid.wait_hours):
+        p.error(f"--wait-hours must be within 1..{MAX_WAIT_HOURS}")
     if grid.size() == 0:
         p.error("the grid has no point besides the baseline (offset 0, 2 days, 24h)")
     floor = DEFAULT_N_TRIALS + grid.size()

@@ -133,6 +133,7 @@ def test_grid_requires_an_explicit_trials_number() -> None:
     ["--offsets", "0.1", "--periods", "1", "--wait-hours", "24"],
     ["--offsets", "0.1", "--periods", "121", "--wait-hours", "24"],
     ["--offsets", "0.1", "--periods", "2", "--wait-hours", "0"],
+    ["--offsets", "0.1", "--periods", "2", "--wait-hours", "169"],  # would eat the month
     ["--offsets", "0", "--periods", "2", "--wait-hours", "24"],  # only the baseline
 ])
 def test_grid_rejects_bad_values_before_loading_anything(flags: list[str]) -> None:
@@ -155,8 +156,23 @@ def test_prepare_fails_clearly_without_a_tape_or_a_series(inputs: tuple[Path, Pa
     grid = Grid(offsets=(Decimal("0.1"),), periods=(7,), wait_hours=(24,))
     with pytest.raises(SystemExit, match="no market series for period 7"):
         prepare_symbol("fUST", raw, _setup(tape, grid))
+    two_day = Grid(offsets=(Decimal("0.1"),), periods=(2,), wait_hours=(24,))
     with pytest.raises(SystemExit, match="no tape day files"):
-        prepare_symbol("fUST", raw, _setup(tape / "elsewhere", grid))
+        prepare_symbol("fUST", raw, _setup(tape / "elsewhere", two_day))
+
+
+def test_grid_notes_say_which_series_and_tail_the_arms_used(inputs: tuple[Path, Path]) -> None:
+    _fixtures, tape = inputs
+    n = 24 * 183
+    raw = {"p2": _series("p2", "0.0001", n), "a30": _series("a30", "0.0002", n),
+           "p30": _series("p30", "0.0003", 24 * 100)}  # ends before any test month
+    grid = Grid(offsets=(Decimal("0.1"),), periods=(2, 7), wait_hours=(6, 48))
+    prepared = prepare_symbol("fUST", raw, _setup(tape, grid))
+    assert "7-day arms quote off the a30 aggregate: no p7 series" in prepared.notes
+    assert any(note.startswith("no offer is placed in the last 48h") for note in prepared.notes)
+    # No arm observes p30, so its short history does not cost any window.
+    assert set(prepared.series) == {"p2", "a30"}
+    assert len(prepared.windows) == 2
 
 
 def test_grid_topic_does_not_read_the_cells_files(tmp_path: Path, inputs: tuple[Path, Path]) -> None:
