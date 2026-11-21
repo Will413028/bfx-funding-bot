@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -140,6 +140,65 @@ def test_an_empty_identity_field_is_refused(field: str, facts: RunFacts) -> None
 def test_a_naive_time_is_refused() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         _record(replace(FACTS, started_at=T0.replace(tzinfo=None)))
+
+
+def test_a_run_that_finishes_before_it_starts_is_refused() -> None:
+    with pytest.raises(ValueError, match="before started_at"):
+        _record(replace(FACTS, started_at=T1, finished_at=T0))
+
+
+def test_the_same_number_written_differently_is_the_same_config() -> None:
+    a = config_sha256("entry", {"offset": Decimal("0.02"), "floor": Decimal("0")})
+    assert a == config_sha256("entry", {"offset": Decimal("0.020"), "floor": Decimal("0.00")})
+    assert a == config_sha256("entry", {"offset": Decimal("2E-2"), "floor": Decimal("-0")})
+
+
+def test_the_same_instant_in_another_timezone_is_the_same_config() -> None:
+    elsewhere = T0.astimezone(timezone(timedelta(hours=8)))
+    assert config_sha256("entry", {"start": T0}) == config_sha256("entry", {"start": elsewhere})
+
+
+def test_a_naive_datetime_parameter_is_refused() -> None:
+    with pytest.raises(ValueError, match="naive datetime"):
+        _record(params={"start": T0.replace(tzinfo=None)})
+
+
+def test_a_non_string_parameter_key_is_refused_instead_of_merged() -> None:
+    with pytest.raises(TypeError, match="non-string key"):
+        _record(params={"caps": {2: Decimal("100"), "2": Decimal("500")}})
+
+
+def test_identity_with_surrounding_whitespace_is_refused() -> None:
+    with pytest.raises(ValueError, match="registry_entry"):
+        _record(replace(FACTS, registry_entry="period-arms-replay\n"))
+
+
+def test_two_output_files_with_one_name_are_refused(tmp_path: Path) -> None:
+    for folder in ("fUSD", "fUST"):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "report.md").write_text(folder)
+    with pytest.raises(ValueError, match="duplicate output file names"):
+        _record(output_files=[tmp_path / "fUSD" / "report.md", tmp_path / "fUST" / "report.md"])
+
+
+def test_candle_fingerprint_hashes_numbers_by_value() -> None:
+    assert (fingerprint_candles("p2", [_candle(1, "0.0001")]).sha256
+            == fingerprint_candles("p2", [_candle(1, "0.00010000")]).sha256
+            == fingerprint_candles("p2", [_candle(1, "1E-4")]).sha256)
+
+
+@pytest.mark.parametrize("order", [(2, 1), (1, 1)])
+def test_candle_fingerprint_refuses_rows_that_are_not_strictly_ascending(order: tuple[int, int]) -> None:
+    with pytest.raises(ValueError, match="strictly increasing mts"):
+        fingerprint_candles("p2", [_candle(mts, "0.0001") for mts in order])
+
+
+def test_writing_leaves_no_partial_file_and_replaces_an_earlier_record(tmp_path: Path) -> None:
+    target = tmp_path / "report.run.json"
+    write_run_record(target, _record())
+    write_run_record(target, _record(replace(FACTS, code_version="sha-def")))
+    assert json.loads(target.read_text())["code_version"] == "sha-def"
+    assert [p.name for p in tmp_path.iterdir()] == ["report.run.json"]
 
 
 def test_a_record_without_inputs_is_refused() -> None:
