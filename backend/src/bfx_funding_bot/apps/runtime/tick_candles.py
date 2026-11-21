@@ -6,7 +6,6 @@ REST failure or timeout leaves the gap to the caller's LOCF / hard-tier path.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -35,10 +34,10 @@ async def read_tick_candles(
 ) -> list[FundingCandle]:
     try:
         async with session_factory() as s:
-            await asyncio.wait_for(fill_missing_boundary(
+            await fill_missing_boundary(
                 bitfinex=bitfinex, session=s, symbol=cell.symbol, timeframe=cell.timeframe,
                 period_agg=cell.period_agg, boundary_mts=candle_mts, max_steps=lookback,
-            ), timeout=timeout_s)
+                rest_timeout_s=timeout_s)
     except Exception:
         log.warning("boundary_gap_fill_failed cell=%s candle_mts=%d",
                     cell.pair_id, candle_mts, exc_info=True)

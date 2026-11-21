@@ -10,7 +10,7 @@ from decimal import Decimal
 from typing import Any, cast
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.apps.runtime.tick_candles import read_tick_candles
 from bfx_funding_bot.core.db import Base
@@ -83,5 +83,22 @@ async def test_an_unreachable_venue_leaves_the_gap_to_locf(factory: Any) -> None
 
 
 async def test_a_venue_that_never_answers_does_not_stall_the_tick(factory: Any) -> None:
-    mts = await asyncio.wait_for(_read(factory, _Rest(hang=True), timeout_s=0.05), timeout=5)
+    rest = _Rest(hang=True)
+    mts = await asyncio.wait_for(_read(factory, rest, timeout_s=0.05), timeout=5)
+    assert rest.calls == 1
     assert mts == [BOUNDARY - 3 * HOUR, BOUNDARY - 2 * HOUR]
+
+
+async def test_the_venue_timeout_does_not_cancel_slow_database_work(
+        factory: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The timeout bounds the venue, not the DB: a slow commit must neither be cancelled
+    # mid-flight nor cost the boundary candle a venue that answered.
+    original = AsyncSession.commit
+
+    async def slow_commit(self: AsyncSession) -> None:
+        await asyncio.sleep(0.2)
+        await original(self)
+
+    monkeypatch.setattr(AsyncSession, "commit", slow_commit)
+    assert await _read(factory, _Rest(), timeout_s=0.05) == [
+        BOUNDARY - 3 * HOUR, BOUNDARY - 2 * HOUR, BOUNDARY - HOUR, BOUNDARY]
