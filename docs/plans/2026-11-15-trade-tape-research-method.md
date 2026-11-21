@@ -137,7 +137,7 @@
 
 - [ ] **6c. 用自己的借款量借方實際持有多久**（被擋於：步驟 6b；D10；正式 DB 的唯讀查詢要 Will 核准）
   - 檔案：新增 `backend/src/bfx_funding_bot/modules/backtest/hold_times.py`、`backend/scripts/report_credit_hold_times.py` 與兩者的測試；修改 `backend/src/bfx_funding_bot/modules/backtest/engine.py`（`_held_ms_until_refinance` 改名為公開的 `held_ms_until_refinance`，行為不變）、`backend/ARCHITECTURE.md`。不進每週工作。
-  - 範圍：步驟 6b 的兩個還款情境夾住了所有臂的結論，真實行為在兩者之間的哪裡沒有量過。唯讀讀取 `funding_credit_history`（每筆已結束借款的利率、期限、開始與實際結束時間）與 2 天期小時 K 線，報告：提前結束的筆數、實際持有時間佔期限的比例（金額×期限加權）、同一批借款套 6b 還款規則會得到的比例、兩者之間的位置（0＝還款情境，1＝持有到期）、提前結束時市場是否比鎖定利率低超過 margin。credit 與 loan 分開也合併報。這是量測，不是策略 trial，不動 `DEFAULT_N_TRIALS`。
+  - 範圍：步驟 6b 的兩個還款情境夾住了所有臂的結論，真實行為在兩者之間的哪裡沒有量過。唯讀讀取 `funding_credit_history`（每筆已結束借款的利率、期限、開始與實際結束時間）與 2 天期小時 K 線，報告：提前結束的筆數、實際持有時間佔期限的比例（金額×期限加權）、同一批借款套 6b 還款規則會得到的比例、兩者之間的位置（0＝還款情境，1＝持有到期）、提前結束時市場是否比鎖定利率低超過 margin。credit（已被借方使用）與 loan（借出但未使用）分開報、不相加：同一筆放貸可能先列為 loan 再列為 credit，另報「看起來是轉成 credit 的 loan」筆數。rate ≤ 0（FRR 標記）與 K 線沒涵蓋到期限結束的借款不進比較。這是量測，不是策略 trial，不動 `DEFAULT_N_TRIALS`。
   - 消費端：`rg -n "held_ms_until_refinance|hold_times|report_credit_hold_times" backend`。
   - 不能動：`funding_credit_history` 的寫入端；`bfx_research` 的權限（該表已在唯讀允許清單）；還款規則本身。
   - 驗收：單元測試（到期不算提前、距到期一小時內不算提前、提前還款時取借方當時看得到的最後一個收盤、位置落在兩個情境之間、以金額與期限加權、參考序列沒涵蓋的借款不進比較、結束早於開始報錯、沒有借款或沒有 K 線時不產出空報告）；mutation 在複本跑；在 VM 跑出報告。

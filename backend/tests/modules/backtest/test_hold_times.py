@@ -8,6 +8,7 @@ import pytest
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.hold_times import (
     EndedCredit,
+    loans_that_became_credits,
     measure_holds,
     summarize_holds,
 )
@@ -92,3 +93,51 @@ def test_a_credit_the_reference_does_not_cover_is_kept_out_of_the_comparison() -
 def test_a_credit_that_closes_before_it_opens_is_refused() -> None:
     with pytest.raises(ValueError, match="closes before it opens"):
         measure_holds([_credit(1, opened_h=5, held_h=-1)], _reference({}), MARGIN)
+
+
+def test_a_close_after_the_term_end_counts_as_the_full_term_only() -> None:
+    rows = measure_holds([_credit(1, opened_h=1, held_h=50)], _reference({}), MARGIN)
+    assert rows[0].held_ms == 48 * H and rows[0].early is False
+    assert summarize_holds(rows, MARGIN).held_fraction == 1
+
+
+def test_the_market_at_the_close_is_the_last_finished_hour() -> None:
+    # Hour 12 (still open when the credit closes at +12h30) is low; hour 11 was not.
+    reference = _reference({12: "0.0001"})
+    row = measure_holds([_credit(1, opened_h=2, held_h=10.5)], reference, MARGIN)[0]
+    assert row.drop_at_close == 0
+
+
+def test_only_a_drop_beyond_the_margin_counts_as_a_refinance_motive() -> None:
+    def early_with_drop(close: str) -> int:
+        reference = _reference(dict.fromkeys(range(0, 120), close))
+        rows = measure_holds([_credit(1, opened_h=2, held_h=10)], reference, MARGIN)
+        return summarize_holds(rows, MARGIN).early_with_drop
+
+    assert early_with_drop("0.00019") == 0  # 5% under the rate
+    assert early_with_drop("0.00016") == 0  # exactly the margin: the rule needs more
+    assert early_with_drop("0.00015") == 1
+
+
+def test_the_rule_is_not_run_where_it_cannot_be_judged() -> None:
+    low = dict.fromkeys(range(0, 120), "0.0001")
+    # An FRR-marked credit (rate 0) has no trigger a close could be under.
+    frr = measure_holds([_credit(1, opened_h=2, held_h=5, rate=Decimal(0))], _reference(low), MARGIN)
+    assert frr[0].predicted_ms is None
+    # A 30-day credit: the series ends 5 days in without the rule firing, so the other
+    # 25 days of candles that could still have fired it are missing.
+    long_credit = _credit(2, opened_h=2, held_h=3, period_days=30)
+    assert measure_holds([long_credit], _reference({}), MARGIN)[0].predicted_ms is None
+    # Had the rule fired inside the loaded range, the prediction stands.
+    assert measure_holds([long_credit], _reference(low), MARGIN)[0].predicted_ms == H
+
+
+def test_a_loan_that_ends_as_a_same_shaped_credit_opens_is_flagged() -> None:
+    loan = EndedCredit(credit_id=1, kind="loan", symbol="fUST", rate=RATE, period_days=2,
+                       amount=Decimal("100"), opened_mts=T0, closed_mts=T0 + 2 * H)
+    used = EndedCredit(credit_id=2, kind="credit", symbol="fUST", rate=RATE, period_days=2,
+                       amount=Decimal("100"), opened_mts=T0 + 2 * H + 5_000, closed_mts=T0 + 48 * H)
+    other = EndedCredit(credit_id=3, kind="credit", symbol="fUST", rate=RATE, period_days=2,
+                        amount=Decimal("250"), opened_mts=T0 + 2 * H, closed_mts=T0 + 48 * H)
+    assert loans_that_became_credits([loan, used, other]) == 1
+    assert loans_that_became_credits([loan, other]) == 0

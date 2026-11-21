@@ -5,6 +5,7 @@ import asyncio
 import json
 from decimal import Decimal
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -31,8 +32,8 @@ def _data(reference: bool = True) -> report.SymbolData:
 
 
 def _run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, data: list[report.SymbolData]) -> tuple[int, Path]:
-    async def load(symbols: list[str]) -> list[report.SymbolData]:
-        assert symbols == ["fUST"]
+    async def load(symbols: list[str], account_id: UUID | None) -> list[report.SymbolData]:
+        assert symbols == ["fUST"] and account_id is None
         return data
 
     monkeypatch.setattr(report, "_load", load)
@@ -49,12 +50,14 @@ def test_report_groups_by_kind_and_places_the_measurement(
     payload = json.loads(out.with_suffix(".json").read_text())
     symbol = payload["symbols"][0]
     assert symbol["open_rows_left_out"] == 2
-    assert set(symbol["summaries"]) == {"all", "credit", "loan"}
-    assert (symbol["summaries"]["all"]["n"], symbol["summaries"]["all"]["n_early"]) == (3, 1)
+    # Credits and loans are never pooled: one lend may be listed as both.
+    assert set(symbol["summaries"]) == {"credit", "loan"}
+    assert (symbol["summaries"]["credit"]["n"], symbol["summaries"]["credit"]["n_early"]) == (2, 1)
     assert symbol["summaries"]["loan"]["n_early"] == 0
-    # Two of three held to term while the rule predicted an immediate repayment for all.
-    position = Decimal(symbol["summaries"]["all"]["position"])
-    assert Decimal("0.6") < position < Decimal("0.7")
+    # One of two credits held to term while the rule predicted an immediate repayment.
+    assert abs(Decimal(symbol["summaries"]["credit"]["position"]) - Decimal("0.5")) < Decimal("1e-9")
+    assert symbol["loans_that_look_converted"] == 0
+    assert symbol["credits"][1]["held_hours"] == "1.0000"
     assert [c["credit_id"] for c in symbol["credits"]] == [1, 2, 3]
     assert symbol["credits"][1]["early"] is True
     markdown = out.read_text()
@@ -79,3 +82,32 @@ def test_a_bad_margin_is_refused(margin: str) -> None:
     assert report._parse_args(good).refinance_margin == "0.2"
     with pytest.raises(SystemExit):
         report._parse_args([*good, "--refinance-margin", margin])
+
+
+def test_a_sample_pooled_over_accounts_is_refused() -> None:
+    one, two = UUID(int=1), UUID(int=2)
+    report.single_account([one, one], "fUST")
+    with pytest.raises(SystemExit, match="2 exchange accounts"):
+        report.single_account([one, two, one], "fUST")
+
+
+def test_candles_are_loaded_to_the_term_end_of_every_credit() -> None:
+    # Repaid after 3h of a 30-day term: the rule still needs the other 30 days of closes.
+    credit = EndedCredit(credit_id=1, kind="credit", symbol="fUST", rate=RATE, period_days=30,
+                         amount=Decimal("100"), opened_mts=T0, closed_mts=T0 + 3 * H)
+    assert report.reference_end_mts([credit]) >= T0 + 30 * 24 * H
+
+
+def test_a_symbol_without_credits_is_named_not_silently_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def load(symbols: list[str], account_id: UUID | None) -> list[report.SymbolData]:
+        return [_data(), report.SymbolData("fUSD", [], 0, [])]
+
+    monkeypatch.setattr(report, "_load", load)
+    out = tmp_path / "hold.md"
+    with caplog.at_level("WARNING"):
+        rc = asyncio.run(report._amain(["--registry-entry", "x", "--symbols", "fUST,fUSD",
+                                        "--output", str(out)]))
+    assert rc == 0
+    assert "fUSD: no ended credits" in caplog.text

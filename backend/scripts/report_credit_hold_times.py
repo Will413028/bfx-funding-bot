@@ -6,7 +6,8 @@ record of each credit's rate, term, opening and actual close) and the hourly
 early, the amount-and-term weighted share of the term actually held, what the
 refinance-on-drop rule (ADR 2026-09-27 D3) would have predicted for the same
 credits, and where the measurement sits between that rule (0) and held to
-maturity (1).
+maturity (1). Venue credits (in use) and venue loans (taken, unused) are
+reported separately, never added together: one lend may be listed as both.
 
     python -m scripts.report_credit_hold_times --registry-entry "<registry row>" \
         --output /reports/<date>-credit-hold-times.md
@@ -25,6 +26,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from uuid import UUID
 
 from sqlalchemy import select
 
@@ -35,6 +37,7 @@ from bfx_funding_bot.modules.backtest.hold_times import (
     EndedCredit,
     HoldRow,
     HoldSummary,
+    loans_that_became_credits,
     measure_holds,
     summarize_holds,
 )
@@ -58,8 +61,12 @@ KINDS = ("credit", "loan")
 CAVEATS = (
     "Small sample from one account, one currency and (so far) 2-day terms only: it says "
     "nothing direct about how borrowers treat 7-, 14- or 30-day credits.",
-    "A venue credit and a venue loan are reported as separate rows; whether one lend can "
-    "appear as both over its life has not been checked, so read the kinds separately too.",
+    "Venue credits and venue loans are never added together: one lend may be listed first as "
+    "a loan and then as a credit. 'loans that look converted' counts loans that end within a "
+    "minute of a same-sized, same-rate, same-term credit opening (a heuristic); such a loan's "
+    "end is not a repayment, so the loan row overstates early closes by about that many.",
+    "Credits with a rate of 0 or below (the venue's FRR marker) and credits whose term runs "
+    "past the loaded candles without the rule firing are left out of the comparison.",
     "A close within one hour of the term end counts as the term running out.",
     "The refinance rule is run on the same hourly 2-day closes the replay uses; a credit with "
     "no candle over its life is left out of the comparison and counted.",
@@ -77,18 +84,35 @@ class SymbolData:
     reference: list[FundingCandle]
 
 
-async def _load(symbols: Sequence[str]) -> list[SymbolData]:
+def single_account(account_ids: Sequence[UUID], symbol: str) -> None:
+    """One report describes one account's borrowers: refuse a pooled sample."""
+    distinct = sorted({str(account_id) for account_id in account_ids})
+    if len(distinct) > 1:
+        raise SystemExit(f"{symbol}: credits from {len(distinct)} exchange accounts; pass "
+                         "--exchange-account-id")
+
+
+def reference_end_mts(credits: Sequence[EndedCredit]) -> int:
+    """The rule needs candles to each credit's term end, not only to its actual close."""
+    return max(max(c.closed_mts, c.opened_mts + c.period_days * 24 * _MS_PER_HOUR)
+               for c in credits) + _REFERENCE_PAD_MS
+
+
+async def _load(symbols: Sequence[str], account_id: UUID | None) -> list[SymbolData]:
     engine = make_engine(Settings())
     session_factory = make_session_factory(engine)
     out = []
     try:
         for symbol in symbols:
             async with session_scope(session_factory) as session:
-                rows = (await session.execute(
-                    select(FundingCreditHistoryRow)
-                    .where(FundingCreditHistoryRow.symbol == symbol)
-                    .order_by(FundingCreditHistoryRow.mts_opening, FundingCreditHistoryRow.credit_id)
-                )).scalars().all()
+                query = select(FundingCreditHistoryRow).where(
+                    FundingCreditHistoryRow.symbol == symbol)
+                if account_id is not None:
+                    query = query.where(FundingCreditHistoryRow.exchange_account_id == account_id)
+                rows = (await session.execute(query.order_by(
+                    FundingCreditHistoryRow.mts_opening, FundingCreditHistoryRow.credit_id,
+                ))).scalars().all()
+                single_account([row.exchange_account_id for row in rows], symbol)
                 credits = [
                     EndedCredit(credit_id=row.credit_id, kind=row.kind, symbol=row.symbol,
                                 rate=row.rate, period_days=row.period_days,
@@ -101,7 +125,7 @@ async def _load(symbols: Sequence[str]) -> list[SymbolData]:
                     reference = await get_candles_in_range(
                         session, symbol=symbol, timeframe="1h", period_agg="p2",
                         start_mts=min(c.opened_mts for c in credits) - _REFERENCE_PAD_MS,
-                        end_mts=max(c.closed_mts for c in credits) + _REFERENCE_PAD_MS)
+                        end_mts=reference_end_mts(credits))
             out.append(SymbolData(symbol, credits, len(rows) - len(credits), reference))
     finally:
         await engine.dispose()
@@ -113,14 +137,11 @@ def _f(value: Decimal | None, digits: int = 3) -> str:
 
 
 def _hours(ms: int | None) -> str | None:
-    return None if ms is None else str(Decimal(ms) / _MS_PER_HOUR)
+    return None if ms is None else str((Decimal(ms) / _MS_PER_HOUR).quantize(Decimal("0.0001")))
 
 
 def _groups(rows: Sequence[HoldRow]) -> dict[str, list[HoldRow]]:
-    groups = {"all": list(rows)}
-    for kind in KINDS:
-        groups[kind] = [row for row in rows if row.credit.kind == kind]
-    return groups
+    return {kind: [row for row in rows if row.credit.kind == kind] for kind in KINDS}
 
 
 def render_markdown(
@@ -143,9 +164,11 @@ def render_markdown(
             f"## {data.symbol} — {len(data.credits)} ended credits "
             f"({data.open_rows} rows without a close time left out)",
             "",
+            f"Loans that look converted into a credit: {loans_that_became_credits(data.credits)}.",
+            "",
             "| kind | credits | closed early | median held h | held share of term | compared "
             "| held share (compared) | refinance rule share | position | early with market print "
-            "| of those, market >= margin below rate |",
+            "| of those, market more than the margin below rate |",
             "|---|---|---|---|---|---|---|---|---|---|---|",
         ]
         for kind, s in summaries.items():
@@ -171,6 +194,7 @@ def to_json(
         "symbols": [
             {
                 "symbol": data.symbol, "open_rows_left_out": data.open_rows,
+                "loans_that_look_converted": loans_that_became_credits(data.credits),
                 "summaries": {kind: summary(s) for kind, s in summaries.items()},
                 "credits": [
                     {"credit_id": row.credit.credit_id, "kind": row.credit.kind,
@@ -196,6 +220,8 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--output", required=True, type=report_path_arg,
                    help="markdown path (.json and .run.json siblings auto)")
     p.add_argument("--symbols", default="fUST")
+    p.add_argument("--exchange-account-id", type=UUID, default=None,
+                   help="required when the table holds credits of more than one account")
     p.add_argument("--refinance-margin", default=DEFAULT_REFINANCE_MARGIN)
     args = p.parse_args(list(argv))
     try:
@@ -213,7 +239,11 @@ async def _amain(argv: Sequence[str]) -> int:
     start = RunStart.begin(args.registry_entry, "report_credit_hold_times")
     margin = Decimal(args.refinance_margin)
     symbols = sorted({s.strip() for s in args.symbols.split(",") if s.strip()})
-    loaded = [data for data in await _load(symbols) if data.credits]
+    everything = await _load(symbols, args.exchange_account_id)
+    loaded = [data for data in everything if data.credits]
+    for data in everything:
+        if not data.credits:
+            logger.warning("%s: no ended credits, left out of the report", data.symbol)
     if not loaded:
         logger.error("no ended credits for %s", symbols)
         return 2
@@ -234,7 +264,10 @@ async def _amain(argv: Sequence[str]) -> int:
     out.with_suffix(".json").write_text(
         json.dumps(to_json(results, rows_by_symbol, margin=margin), indent=2))
     record = write_research_run_record(
-        out, start, params={"symbols": symbols, "refinance_margin": margin},
+        out, start,
+        params={"symbols": symbols, "refinance_margin": margin,
+                "exchange_account_id": (str(args.exchange_account_id)
+                                        if args.exchange_account_id else None)},
         # The credit rows themselves are in the .json output, whose hash the record carries.
         inputs=[fingerprint_candles(f"candles:{data.symbol}:p2", data.reference)
                 for data in loaded],

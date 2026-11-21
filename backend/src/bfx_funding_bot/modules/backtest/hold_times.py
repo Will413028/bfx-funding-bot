@@ -65,7 +65,7 @@ class HoldSummary:
     predicted_fraction: Decimal | None
     position: Decimal | None
     early_with_market: int  # early credits with a recent market print at the close
-    early_with_drop: int  # of those, the market was at least the margin below the rate
+    early_with_drop: int  # of those, the market was more than the margin below the rate
 
 
 def measure_holds(
@@ -80,12 +80,7 @@ def measure_holds(
             raise ValueError(f"credit {credit.credit_id} closes before it opens")
         term_ms = credit.period_days * 24 * _MS_PER_HOUR
         held_ms = min(credit.closed_mts - credit.opened_mts, term_ms)
-        try:
-            predicted: int | None = held_ms_until_refinance(
-                series, lock_start_mts=credit.opened_mts, locked_rate=credit.rate,
-                margin=margin, term_ms=term_ms)
-        except BacktestIncomplete:
-            predicted = None
+        predicted = _rule_prediction(series, credit, margin, term_ms)
         rows.append(HoldRow(
             credit=credit, term_ms=term_ms, held_ms=held_ms,
             early=held_ms < term_ms - EARLY_TOLERANCE_MS,
@@ -93,6 +88,31 @@ def measure_holds(
             predicted_ms=predicted,
         ))
     return rows
+
+
+def _rule_prediction(
+    series: tuple[list[int], list[Decimal | None]], credit: EndedCredit, margin: Decimal,
+    term_ms: int,
+) -> int | None:
+    """The refinance rule's hold for this credit, or None when it cannot be run.
+
+    It cannot when the rate is not a real fixed rate (0 marks an FRR credit: no
+    close can be under its trigger), when no candle overlaps the credit, or when
+    the rule did not fire but the series ends before the term does: the candles
+    that could still have fired it are missing.
+    """
+    if credit.rate <= 0:
+        return None
+    try:
+        predicted = held_ms_until_refinance(
+            series, lock_start_mts=credit.opened_mts, locked_rate=credit.rate,
+            margin=margin, term_ms=term_ms)
+    except BacktestIncomplete:
+        return None
+    last_close_mts = series[0][-1] + _MS_PER_HOUR
+    if predicted == term_ms and last_close_mts < credit.opened_mts + term_ms - _MS_PER_HOUR:
+        return None
+    return predicted
 
 
 def _drop_at(
@@ -107,6 +127,24 @@ def _drop_at(
     if close is None or close <= 0 or rate <= 0:
         return None
     return 1 - close / rate
+
+
+def loans_that_became_credits(credits: Sequence[EndedCredit], *, within_ms: int = 60_000) -> int:
+    """Loans whose end coincides with the opening of a credit of the same size, rate and term.
+
+    A heuristic for one lend the venue listed first as a loan (taken, unused) and
+    then as a credit (in use): such a loan's end is a conversion, not a repayment.
+    """
+    opened_by_shape: dict[tuple[Decimal, Decimal, int], list[int]] = {}
+    for credit in credits:
+        if credit.kind == "credit":
+            key = (credit.amount, credit.rate, credit.period_days)
+            opened_by_shape.setdefault(key, []).append(credit.opened_mts)
+    return sum(
+        1 for loan in credits if loan.kind == "loan"
+        and any(abs(opened - loan.closed_mts) <= within_ms
+                for opened in opened_by_shape.get((loan.amount, loan.rate, loan.period_days), ()))
+    )
 
 
 def _weighted_fraction(rows: Sequence[HoldRow], held: Sequence[int]) -> Decimal | None:
@@ -137,5 +175,5 @@ def summarize_holds(rows: Sequence[HoldRow], margin: Decimal) -> HoldSummary:
         position=position,
         early_with_market=len(early_market),
         early_with_drop=sum(1 for row in early_market
-                            if row.drop_at_close is not None and row.drop_at_close >= margin),
+                            if row.drop_at_close is not None and row.drop_at_close > margin),
     )
