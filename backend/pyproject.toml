@@ -696,4 +696,3 @@ ancestors = ["bfx_funding_bot.modules.market"]
 depth = 0
 ignore_imports = []
 broken_contract_guidance = "Do not add ignores; move the shared piece below both siblings."
-

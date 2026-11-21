@@ -4,8 +4,9 @@ import-linter stays green when a contract matches nothing (a wrong module expres
 renamed package), so a passing ``lint-imports`` alone does not prove a rule guards
 anything. For each contract in ``pyproject.toml`` this builds the contract from its own
 options, checks it is kept on the real graph, then adds one import that breaks it (source
--> forbidden module, a two-way import between siblings, an unlisted importer of a
-protected module) and expects the check to fail.
+-> forbidden module for every pair of entries, plus a two-hop chain when indirect imports
+are forbidden; a two-way import between siblings; an unlisted importer of each protected
+module) and expects every one to fail the check.
 """
 from __future__ import annotations
 
@@ -30,6 +31,7 @@ CONTRACT_TYPES: dict[str, type[Contract]] = {
     "acyclic_siblings": AcyclicSiblingsContract,
     "protected": ProtectedContract,
 }
+HOP = f"{ROOT_PACKAGE}.planted_hop"  # a module no contract names: an indirect chain's middle
 _PYPROJECT = Path(__file__).resolve().parents[2] / "pyproject.toml"
 configure()  # contract checks read import-linter's settings (timer, printer)
 
@@ -60,27 +62,50 @@ def _modules(graph: grimp.ImportGraph, expressions: Any) -> list[str]:
     return sorted(m.name for m in module_expressions_to_modules(graph, expressions))
 
 
-def _violation(graph: grimp.ImportGraph, options: dict[str, Any]) -> list[tuple[str, str]]:
+def _overlaps(a: str, b: str) -> bool:
+    return a == b or a.startswith(b + ".") or b.startswith(a + ".")
+
+
+def _first(graph: grimp.ImportGraph, contract: Any, field: str, raw: str) -> str:
+    """The first module one raw entry of a contract field resolves to."""
+    entry = next(e for e in getattr(contract, field) if str(e) == raw or e.expression == raw)
+    modules = _modules(graph, [entry])
+    assert modules, f"{field} entry {raw!r} matches no module"
+    return modules[0]
+
+
+def _violations(graph: grimp.ImportGraph, options: dict[str, Any]
+                ) -> list[list[tuple[str, str]]]:
+    """Each element is one planted violation (a list of imports to add together)."""
     kind = options["type"]
     contract: Any = _build(options)
     if kind == "forbidden":
-        forbidden = _modules(graph, contract.forbidden_modules)
-        sources = [m for m in _modules(graph, contract.source_modules)
-                   if not any(m == f or m.startswith(f + ".") or f.startswith(m + ".")
-                              for f in forbidden)]
-        return [(sources[0], forbidden[0])]
+        out = []
+        for source_raw in options["source_modules"]:
+            for forbidden_raw in options["forbidden_modules"]:
+                source = _first(graph, contract, "source_modules", source_raw)
+                forbidden = _first(graph, contract, "forbidden_modules", forbidden_raw)
+                if _overlaps(source, forbidden):
+                    continue
+                out.append([(source, forbidden)])
+                if not options.get("allow_indirect_imports", False):
+                    out.append([(source, HOP), (HOP, forbidden)])
+        return out
     if kind == "acyclic_siblings":
         children = sorted(graph.find_children(options["ancestors"][0]))
         assert len(children) >= 2, "an acyclic contract over fewer than two siblings guards nothing"
-        first, second = children[:2]
-        return [(first, second), (second, first)]
+        return [[(children[0], children[1]), (children[1], children[0])]]
     if kind == "protected":
         allowed = _modules(graph, contract.allowed_importers)
-        protected = _modules(graph, contract.protected_modules)[0]
-        importer = next(m for m in sorted(graph.modules)
-                        if m not in allowed and not m.startswith(protected)
-                        and m.count(".") == 2)
-        return [(importer, protected)]
+        out = []
+        for protected_raw in options["protected_modules"]:
+            protected = _first(graph, contract, "protected_modules", protected_raw)
+            importer = next((m for m in sorted(graph.modules)
+                             if m.startswith(ROOT_PACKAGE + ".") and m not in allowed
+                             and not _overlaps(m, protected)), None)
+            assert importer is not None, f"no unlisted importer found for {protected}"
+            out.append([(importer, protected)])
+        return out
     raise AssertionError(f"no planted violation for contract type {kind!r}")
 
 
@@ -90,10 +115,17 @@ def test_every_contract_type_is_covered() -> None:
 
 @pytest.mark.parametrize("options", _contracts(), ids=lambda c: c["id"])
 def test_contract_reports_a_planted_violation(options: dict[str, Any]) -> None:
-    graph = _graph()
-    assert _build(options).check(graph, verbose=False).kept, "contract is broken on the real graph"
-    planted = copy.deepcopy(graph)
-    for importer, imported in _violation(planted, options):
-        planted.add_import(importer=importer, imported=imported, line_number=1,
-                           line_contents="# planted violation")
-    assert not _build(options).check(planted, verbose=False).kept
+    graph = _graph()  # contracts may mutate the graph they check, so each check gets a copy
+    assert _build(options).check(copy.deepcopy(graph), verbose=False).kept, (
+        "contract is broken on the real graph")
+    violations = _violations(graph, options)
+    assert violations
+    missed = []
+    for imports in violations:
+        planted = copy.deepcopy(graph)
+        for importer, imported in imports:
+            planted.add_import(importer=importer, imported=imported, line_number=1,
+                               line_contents="# planted violation")
+        if _build(options).check(planted, verbose=False).kept:
+            missed.append(imports)
+    assert missed == []
