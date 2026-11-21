@@ -4,32 +4,13 @@ name: Capital rules
 # (backend/scripts/capital_mutation_gate.py). A separate workflow on purpose:
 # release.yml publishes only after the workflow named "CI" passes, so nothing
 # here changes what gates a release.
+#
+# Every PR runs this workflow so `gate (capital-rules)` always reports and can be a
+# required check on dev; the `changes` job decides whether the mutants run.
 
 on:
   pull_request:
     branches: [main, dev]
-    paths:
-      # Unit-owned rules and their owning tests.
-      - backend/src/bfx_funding_bot/modules/trading/policy.py
-      - backend/src/bfx_funding_bot/modules/trading/capital.py
-      - backend/src/bfx_funding_bot/modules/execution/deployment/sizing.py
-      - backend/src/bfx_funding_bot/modules/execution/deployment/reconciler.py
-      - backend/tests/modules/trading/test_policy.py
-      - backend/tests/modules/trading/test_capital.py
-      - backend/tests/modules/execution/deployment/test_sizing.py
-      - backend/tests/modules/execution/deployment/test_reconciler.py
-      # Integration-owned rules (M12 guard, M13 command gate, M19 basis) and their owning tests.
-      - backend/src/bfx_funding_bot/modules/execution/safety/hard_guards.py
-      - backend/src/bfx_funding_bot/modules/ledger/_internal/journal.py
-      - backend/src/bfx_funding_bot/modules/ledger/_internal/basis.py
-      - backend/tests/integration/test_capital_command_boundary.py
-      - backend/tests/integration/test_ledger_command_authorize.py
-      - backend/tests/integration/test_ledger_basis.py
-      # The gate itself.
-      - backend/scripts/capital_mutation_gate.py
-      - backend/scripts/mutation_sandbox.py
-      - .github/workflows/capital-rules.yml
-      - .github/actions/postgres-18/action.yml
   schedule:
     - cron: "17 19 * * *"  # nightly, 03:17 Asia/Taipei
   workflow_dispatch:
@@ -42,9 +23,32 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: Capital rule paths changed
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      capital: ${{ steps.diff.outputs.capital }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 2  # the PR merge commit and its base parent
+      # Unit-owned and integration-owned rules, their owning tests, and the gate itself.
+      - id: diff
+        run: |
+          pattern='^(backend/src/bfx_funding_bot/modules/trading/policy\.py|backend/src/bfx_funding_bot/modules/trading/capital\.py|backend/src/bfx_funding_bot/modules/execution/deployment/sizing\.py|backend/src/bfx_funding_bot/modules/execution/deployment/reconciler\.py|backend/tests/modules/trading/test_policy\.py|backend/tests/modules/trading/test_capital\.py|backend/tests/modules/execution/deployment/test_sizing\.py|backend/tests/modules/execution/deployment/test_reconciler\.py|backend/src/bfx_funding_bot/modules/execution/safety/hard_guards\.py|backend/src/bfx_funding_bot/modules/ledger/_internal/journal\.py|backend/src/bfx_funding_bot/modules/ledger/_internal/basis\.py|backend/tests/integration/test_capital_command_boundary\.py|backend/tests/integration/test_ledger_command_authorize\.py|backend/tests/integration/test_ledger_basis\.py|backend/scripts/capital_mutation_gate\.py|backend/scripts/mutation_sandbox\.py|\.github/workflows/capital-rules\.yml|\.github/actions/postgres-18/action\.yml)$'
+          if git diff --name-only HEAD^1 HEAD | grep -qE "$pattern"; then
+            echo "capital=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "capital=false" >> "$GITHUB_OUTPUT"
+          fi
+
   mutation_gate:
     name: Capital mutation gate
-    if: github.event_name == 'pull_request'
+    needs: [changes]
+    if: needs.changes.outputs.capital == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -112,3 +116,20 @@ jobs:
         run: uv run pytest -m "property and not integration" --hypothesis-profile=nightly -q -n auto
       - name: Capital mutation gate (all mutants)
         run: uv run python -m scripts.capital_mutation_gate --include-integration
+
+  gate:
+    # Required on dev: passes when the mutants succeeded or did not need to run.
+    name: gate (capital-rules)
+    if: always() && github.event_name == 'pull_request'
+    needs: [changes, mutation_gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Every job succeeded or was skipped
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for r in $RESULTS; do
+            case "$r" in success|skipped) ;; *) echo "a needed job ended with: $r"; exit 1 ;; esac
+          done
