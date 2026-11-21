@@ -261,5 +261,28 @@ def test_a_lock_the_reference_does_not_cover_cannot_be_scored(tape: TapeDays) ->
     with pytest.raises(BacktestIncomplete) as exc:
         _held(["0.0002"], lock_start=T0 + 5 * H)
     assert exc.value.reason == "market_series_gap"
+    # A series that only resumes after the lock would have ended says nothing about it.
+    reference = ([T0, T0 + H, T0 + 60 * H], [Decimal("0.0002")] * 3)
+    with pytest.raises(BacktestIncomplete) as exc:
+        _held_ms_until_refinance(reference, lock_start_mts=T0 + 5 * H,
+                                 locked_rate=Decimal("0.0002"), margin=Decimal("0.2"),
+                                 term_ms=48 * H)
+    assert exc.value.reason == "market_series_gap"
     with pytest.raises(ValueError, match="refinance_reference is empty"):
         run_backtest(_candles(), _Fixed(), _refinance_config(), tape=tape, refinance_reference=[])
+
+
+def test_a_repaid_lock_frees_capital_without_an_extra_rounded_hour(tmp_path: Path) -> None:
+    # A trade above our rate 1ms into every hour, and a 2-day market always far below
+    # the locked rate. Each cycle: decide at hour i, place at i+1h, fill at i+1h+1ms,
+    # repaid when that hour closes at i+2h, one gap candle, decide again at i+4h.
+    for day in range(10, 14):
+        day_ms = T0 + (day - 10) * 24 * H
+        write_day(tmp_path, "fUST", date(2026, 1, day), [
+            (day * 100 + k, day_ms + k * H + 1, -5000.0, 0.0003, 2) for k in range(24)
+        ])
+    result = run_backtest(_candles(), _Fixed(), _refinance_config(),
+                          tape=TapeDays(tmp_path, "fUST"),
+                          refinance_reference=_reference(drop_from_hour=0))
+    # Decisions at hours 0, 4, ..., 68: the last offer must be placed 24h before +95h.
+    assert result.n_trades == 18

@@ -392,13 +392,15 @@ def run_backtest(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
                        else placed_mts - candle.mts + window_ms)
             idle_ms += wait_ms
             lock_start_mts = candle.mts + wait_ms
-            lock_candles = 0
+            held_ms = 0
             if fill_prob > 0:
                 held_ms = _replay_lock_ms(config, reference, lock_start_mts=lock_start_mts,
                                           decision=decision)
                 held_days = Decimal(held_ms) / _MS_PER_DAY
-                lock_candles = math.ceil(held_ms / _MS_PER_HOUR)
-            next_cooldown = i + math.ceil(wait_ms / _MS_PER_HOUR) + lock_candles + gap_candles
+            # Round the wait and the lock up together: a full-tenor lock is whole
+            # hours, so this equals rounding the wait alone, and a lock repaid on
+            # the hour does not cost a second rounded-up hour.
+            next_cooldown = i + math.ceil((wait_ms + held_ms) / _MS_PER_HOUR) + gap_candles
         else:
             if series_maps is not None:
                 series_key = resolve_market_series_key(decision.period_days, series_maps)
