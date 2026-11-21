@@ -135,7 +135,7 @@
   - 不能動：預設行為（margin 沒設時結果逐欄相同）；`period_threshold.py`；`replay.py`；每週工作。
   - 驗收：單元測試（跌破 margin 的那個小時還款、沒跌或跌幅在 margin 內時結果與持有到期逐欄相同、margin 與參考序列必須一起給、長鎖倉的臂在持有到期為正而在還款情境為負、報告與 JSON 每個幣別兩個情境）；mutation 在複本跑：還款判斷拿掉、margin 方向寫反、鎖倉長度不縮短、runner 只跑一個情境，各自要讓測試失敗；在 VM 跑出第二份報告（`period-arms`，兩幣，兩個情境）。
 
-- [ ] **6c. 用自己的借款量借方實際持有多久**（被擋於：步驟 6b；D10；正式 DB 的唯讀查詢要 Will 核准）
+- [x] **6c. 用自己的借款量借方實際持有多久**（被擋於：步驟 6b；D10；正式 DB 的唯讀查詢要 Will 核准）——完成 2026-11-21（PR #455），見進度表
   - 檔案：新增 `backend/src/bfx_funding_bot/modules/backtest/hold_times.py`、`backend/scripts/report_credit_hold_times.py` 與兩者的測試；修改 `backend/src/bfx_funding_bot/modules/backtest/engine.py`（`_held_ms_until_refinance` 改名為公開的 `held_ms_until_refinance`，行為不變）、`backend/ARCHITECTURE.md`。不進每週工作。
   - 範圍：步驟 6b 的兩個還款情境夾住了所有臂的結論，真實行為在兩者之間的哪裡沒有量過。唯讀讀取 `funding_credit_history`（每筆已結束借款的利率、期限、開始與實際結束時間）與 2 天期小時 K 線，報告：提前結束的筆數、實際持有時間佔期限的比例（金額×期限加權）、同一批借款套 6b 還款規則會得到的比例、兩者之間的位置（0＝還款情境，1＝持有到期）、提前結束時市場是否比鎖定利率低超過 margin。credit（已被借方使用）與 loan（借出但未使用）分開報、不相加：同一筆放貸可能先列為 loan 再列為 credit，另報「看起來是轉成 credit 的 loan」筆數。rate ≤ 0（FRR 標記）與 K 線沒涵蓋到期限結束的借款不進比較。這是量測，不是策略 trial，不動 `DEFAULT_N_TRIALS`。
   - 消費端：`rg -n "held_ms_until_refinance|hold_times|report_credit_hold_times" backend`。
@@ -196,6 +196,6 @@
 | 5 刪期望值記帳與 linear | 未開始 | | | |
 | 6 決策空間搜尋 | 完成 | 單元 5597 passed（`-n auto`，第 2 輪修正前的 HEAD；之後只改 runner 與其測試，受影響的 3 個測試檔重跑通過）、`mypy src/`、ruff、lint-imports、quality ratchet（沒有新增 suppression）；`/code-review` 一輪＋契約審查一輪：findings 12（blocking 0），fixed 11、rejected 1（nit：runner 測試讀 repo 的 cells 設定檔，和既有的 `test_run_period_structure_backtest.py` 同一種做法）；mutation 21 個全殺（其中 1 個第一次存活，原因是測試的參數被 argparse 先擋掉，修測試後殺掉）；第一份報告 2026-11-21 在 VM 一次性容器跑完（`period-arms`，兩幣各 50 個測試月 2022-05..2026-06，p30 K 線只到 2026-07-19；約 14 分鐘）：4 個臂對 `always_2d` 在兩個邊界都是正的，但鎖倉算持有到期、沒有提前還款情境（ADR 2026-09-27 D3），長期限的結果偏樂觀，報告原文與判讀放 repo 外的研究筆記 | 無（CI 在 `e34c9636` 綠） | PR #451 |
 | 6b 提前還款情境 | 完成 | 單元 5610 passed（`-n auto`，commit `6b0650b8`；另有 1 個與本步無關的失敗：`test_bootstrap_account_credential` 的子行程在平行滿載時超過 15 秒逾時，單獨跑通過）；`mypy src/`、ruff、lint-imports、quality ratchet（沒有新增 suppression）；`/code-review` 一輪＋契約審查一輪：findings 11（blocking 0），fixed 8、recorded 1（`run_backtest` 的 replay 分支拆出，記在步驟 5）、rejected 2；mutation 20 個全殺；CI（含 integration）在 `2b48ba8e` 綠；第二份報告 2026-11-21 在 VM 一次性容器跑完（程式 `4510d4d7`，`period-arms` 兩幣各 50 個測試月、兩個情境，約 28 分鐘）：持有到期情境與第一份報告數字相同；還款情境四個臂對 `always_2d` 在兩幣、兩個邊界都為負。結論照預登記：長期限與 MR／AP 的優勢取決於未量測的借方還款行為，等 live 的持有時間樣本；與 ADR 2026-09-27 D1 一致 | 無 | PR #453 |
-| 6c 借方持有時間量測 | 進行中 | | | |
+| 6c 借方持有時間量測 | 完成 | 單元 5656 passed（`-n auto`，commit `7cf0f541`；之後只動新模組、新腳本與其測試，已重跑）；`mypy src/`、ruff、lint-imports、quality ratchet（沒有新增 suppression）；`/code-review` 一輪＋契約審查一輪：findings 14（blocking 0），fixed 14；mutation 27 個全殺；CI（含 integration）在 `33f42bfb` 綠；2026-11-21 在 VM 一次性容器跑完（程式 `1345c2c4`，Will 核准）：fUST 已結束的 credit 66 筆（全部 2 天期），41% 提前結束，實際持有佔期限 0.67，同一批套還款規則為 0.17，位置 0.61；還款規則對 65 筆都會觸發但 39 筆實際持有到期，提前結束時市場比鎖定利率低超過 20% 的只有 4／27。照預登記讀作「兩者之間，長期限仍等 live 樣本」 | 無。已知缺口：loan 轉 credit 的啟發式這次回 0，逐筆對照後 15 筆 loan 幾乎都是轉換（它比的是 credit 開始對 loan 結束，應比兩者的開始時間）；判讀只用 credit 列，結論不受影響，修法記在 repo 外的研究筆記 | PR #455 |
 | 7 每週驗證 | 未開始 | | | |
 | 8 收尾 | 未開始 | | | |
