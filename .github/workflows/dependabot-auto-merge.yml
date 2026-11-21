@@ -1,0 +1,33 @@
+name: Dependabot auto-merge
+
+# Patch-group updates into dev merge on their own once the required gates pass.
+# Only the patch groups in .github/dependabot.yml (python-patch, npm-patch,
+# docker-patch) qualify; their branch names end in "-patch-<hash>". Majors,
+# minors, the all-types actions group and security updates outside a patch group
+# still wait for review. Merging into dev does not deploy; main only moves through
+# a dev→main release PR.
+
+on:
+  pull_request:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  enable:
+    name: Enable auto-merge on a Dependabot patch group
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]'
+      && contains(github.event.pull_request.head.ref, '-patch-')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Queue a merge commit for when the gates pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --merge "$PR_URL"
