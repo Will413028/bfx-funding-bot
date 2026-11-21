@@ -9,6 +9,12 @@ windows, and scored against a baseline arm by paired monthly differences.
 A pair is called only when both bounds agree: the mean-difference CI is above 0
 under both, or below 0 under both. Anything else is `wait_for_live`: the
 answer depends on same-rate queue position, which the tape cannot settle.
+Fewer scored windows than `SearchRun.min_windows` is `too_few_windows`: a
+bootstrap CI over a handful of months is a point, not an interval.
+
+Arms with different waits stop placing offers at the same point before each
+window end (the longest wait among them), so a shorter wait is not credited
+with extra tradable hours.
 """
 from __future__ import annotations
 
@@ -45,6 +51,8 @@ VERDICT_POSITIVE = "positive_both_bounds"
 VERDICT_NEGATIVE = "negative_both_bounds"
 VERDICT_WAIT_FOR_LIVE = "wait_for_live"
 VERDICT_NOT_SCORED = "not_scored"
+VERDICT_TOO_FEW_WINDOWS = "too_few_windows"
+DEFAULT_MIN_WINDOWS = 12
 
 _MIN_WINDOWS_FOR_SHARPE = 3
 
@@ -81,26 +89,33 @@ class SearchArm:
     max_wait_h: int = 24
 
 
-def tape_coverage(root: Path, symbol: str) -> tuple[date, date]:
-    """First and last UTC day that has a tape file for `symbol`."""
+def tape_days(root: Path, symbol: str) -> list[date]:
+    """UTC days that have a tape file for `symbol`, ascending."""
     days = sorted(date.fromisoformat(path.name.removesuffix(".csv.gz"))
                   for path in (root / symbol).glob("*.csv.gz"))
     if not days:
         raise ValueError(f"no tape day files under {root / symbol}")
-    return days[0], days[-1]
+    return days
 
 
-def _day_start_mts(day: date) -> int:
-    return int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp() * 1000)
+def _utc_day(mts: int) -> date:
+    return datetime.fromtimestamp(mts / 1000, tz=UTC).date()
 
 
-def windows_within_tape(
-    windows: Sequence[WfoWindow], first_day: date, last_day: date
-) -> list[WfoWindow]:
-    """Windows whose test month lies inside the tape; the train part only observes candles."""
-    lo = _day_start_mts(first_day)
-    hi = _day_start_mts(last_day + timedelta(days=1))
-    return [w for w in windows if w.test_start_mts >= lo and w.test_end_mts < hi]
+def windows_within_tape(windows: Sequence[WfoWindow], days: Sequence[date]) -> list[WfoWindow]:
+    """Windows with a tape file for every day of the test month.
+
+    The train part only observes candles. A window missing one day would mark
+    the arm incomplete for the whole run, so it is dropped here instead.
+    """
+    present = set(days)
+    kept = []
+    for w in windows:
+        first, last = _utc_day(w.test_start_mts), _utc_day(w.test_end_mts)
+        span = (last - first).days + 1
+        if all(first + timedelta(days=i) in present for i in range(span)):
+            kept.append(w)
+    return kept
 
 
 def _replay_arms(
@@ -144,12 +159,14 @@ def evaluate_search_arms(
     if len(set(names)) != len(names):
         raise ValueError(f"arm names must be unique, got {names}")
     waits = sorted({arm.max_wait_h for arm in arms})
+    longest_wait = waits[-1]
     runs: dict[Bound, dict[str, ArmRun]] = {}
     for bound in BOUNDS:
         by_arm: dict[str, ArmRun] = {}
         for wait_h in waits:
             config = BacktestConfig(
                 fill_model="tape-replay", replay_bound=bound, replay_max_wait_h=wait_h,
+                replay_no_placement_tail_h=longest_wait,
                 replay_offer_amount=offer_amount, truncate_at_window_end=True,
             )
             specs = [arm.spec for arm in arms if arm.max_wait_h == wait_h]
@@ -165,6 +182,7 @@ class SearchReport:
     n_windows: int
     n_trials: int
     n_configs: int  # arms scored against the baseline in this run
+    min_windows: int
     by_bound: dict[Bound, PeriodStructureReport]
     deflated_sharpe: dict[Bound, dict[str, Decimal | None]]
     verdicts: dict[str, str]
@@ -208,6 +226,7 @@ class SearchRun:
     data_window: str
     n_trials: int  # cumulative registered trials, the deflated-Sharpe input
     notes: tuple[str, ...] = ()
+    min_windows: int = DEFAULT_MIN_WINDOWS  # fewer scored windows -> no verdict
 
 
 def build_search_report(
@@ -223,14 +242,18 @@ def build_search_report(
                             data_window=run.data_window, pairs=pairs, notes=run.notes)
         for bound in BOUNDS
     }
+    n_windows = min(report.n_windows for report in by_bound.values())
     verdicts = {
         name: _verdict([by_bound[bound].pair_mean_ci.get(_pair_label(name, baseline))
                         for bound in BOUNDS])
         for name in challengers
     }
+    if n_windows < run.min_windows:
+        verdicts = {name: verdict if verdict == VERDICT_NOT_SCORED else VERDICT_TOO_FEW_WINDOWS
+                    for name, verdict in verdicts.items()}
     return SearchReport(
-        symbol=run.symbol, baseline=baseline,
-        n_windows=min(report.n_windows for report in by_bound.values()),
+        symbol=run.symbol, baseline=baseline, n_windows=n_windows,
+        min_windows=run.min_windows,
         n_trials=run.n_trials, n_configs=len(challengers), by_bound=by_bound,
         deflated_sharpe={bound: _deflated_sharpes(by_bound[bound], run.n_trials)
                          for bound in BOUNDS},
@@ -266,6 +289,7 @@ def render_search_markdown(reports: Sequence[SearchReport], *, caveats: Sequence
             "",
             f"Trials: n_trials={r.n_trials} (cumulative, deflated Sharpe input); "
             f"{r.n_configs} configs scored against `{r.baseline}` in this run.",
+            f"A verdict needs at least {r.min_windows} scored windows.",
             "",
             *(f"- {n}" for n in first.notes),
             "",
@@ -317,7 +341,8 @@ def search_report_to_json(reports: Sequence[SearchReport]) -> dict[str, object]:
         "symbols": [
             {
                 "symbol": r.symbol, "baseline": r.baseline, "n_windows": r.n_windows,
-                "n_configs": r.n_configs, "verdicts": r.verdicts,
+                "n_configs": r.n_configs, "min_windows": r.min_windows,
+                "verdicts": r.verdicts,
                 "deflated_sharpe": {
                     bound: {arm: (str(v) if v is not None else None) for arm, v in values.items()}
                     for bound, values in r.deflated_sharpe.items()

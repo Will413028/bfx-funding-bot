@@ -51,7 +51,7 @@ from bfx_funding_bot.modules.backtest.decision_search import (
     evaluate_search_arms,
     render_search_markdown,
     search_report_to_json,
-    tape_coverage,
+    tape_days,
     windows_within_tape,
 )
 from bfx_funding_bot.modules.backtest.engine import resolve_market_series_key
@@ -64,7 +64,7 @@ from bfx_funding_bot.modules.backtest.period_structure import (
     to_hourly_grid,
 )
 from bfx_funding_bot.modules.backtest.replay import TapeDays
-from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
+from bfx_funding_bot.modules.backtest.wfo import WfoWindow, compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.strategy import CellConfig, Strategy
 from scripts.run_oos_profitability import DEFAULT_N_TRIALS
@@ -83,6 +83,7 @@ logger = logging.getLogger("run_decision_space_search")
 TOPIC_PERIOD_ARMS = "period-arms"
 TOPIC_GRID = "grid"
 BASELINE_WAIT_H = 24
+MIN_PERIOD_DAYS, MAX_PERIOD_DAYS = 2, 120  # Bitfinex funding offer tenors
 
 STANDING_CAVEATS = (
     "Replay not formally accepted: it was checked against 38 of our own fUST 2-day offers "
@@ -172,9 +173,19 @@ class SearchSetup:
     p30_staleness_hours: int
 
 
-def run_symbol(
+@dataclass(frozen=True)
+class PreparedSymbol:
+    symbol: str
+    series: dict[str, list[FundingCandle]]
+    windows: list[WfoWindow]
+    arms: list[SearchArm]
+    notes: tuple[str, ...]
+
+
+def prepare_symbol(
     symbol: str, raw_series: dict[str, list[FundingCandle]], setup: SearchSetup
-) -> SearchReport:
+) -> PreparedSymbol:
+    """Everything that can fail before a replay starts: series, tape, windows, arms."""
     series = dict(raw_series)
     if "p30" in series:
         series["p30"] = to_hourly_grid(series["p30"], max_gap_hours=setup.p30_staleness_hours)
@@ -182,32 +193,48 @@ def run_symbol(
     series, dropped = align_series(series)
     if "p2" not in series:
         raise SystemExit(f"{symbol}: p2 series is required")
-    first_day, last_day = tape_coverage(setup.tape_root, symbol)
+    try:
+        days = tape_days(setup.tape_root, symbol)
+    except ValueError as error:
+        raise SystemExit(f"{symbol}: {error}") from error
     all_windows = compute_wfo_windows(series["p2"])
-    windows = windows_within_tape(all_windows, first_day, last_day)
+    windows = windows_within_tape(all_windows, days)
     if not windows:
-        raise SystemExit(f"{symbol}: no WFO window inside the tape ({first_day} .. {last_day})")
+        raise SystemExit(f"{symbol}: no WFO test month fully inside the tape "
+                         f"({days[0]} .. {days[-1]})")
 
     if setup.grid is not None:
-        arms: list[SearchArm] = grid_arms(setup.grid, series)
+        try:
+            arms: list[SearchArm] = grid_arms(setup.grid, series)
+        except KeyError as error:
+            raise SystemExit(f"{symbol}: {error.args[0]}") from error
         notes: list[str] = []
     else:
         arms, notes = period_arms(symbol=symbol, series=series, cells=setup.cells,
                                   ap_cells=setup.ap_cells, ap=setup.ap)
-    notes.append(f"tape: {first_day} .. {last_day}; {len(windows)} of {len(all_windows)} WFO "
-                 "windows have their test month inside it")
+    missing = (days[-1] - days[0]).days + 1 - len(days)
+    notes.append(f"tape: {days[0]} .. {days[-1]}"
+                 + (f" with {missing} days missing" if missing else "")
+                 + f"; {len(windows)} of {len(all_windows)} WFO windows have every day of "
+                 "their test month on it")
     notes.append(f"offer amount {setup.offer_amount}; series: "
                  + ", ".join(f"{k}={len(v)} candles" for k, v in sorted(series.items()))
                  + (f"; dropped {dropped} slots not present in every series" if dropped else ""))
-    runs = evaluate_search_arms(series, windows, arms, TapeDays(setup.tape_root, symbol),
-                                offer_amount=setup.offer_amount)
-    p2 = series["p2"]
+    return PreparedSymbol(symbol, series, windows, arms, tuple(notes))
+
+
+def run_symbol(prepared: PreparedSymbol, setup: SearchSetup) -> SearchReport:
+    runs = evaluate_search_arms(
+        prepared.series, prepared.windows, prepared.arms,
+        TapeDays(setup.tape_root, prepared.symbol), offer_amount=setup.offer_amount)
+    p2 = prepared.series["p2"]
     first = datetime.fromtimestamp(p2[0].mts / 1000, UTC)
     last = datetime.fromtimestamp(p2[-1].mts / 1000, UTC)
-    logger.info("%s: %d windows, %d arms", symbol, len(windows), len(arms))
+    logger.info("%s: %d windows, %d arms", prepared.symbol, len(prepared.windows),
+                len(prepared.arms))
     return build_search_report(runs, baseline=ARM_ALWAYS_2D, run=SearchRun(
-        symbol=symbol, data_window=f"{first:%Y-%m-%d} .. {last:%Y-%m-%d}",
-        n_trials=setup.n_trials, notes=tuple(notes),
+        symbol=prepared.symbol, data_window=f"{first:%Y-%m-%d} .. {last:%Y-%m-%d}",
+        n_trials=setup.n_trials, notes=prepared.notes,
     ))
 
 
@@ -253,7 +280,9 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--periods", default=None, help="grid: lock tenors in days, e.g. 2,30")
     p.add_argument("--wait-hours", default=None, help="grid: hours an unfilled offer rests, e.g. 6,24")
     p.add_argument("--n-trials", type=int, default=None,
-                   help="cumulative registry trials including this run (required for grid)")
+                   help="cumulative registry trials including this run (required for grid). "
+                        "The runner only rejects values below what the code knows; trials "
+                        "from earlier grid runs live in the registry, so read the number there")
     p.add_argument("--cells", type=Path, default=DEFAULT_CELLS)
     p.add_argument("--ap-cells", type=Path, default=DEFAULT_AP_CELLS)
     p.add_argument("--ap-ema-span", type=int, default=24)
@@ -267,15 +296,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     if args.topic == TOPIC_GRID:
         if None in grid_flags or args.n_trials is None:
             p.error("--topic grid needs --offsets, --periods, --wait-hours and --n-trials")
-        args.grid = Grid(
-            offsets=tuple(Decimal(v) for v in _csv(args.offsets)),
-            periods=tuple(int(v) for v in _csv(args.periods)),
-            wait_hours=tuple(int(v) for v in _csv(args.wait_hours)),
-        )
-        floor = DEFAULT_N_TRIALS + args.grid.size()
-        if args.n_trials < floor:
-            p.error(f"--n-trials {args.n_trials} undercounts: {DEFAULT_N_TRIALS} already "
-                    f"registered + {args.grid.size()} grid configs = {floor}")
+        args.grid = _parse_grid(p, args)
     else:
         if any(flag is not None for flag in grid_flags):
             p.error("--offsets/--periods/--wait-hours only apply to --topic grid")
@@ -286,14 +307,42 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return args
 
 
+def _parse_grid(p: argparse.ArgumentParser, args: argparse.Namespace) -> Grid:
+    try:
+        grid = Grid(
+            offsets=tuple(Decimal(v) for v in _csv(args.offsets)),
+            periods=tuple(int(v) for v in _csv(args.periods)),
+            wait_hours=tuple(int(v) for v in _csv(args.wait_hours)),
+        )
+    except (ArithmeticError, ValueError):
+        p.error("--offsets takes decimals, --periods and --wait-hours take integers")
+    if not all(offset.is_finite() and offset > -1 for offset in grid.offsets):
+        p.error("--offsets must be finite and above -1")
+    if not all(MIN_PERIOD_DAYS <= period <= MAX_PERIOD_DAYS for period in grid.periods):
+        p.error(f"--periods must be within {MIN_PERIOD_DAYS}..{MAX_PERIOD_DAYS} days")
+    if not all(wait >= 1 for wait in grid.wait_hours):
+        p.error("--wait-hours must be at least 1")
+    if grid.size() == 0:
+        p.error("the grid has no point besides the baseline (offset 0, 2 days, 24h)")
+    floor = DEFAULT_N_TRIALS + grid.size()
+    if args.n_trials < floor:
+        p.error(f"--n-trials {args.n_trials} undercounts: at least {DEFAULT_N_TRIALS} "
+                f"registered in code + {grid.size()} grid configs = {floor} (a lower "
+                "bound: add the trials of earlier grid runs from the registry)")
+    return grid
+
+
 async def _amain(argv: Sequence[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = _parse_args(argv)
     symbols = _csv(args.symbols)
     setup = SearchSetup(
         tape_root=args.tape_root, grid=args.grid, n_trials=args.n_trials,
-        offer_amount=Decimal(args.offer_amount), cells=load_cells_only(args.cells),
-        ap_cells=load_cells_only(args.ap_cells) if args.ap_cells.exists() else [],
+        offer_amount=Decimal(args.offer_amount),
+        # Only the period-arms topic reads the deployed cell parameters.
+        cells=load_cells_only(args.cells) if args.grid is None else [],
+        ap_cells=(load_cells_only(args.ap_cells)
+                  if args.grid is None and args.ap_cells.exists() else []),
         ap=ApParams(ema_span=args.ap_ema_span, t1=Decimal(args.ap_t1), t2=Decimal(args.ap_t2),
                     p_mid=args.ap_p_mid, p_long=args.ap_p_long),
         p30_staleness_hours=args.p30_staleness_hours,
@@ -304,13 +353,16 @@ async def _amain(argv: Sequence[str]) -> int:
         start = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=UTC)
         raw_by_symbol = await _load_db_series(symbols, int(start.timestamp() * 1000))
 
-    reports: list[SearchReport] = []
+    # Prepare every symbol first: a missing tape or series must stop the run
+    # before the first replay, not after another symbol's results are computed.
+    prepared = []
     for symbol in symbols:
         raw = raw_by_symbol.get(symbol)
         if not raw:
             logger.warning("%s: no candles, skipping", symbol)
             continue
-        reports.append(run_symbol(symbol, raw, setup))
+        prepared.append(prepare_symbol(symbol, raw, setup))
+    reports = [run_symbol(item, setup) for item in prepared]
     if not reports:
         logger.error("no symbol produced a report")
         return 2

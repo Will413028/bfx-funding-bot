@@ -120,11 +120,11 @@
   - 需要人做的事：發版核准。
 
 - [ ] **6. 決策空間搜尋 runner**（被擋於：步驟 3；D8 起不再被步驟 5 擋住）——程式完成 2026-11-21，第一份報告待 VM 執行，見進度表
-  - 檔案：新增 `backend/src/bfx_funding_bot/modules/backtest/decision_search.py`、`backend/scripts/run_decision_space_search.py` 與兩者的測試；修改 `backend/src/bfx_funding_bot/modules/backtest/period_structure.py`（抽出 `symbol_to_json`，行為不變）、`backend/scripts/run_oos_profitability.py`（`DEFAULT_N_TRIALS`）、`backend/ARCHITECTURE.md`。不進每週工作。
-  - 範圍：`run_decision_space_search.py` 直接走 `fill_model="tape-replay"`，和舊的期望值記帳並存（舊路徑在步驟 5 才刪）。每個臂用保守與樂觀兩個邊界各 replay 一次，沿用 calendar WFO，對 `always_2d` 做逐月配對差；兩個邊界的平均差 CI 同號才下結論，否則寫 `wait_for_live`。只評測試月整個落在成交紀錄涵蓋範圍內的 window。兩個題目：`--topic period-arms` 是第一個預登記題目，重跑期限臂（`always_30d`、`mr_p2`、`mr_a30`、`adaptive_period`，取代 2026-09-22 linear 結果；`mr_a30_legacy` 與 `always_frr` 在 replay 下沒有意義，不跑）；`--topic grid` 在（掛價偏移 × 期限 × 沒成交時等多久再決策）上搜尋 `AlwaysMarketRate`，每次開跑前先在 registry 預登記宣告空間。報告的固定限制寫明 replay 尚未正式驗收（D7），結論不作為 promote 的依據。
+  - 檔案：新增 `backend/src/bfx_funding_bot/modules/backtest/decision_search.py`、`backend/scripts/run_decision_space_search.py` 與兩者的測試；修改 `backend/src/bfx_funding_bot/modules/backtest/period_structure.py`（抽出 `symbol_to_json`，行為不變）、`backtest/config.py` 與 `backtest/engine.py`（新增 `replay_no_placement_tail_h`，預設行為不變）、`backend/scripts/run_oos_profitability.py`（`DEFAULT_N_TRIALS`）、`backend/ARCHITECTURE.md`。不進每週工作。
+  - 範圍：`run_decision_space_search.py` 直接走 `fill_model="tape-replay"`，和舊的期望值記帳並存（舊路徑在步驟 5 才刪）。每個臂用保守與樂觀兩個邊界各 replay 一次，沿用 calendar WFO，對 `always_2d` 做逐月配對差；兩個邊界的平均差 CI 同號才下結論，否則寫 `wait_for_live`。只評測試月每一天都有成交紀錄日檔的 window；評到的 window 少於 12 個不下結論（`too_few_windows`）；等待時間不同的臂共用同一個停止掛單的時點，等得短的臂不會在月底多出可放貸的時數。兩個題目：`--topic period-arms` 是第一個預登記題目，重跑期限臂（`always_30d`、`mr_p2`、`mr_a30`、`adaptive_period`，取代 2026-09-22 linear 結果；`mr_a30_legacy` 與 `always_frr` 在 replay 下沒有意義，不跑）；`--topic grid` 在（掛價偏移 × 期限 × 沒成交時等多久再決策）上搜尋 `AlwaysMarketRate`，每次開跑前先在 registry 預登記宣告空間。報告的固定限制寫明 replay 尚未正式驗收（D7），結論不作為 promote 的依據。
   - 消費端：`rg -n "run_decision_space_search|decision_search|symbol_to_json|DEFAULT_N_TRIALS" backend docs deploy .claude`。
-  - 不能動：既有 WFO／DSR 計算；`run_backtest` 與 `replay.py`；每週工作。
-  - 驗收：單元測試（兩個邊界同號才下結論、同價成交時 `wait_for_live`、等待時間短的臂掛單次數多、window 限制在成交紀錄範圍內、缺成交紀錄標 `not_scored`、trials 計數寫入報告、grid 的 `--n-trials` 低於已登記數加格點數就拒絕）；mutation 在複本跑：只跑一個邊界、verdict 只看一個邊界、拿掉 window 限制、拿掉 trials 下限檢查、`QuoteOffset` 不套偏移，各自要讓測試失敗；`DEFAULT_N_TRIALS`（`run_oos_profitability.py:53`）從 38 加上本步預登記的 4 個臂＝42；在 VM 跑出第一份報告（`period-arms`，兩幣），放 repo 外的研究筆記。
+  - 不能動：既有 WFO／DSR 計算；`replay.py`；`run_backtest` 的既有行為（只加預設關閉的 `replay_no_placement_tail_h`）；每週工作。
+  - 驗收：單元測試（兩個邊界同號才下結論、同價成交時 `wait_for_live`、等待時間短的臂掛單次數多、window 限制在成交紀錄範圍內（中間缺一天只丟那個 window）、window 太少不下結論、等待時間短但沒用到的臂和基準收益相同、缺成交紀錄標 `not_scored`、grid 參數不合法或缺序列時在開跑前報錯、trials 計數寫入報告、grid 的 `--n-trials` 低於已登記數加格點數就拒絕）；mutation 在複本跑：只跑一個邊界、verdict 只看一個邊界、拿掉 window 限制、拿掉 trials 下限檢查、`QuoteOffset` 不套偏移，各自要讓測試失敗；`DEFAULT_N_TRIALS`（`run_oos_profitability.py:53`）從 38 加上本步預登記的 4 個臂＝42；在 VM 跑出第一份報告（`period-arms`，兩幣），放 repo 外的研究筆記。
   - 需要人做的事：無（VM 一次性容器唯讀執行，程式以唯讀掛載提供，不需要發版）。
 
 - [ ] **7. 每週工作接上 replay 驗證**（被擋於：步驟 4、5）

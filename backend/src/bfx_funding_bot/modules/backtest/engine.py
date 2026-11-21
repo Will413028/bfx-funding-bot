@@ -187,7 +187,8 @@ def run_backtest(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     lock starts when the offer finishes filling, and an offer never fully filled
     rests `replay_max_wait_h` before the strategy decides again. A decision whose
     full wait would pass the record window end is not placed, so the last
-    `replay_max_wait_h` hours of each window never trade. The offer is placed when the decision candle closes.
+    `replay_max_wait_h` hours of each window never trade
+    (`replay_no_placement_tail_h` widens that tail). The offer is placed when the decision candle closes.
     `idle_hours` counts the waits plus the unfilled share of each lock.
     `same_rate_queue_ahead` (optional) returns the same-rate queue ahead of an
     offer, from book snapshots where they exist; `queue_fill_rate` averages the
@@ -261,6 +262,7 @@ def run_backtest(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     queue_fill_sum = Decimal("0")
     queue_trades = 0
     max_wait_ms = config.replay_max_wait_h * 3_600_000
+    no_placement_tail_ms = (config.replay_no_placement_tail_h or config.replay_max_wait_h) * 3_600_000
     cooldown_until_idx = -1
     # Assumes 1h candles: gap_minutes / 60 gives candle count. Other timeframes (5m, 1D) miscount.
     gap_candles = math.ceil(config.gap_minutes / 60)
@@ -292,7 +294,9 @@ def run_backtest(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             # A decision whose full wait would run past the record window is not
             # placed: a shortened wait would read as a market non-fill and bias
             # fill_rate down. The tape is then only needed through effective_end.
-            if placed_mts + max_wait_ms > effective_end:
+            # `replay_no_placement_tail_h` widens that tail so arms with different
+            # waits stop placing at the same point.
+            if placed_mts + no_placement_tail_ms > effective_end:
                 continue
             window_ms = max_wait_ms
             offer = HypotheticalOffer(rate=decision.rate, period_days=decision.period_days,

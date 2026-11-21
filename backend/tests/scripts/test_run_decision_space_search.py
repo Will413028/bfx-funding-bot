@@ -11,8 +11,15 @@ import pytest
 
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.fixture_io import freeze_candles
-from scripts.run_decision_space_search import Grid, _amain, _parse_args
+from scripts.run_decision_space_search import (
+    Grid,
+    SearchSetup,
+    _amain,
+    _parse_args,
+    prepare_symbol,
+)
 from scripts.run_oos_profitability import DEFAULT_N_TRIALS
+from scripts.run_period_structure_backtest import ApParams
 from tests.modules.backtest.test_replay import write_day
 
 _HOUR = 3_600_000
@@ -66,6 +73,8 @@ def test_period_arms_topic_scores_both_bounds_inside_the_tape(
     # June has candles but no tape: only April and May are scored.
     assert symbol["n_windows"] == 2
     assert set(symbol["verdicts"]) == {"always_30d", "mr_p2", "mr_a30", "adaptive_period"}
+    # Two months are far below the 12 windows a verdict needs.
+    assert set(symbol["verdicts"].values()) == {"too_few_windows"}
     assert symbol["n_configs"] == 4
     for bound in ("conservative", "optimistic"):
         assert set(symbol["bounds"][bound]["arms"]) == {
@@ -75,6 +84,7 @@ def test_period_arms_topic_scores_both_bounds_inside_the_tape(
     assert "| always_30d |" in markdown
     assert "mr_a30_legacy" not in markdown.split("## fUST")[1].split("### Paired")[1]
     assert "2 of 3 WFO windows" in markdown
+    assert "at least 12 scored windows" in markdown
 
 
 def test_grid_topic_builds_one_arm_per_point(tmp_path: Path, inputs: tuple[Path, Path]) -> None:
@@ -89,8 +99,12 @@ def test_grid_topic_builds_one_arm_per_point(tmp_path: Path, inputs: tuple[Path,
     assert symbol["n_configs"] == 7
     assert "mkt_p30_off0.5_w6" in symbol["verdicts"]
     assert "mkt_p2_off0_w24" not in symbol["verdicts"]
+    means = {arm: Decimal(values["mean_monthly"])
+             for arm, values in symbol["bounds"]["conservative"]["arms"].items()}
     # Every trade prints above every quote, so the 50% higher 2-day quote earns more.
-    assert symbol["verdicts"]["mkt_p2_off0.5_w24"] == "positive_both_bounds"
+    assert means["mkt_p2_off0.5_w24"] > means["always_2d"]
+    # ...and a shorter wait that never binds earns the same as the baseline.
+    assert means["mkt_p2_off0_w6"] == means["always_2d"]
 
 
 def test_grid_size_excludes_the_baseline_point_and_duplicates() -> None:
@@ -111,6 +125,49 @@ def test_grid_requires_an_explicit_trials_number() -> None:
     with pytest.raises(SystemExit):
         _parse_args(["--topic", "grid", "--offsets", "0.1", "--periods", "2", "--wait-hours", "24",
                      "--tape-root", "/nonexistent", "--output", "/nonexistent/x.md"])
+
+
+@pytest.mark.parametrize("flags", [
+    ["--offsets", "-1,0.1", "--periods", "2", "--wait-hours", "24"],
+    ["--offsets", "abc", "--periods", "2", "--wait-hours", "24"],
+    ["--offsets", "0.1", "--periods", "1", "--wait-hours", "24"],
+    ["--offsets", "0.1", "--periods", "121", "--wait-hours", "24"],
+    ["--offsets", "0.1", "--periods", "2", "--wait-hours", "0"],
+    ["--offsets", "0", "--periods", "2", "--wait-hours", "24"],  # only the baseline
+])
+def test_grid_rejects_bad_values_before_loading_anything(flags: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        _parse_args(["--topic", "grid", *flags, "--n-trials", "999",
+                     "--tape-root", "/nonexistent", "--output", "/nonexistent/x.md"])
+
+
+def _setup(tape: Path, grid: Grid | None) -> SearchSetup:
+    return SearchSetup(tape_root=tape, grid=grid, n_trials=999, offer_amount=Decimal("1000"),
+                       cells=[], ap_cells=[],
+                       ap=ApParams(ema_span=24, t1=Decimal("0.5"), t2=Decimal("2.0"),
+                                   p_mid=7, p_long=14),
+                       p30_staleness_hours=12)
+
+
+def test_prepare_fails_clearly_without_a_tape_or_a_series(inputs: tuple[Path, Path]) -> None:
+    _fixtures, tape = inputs
+    raw = {"p2": _series("p2", "0.0001", 24 * 183)}
+    grid = Grid(offsets=(Decimal("0.1"),), periods=(7,), wait_hours=(24,))
+    with pytest.raises(SystemExit, match="no market series for period 7"):
+        prepare_symbol("fUST", raw, _setup(tape, grid))
+    with pytest.raises(SystemExit, match="no tape day files"):
+        prepare_symbol("fUST", raw, _setup(tape / "elsewhere", grid))
+
+
+def test_grid_topic_does_not_read_the_cells_files(tmp_path: Path, inputs: tuple[Path, Path]) -> None:
+    fixtures, tape = inputs
+    out = tmp_path / "grid.md"
+    rc = asyncio.run(_amain([
+        "--topic", "grid", "--offsets", "0.5", "--periods", "2", "--wait-hours", "24",
+        "--n-trials", "999", "--fixtures", str(fixtures), "--tape-root", str(tape),
+        "--symbols", "fUST", "--output", str(out), "--cells", str(tmp_path / "missing.yaml"),
+    ]))
+    assert rc == 0
 
 
 def test_registered_trials_include_the_replayed_period_arms() -> None:

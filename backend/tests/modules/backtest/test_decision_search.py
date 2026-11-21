@@ -12,6 +12,7 @@ from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.decision_search import (
     VERDICT_NOT_SCORED,
     VERDICT_POSITIVE,
+    VERDICT_TOO_FEW_WINDOWS,
     VERDICT_WAIT_FOR_LIVE,
     QuoteOffset,
     SearchArm,
@@ -20,7 +21,7 @@ from bfx_funding_bot.modules.backtest.decision_search import (
     evaluate_search_arms,
     render_search_markdown,
     search_report_to_json,
-    tape_coverage,
+    tape_days,
     windows_within_tape,
 )
 from bfx_funding_bot.modules.backtest.period_structure import ArmSpec
@@ -56,13 +57,14 @@ def _market(offset: str = "0") -> ArmSpec:
     return ArmSpec("always_2d" if offset == "0" else f"off_{offset}", "p2", make)
 
 
-def _run(tmp_path: Path, arms: list[SearchArm]):
+def _run(tmp_path: Path, arms: list[SearchArm], *, min_windows: int = 3):
     series = {"p2": _candles()}
     windows = compute_wfo_windows(series["p2"])
     runs = evaluate_search_arms(series, windows, arms, TapeDays(tmp_path, "fUST"),
                                 offer_amount=Decimal("1000"))
     return build_search_report(runs, baseline="always_2d", run=SearchRun(
-        symbol="fUST", data_window="2024-01-01 .. 2024-07-01", n_trials=42))
+        symbol="fUST", data_window="2024-01-01 .. 2024-07-01", n_trials=42,
+        min_windows=min_windows))
 
 
 def test_quote_offset_scales_the_rate_and_keeps_the_period() -> None:
@@ -137,20 +139,53 @@ def test_arm_without_tape_is_reported_not_scored(tmp_path: Path) -> None:
     assert any("tape_day_missing" in note for note in report.by_bound["conservative"].notes)
 
 
+def _span(first: date, last: date) -> list[date]:
+    return [first + timedelta(days=i) for i in range((last - first).days + 1)]
+
+
 def test_windows_are_limited_to_tape_coverage(tmp_path: Path) -> None:
     _write_tape(tmp_path, rate=0.0002, days=121)  # 2024-01-01 .. 2024-04-30
-    first, last = tape_coverage(tmp_path, "fUST")
-    assert (first, last) == (date(2024, 1, 1), date(2024, 4, 30))
+    days = tape_days(tmp_path, "fUST")
+    assert (days[0], days[-1], len(days)) == (date(2024, 1, 1), date(2024, 4, 30), 121)
     windows = compute_wfo_windows(_candles())
-    kept = windows_within_tape(windows, first, last)
+    kept = windows_within_tape(windows, days)
     assert [datetime.fromtimestamp(w.test_start_mts / 1000, UTC).month for w in kept] == [4]
     # A tape starting after the test month began cannot score that window either.
-    assert windows_within_tape(windows, date(2024, 4, 2), date(2024, 6, 30)) == windows[1:]
+    assert windows_within_tape(windows, _span(date(2024, 4, 2), date(2024, 6, 30))) == windows[1:]
 
 
-def test_tape_coverage_fails_without_files(tmp_path: Path) -> None:
+def test_a_day_missing_inside_the_tape_drops_only_its_window() -> None:
+    windows = compute_wfo_windows(_candles())
+    days = [d for d in _span(date(2024, 1, 1), date(2024, 6, 30)) if d != date(2024, 5, 15)]
+    assert windows_within_tape(windows, days) == [windows[0], windows[2]]
+
+
+def test_tape_days_fails_without_files(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="no tape day files"):
-        tape_coverage(tmp_path, "fUST")
+        tape_days(tmp_path, "fUST")
+
+
+def test_too_few_windows_gives_no_verdict(tmp_path: Path) -> None:
+    _write_tape(tmp_path, rate=0.0002)
+    arms = [SearchArm(_market()), SearchArm(_market("0.5"))]
+    assert _run(tmp_path, arms, min_windows=3).verdicts == {"off_0.5": VERDICT_POSITIVE}
+    report = _run(tmp_path, arms, min_windows=4)
+    assert report.verdicts == {"off_0.5": VERDICT_TOO_FEW_WINDOWS}
+    assert "at least 4 scored windows" in render_search_markdown([report], caveats=[])
+
+
+def test_a_shorter_wait_alone_earns_nothing_extra(tmp_path: Path) -> None:
+    # Every offer fills at once, so the wait never binds: a 6h arm must earn exactly
+    # what the 24h baseline earns. Without the shared cutoff it would re-lend in the
+    # last day of each month while the baseline sits out.
+    _write_tape(tmp_path, rate=0.0002)
+    quick = SearchArm(ArmSpec("w6", "p2", _market().make_strategy), max_wait_h=6)
+    runs = evaluate_search_arms({"p2": _candles()}, compute_wfo_windows(_candles()),
+                                [SearchArm(_market()), quick], TapeDays(tmp_path, "fUST"),
+                                offer_amount=Decimal("1000"))
+    for bound in ("conservative", "optimistic"):
+        assert ([o.net_monthly for o in runs[bound]["w6"].outcomes]
+                == [o.net_monthly for o in runs[bound]["always_2d"].outcomes])
 
 
 def test_baseline_must_be_among_the_arms(tmp_path: Path) -> None:
@@ -161,3 +196,9 @@ def test_baseline_must_be_among_the_arms(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="baseline"):
         build_search_report(runs, baseline="always_2d",
                             run=SearchRun(symbol="fUST", data_window="x", n_trials=42))
+
+
+def test_a_missing_pair_stays_not_scored_even_with_too_few_windows(tmp_path: Path) -> None:
+    _write_tape(tmp_path, rate=0.0002, days=100)
+    report = _run(tmp_path, [SearchArm(_market()), SearchArm(_market("0.5"))], min_windows=99)
+    assert report.verdicts == {"off_0.5": VERDICT_NOT_SCORED}
