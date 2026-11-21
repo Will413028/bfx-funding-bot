@@ -491,7 +491,6 @@ class DeploymentReconciler:
                     symbol=self._cell_symbol[cell_id],
                 )
                 cell_ctx = replace(ctx, capital_cell_id=cell_id)
-                guard = await self._safety.evaluate(decision, cell_ctx)
                 now = self._clock()
                 snapshot = self._book_provider.snapshot(symbol, now_ms=now)
                 decision_id = str(uuid5(
@@ -574,6 +573,15 @@ class DeploymentReconciler:
                         # Never reinterpret a failed optimizer as an implicit signal
                         # fallback.  Valid fill evidence remains visible in audit.
                         optimizer_block_reason = BlockReason.OPTIMIZER_UNAVAILABLE
+                # The guards judge the rate that will be sent, not the signal rate: the
+                # book can price an offer well below the signal, and the envelope's
+                # rate floor has to turn that into an ordinary skip here instead of a
+                # refusal inside the command gate after the decision was audited READY.
+                guard = await self._safety.evaluate(
+                    (decision.model_copy(update={"offer_rate": gate_price.rate})
+                     if isinstance(gate_price, PriceDecision) else decision),
+                    cell_ctx,
+                )
                 outcome = await self._execution_gate.prepare(
                     decision,
                     decision_id=decision_id,

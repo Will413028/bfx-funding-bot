@@ -827,6 +827,21 @@ async def test_optimizer_live_requires_explicit_fee_rate() -> None:
         )
 
 
+async def test_safety_guards_judge_the_rate_that_will_be_submitted() -> None:
+    """The envelope's rate floor must see the book price, not the hourly signal rate."""
+    rec, executor, safety = _build(
+        exposure=D("370"),
+        quotes=[_post_quote("fUST_p2")],
+        book_provider=_SnapshotProvider(_far_below_signal_snapshot()),
+    )
+
+    await rec.deploy()
+
+    assert len(executor.submitted) == 1
+    assert safety.calls[-1].offer_rate == D("0.00009999")
+    assert executor.ready_submissions[-1].decision.offer_rate == D("0.00009999")
+
+
 @pytest.mark.parametrize(
     "snapshot", [_raise_snapshot(), _far_below_signal_snapshot()],
     ids=["raise", "far_below_signal"],

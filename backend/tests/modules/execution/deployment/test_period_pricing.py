@@ -177,11 +177,11 @@ def test_offer_follows_a_book_at_less_than_half_the_hourly_signal() -> None:
     # 2026-11-21 16:51 UTC, fUST 2-day: the hourly signal was 0.00029645 while the
     # lowest ask stood at 0.0001334. Three offers went out at the signal rate, 2.2x
     # the market, and rested unfilled.
-    candidate = _decision(offer_rate=Decimal("0.00029645"))
+    candidate = _decision(offer_rate=Decimal("0.00029645"), offer_duration_days=2)
 
     result = _pricer().price(
         candidate=candidate,
-        snapshot=_snapshot(_level(rate=0.0001334, amount=5000, period=14)),
+        snapshot=_snapshot(_level(rate=0.0001334, amount=5000, period=2)),
     )
 
     assert isinstance(result, PriceDecision)
@@ -202,3 +202,24 @@ def test_exact_period_requires_ask_depth_after_bid_cannot_take() -> None:
 
     assert isinstance(result, BlockedExecution)
     assert result.reason is BlockReason.INSUFFICIENT_PERIOD_DEPTH
+
+
+def test_an_ask_that_cannot_be_undercut_by_a_positive_rate_is_not_followed() -> None:
+    candidate = _decision()
+
+    zero = _pricer().price(
+        candidate=candidate,
+        snapshot=_snapshot(_level(rate=0.0, amount=100, period=14),
+                           _level(rate=0.00000001, amount=100, period=14)),
+    )
+    assert isinstance(zero, BlockedExecution)
+    assert zero.reason is BlockReason.INSUFFICIENT_PERIOD_DEPTH
+
+    # A real ask behind the degenerate ones is the one to follow.
+    result = _pricer().price(
+        candidate=candidate,
+        snapshot=_snapshot(_level(rate=0.0, amount=100, period=14),
+                           _level(rate=0.00019, amount=100, period=14)),
+    )
+    assert isinstance(result, PriceDecision)
+    assert result.rate == Decimal("0.00018999")

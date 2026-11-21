@@ -22,6 +22,7 @@ from bfx_funding_bot.modules.strategy import DecisionPayload
 class PriceBranch(StrEnum):
     TAKER = "taker"
     UNDERCUT = "undercut"
+    # Historical name: the offer follows a book that is below the signal rate.
     RAISE = "raise"
 
 
@@ -85,8 +86,11 @@ class PeriodPricer:
                 },
             )
 
+        # An ask at or under one tick cannot be undercut by a positive rate: it is
+        # not a price to follow.
         eligible_asks = [
-            level for level in asks if _decimal(level.amount) >= amount
+            level for level in asks
+            if _decimal(level.amount) >= amount and _decimal(level.rate) > self.tick
         ]
         if not eligible_asks:
             return _blocked(candidate, BlockReason.INSUFFICIENT_PERIOD_DEPTH, "exact_period_ask")
