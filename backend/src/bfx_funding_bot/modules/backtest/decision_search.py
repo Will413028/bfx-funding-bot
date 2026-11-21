@@ -53,6 +53,12 @@ VERDICT_WAIT_FOR_LIVE = "wait_for_live"
 VERDICT_NOT_SCORED = "not_scored"
 VERDICT_TOO_FEW_WINDOWS = "too_few_windows"
 DEFAULT_MIN_WINDOWS = 12
+REFINANCE_REFERENCE_KEY = "p2"  # the 2-day market a borrower would refinance into
+SCENARIO_HELD = "held_to_maturity"
+
+
+def refinance_scenario(margin: Decimal) -> str:
+    return f"refinance_on_drop_{format(margin.normalize(), 'f')}"
 
 _MIN_WINDOWS_FOR_SHARPE = 3
 
@@ -118,6 +124,14 @@ def windows_within_tape(windows: Sequence[WfoWindow], days: Sequence[date]) -> l
     return kept
 
 
+@dataclass(frozen=True)
+class ReplayTerms:
+    """What every arm of a run shares: offer size and the repayment scenario."""
+
+    offer_amount: Decimal
+    refinance_margin: Decimal | None = None  # None = held to maturity
+
+
 def _replay_arms(
     series: Mapping[str, list[FundingCandle]],
     windows: Sequence[WfoWindow],
@@ -134,8 +148,12 @@ def _replay_arms(
             observed = [c for c in series[spec.observe_key]
                         if w.train_start_mts <= c.mts <= w.test_end_mts]
             try:
-                result = run_backtest(observed, spec.make_strategy(), config,
-                                      w.test_start_mts, w.test_end_mts, tape=tape)
+                result = run_backtest(
+                    observed, spec.make_strategy(), config, w.test_start_mts, w.test_end_mts,
+                    tape=tape,
+                    refinance_reference=(series[REFINANCE_REFERENCE_KEY]
+                                         if config.replay_refinance_margin is not None else None),
+                )
             except BacktestIncomplete as error:
                 runs[spec.name] = ArmRun(outcomes=[], incomplete_reason=error.reason)
                 continue
@@ -151,10 +169,14 @@ def evaluate_search_arms(
     windows: Sequence[WfoWindow],
     arms: Sequence[SearchArm],
     tape: TapeDays,
-    *,
-    offer_amount: Decimal,
+    terms: ReplayTerms,
 ) -> dict[Bound, dict[str, ArmRun]]:
-    """Replay every arm on every window under each bound; bound -> arm name -> run."""
+    """Replay every arm on every window under each bound; bound -> arm name -> run.
+
+    With `terms.refinance_margin` the borrower repays a lock the first hour the
+    2-day market (`series["p2"]`) closes that far below the locked rate; without
+    it every lock is held to maturity.
+    """
     names = [arm.spec.name for arm in arms]
     if len(set(names)) != len(names):
         raise ValueError(f"arm names must be unique, got {names}")
@@ -167,7 +189,8 @@ def evaluate_search_arms(
             config = BacktestConfig(
                 fill_model="tape-replay", replay_bound=bound, replay_max_wait_h=wait_h,
                 replay_no_placement_tail_h=longest_wait,
-                replay_offer_amount=offer_amount, truncate_at_window_end=True,
+                replay_refinance_margin=terms.refinance_margin,
+                replay_offer_amount=terms.offer_amount, truncate_at_window_end=True,
             )
             specs = [arm.spec for arm in arms if arm.max_wait_h == wait_h]
             by_arm.update(_replay_arms(series, windows, specs, config, tape))
@@ -182,6 +205,7 @@ class SearchReport:
     n_windows: int
     n_trials: int
     n_configs: int  # arms scored against the baseline in this run
+    scenario: str
     min_windows: int
     by_bound: dict[Bound, PeriodStructureReport]
     deflated_sharpe: dict[Bound, dict[str, Decimal | None]]
@@ -227,6 +251,7 @@ class SearchRun:
     n_trials: int  # cumulative registered trials, the deflated-Sharpe input
     notes: tuple[str, ...] = ()
     min_windows: int = DEFAULT_MIN_WINDOWS  # fewer scored windows -> no verdict
+    scenario: str = SCENARIO_HELD  # how long a filled lock lasts
 
 
 def build_search_report(
@@ -253,7 +278,7 @@ def build_search_report(
                     for name, verdict in verdicts.items()}
     return SearchReport(
         symbol=run.symbol, baseline=baseline, n_windows=n_windows,
-        min_windows=run.min_windows,
+        min_windows=run.min_windows, scenario=run.scenario,
         n_trials=run.n_trials, n_configs=len(challengers), by_bound=by_bound,
         deflated_sharpe={bound: _deflated_sharpes(by_bound[bound], run.n_trials)
                          for bound in BOUNDS},
@@ -285,7 +310,8 @@ def render_search_markdown(reports: Sequence[SearchReport], *, caveats: Sequence
         first = r.by_bound[BOUNDS[0]]
         lines += [
             "",
-            f"## {r.symbol} — {r.n_windows} monthly OOS windows ({first.data_window})",
+            f"## {r.symbol}, {r.scenario} — {r.n_windows} monthly OOS windows "
+            f"({first.data_window})",
             "",
             f"Trials: n_trials={r.n_trials} (cumulative, deflated Sharpe input); "
             f"{r.n_configs} configs scored against `{r.baseline}` in this run.",
@@ -340,7 +366,8 @@ def search_report_to_json(reports: Sequence[SearchReport]) -> dict[str, object]:
         "n_trials": reports[0].n_trials if reports else None,
         "symbols": [
             {
-                "symbol": r.symbol, "baseline": r.baseline, "n_windows": r.n_windows,
+                "symbol": r.symbol, "scenario": r.scenario, "baseline": r.baseline,
+                "n_windows": r.n_windows,
                 "n_configs": r.n_configs, "min_windows": r.min_windows,
                 "verdicts": r.verdicts,
                 "deflated_sharpe": {

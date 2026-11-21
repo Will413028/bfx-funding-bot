@@ -10,15 +10,18 @@ import pytest
 from bfx_funding_bot.apps.research import research_strategy
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.decision_search import (
+    VERDICT_NEGATIVE,
     VERDICT_NOT_SCORED,
     VERDICT_POSITIVE,
     VERDICT_TOO_FEW_WINDOWS,
     VERDICT_WAIT_FOR_LIVE,
     QuoteOffset,
+    ReplayTerms,
     SearchArm,
     SearchRun,
     build_search_report,
     evaluate_search_arms,
+    refinance_scenario,
     render_search_markdown,
     search_report_to_json,
     tape_days,
@@ -61,7 +64,7 @@ def _run(tmp_path: Path, arms: list[SearchArm], *, min_windows: int = 3):
     series = {"p2": _candles()}
     windows = compute_wfo_windows(series["p2"])
     runs = evaluate_search_arms(series, windows, arms, TapeDays(tmp_path, "fUST"),
-                                offer_amount=Decimal("1000"))
+                                ReplayTerms(Decimal("1000")))
     return build_search_report(runs, baseline="always_2d", run=SearchRun(
         symbol="fUST", data_window="2024-01-01 .. 2024-07-01", n_trials=42,
         min_windows=min_windows))
@@ -110,7 +113,7 @@ def test_shorter_wait_reprices_sooner(tmp_path: Path) -> None:
         {"p2": _candles()}, compute_wfo_windows(_candles()),
         [SearchArm(_market()), SearchArm(ArmSpec("w6", "p2", spec.make_strategy), max_wait_h=6),
          SearchArm(ArmSpec("w24", "p2", spec.make_strategy), max_wait_h=24)],
-        TapeDays(tmp_path, "fUST"), offer_amount=Decimal("1000"))
+        TapeDays(tmp_path, "fUST"), ReplayTerms(Decimal("1000")))
     w6 = runs["conservative"]["w6"].outcomes
     w24 = runs["conservative"]["w24"].outcomes
     assert all(a.n_trades > b.n_trades for a, b in zip(w6, w24, strict=True))
@@ -182,7 +185,7 @@ def test_a_shorter_wait_alone_earns_nothing_extra(tmp_path: Path) -> None:
     quick = SearchArm(ArmSpec("w6", "p2", _market().make_strategy), max_wait_h=6)
     runs = evaluate_search_arms({"p2": _candles()}, compute_wfo_windows(_candles()),
                                 [SearchArm(_market()), quick], TapeDays(tmp_path, "fUST"),
-                                offer_amount=Decimal("1000"))
+                                ReplayTerms(Decimal("1000")))
     for bound in ("conservative", "optimistic"):
         assert ([o.net_monthly for o in runs[bound]["w6"].outcomes]
                 == [o.net_monthly for o in runs[bound]["always_2d"].outcomes])
@@ -192,7 +195,7 @@ def test_baseline_must_be_among_the_arms(tmp_path: Path) -> None:
     _write_tape(tmp_path, rate=0.0002)
     runs = evaluate_search_arms({"p2": _candles()}, compute_wfo_windows(_candles()),
                                 [SearchArm(_market("0.5"))], TapeDays(tmp_path, "fUST"),
-                                offer_amount=Decimal("1000"))
+                                ReplayTerms(Decimal("1000")))
     with pytest.raises(ValueError, match="baseline"):
         build_search_report(runs, baseline="always_2d",
                             run=SearchRun(symbol="fUST", data_window="x", n_trials=42))
@@ -202,3 +205,32 @@ def test_a_missing_pair_stays_not_scored_even_with_too_few_windows(tmp_path: Pat
     _write_tape(tmp_path, rate=0.0002, days=100)
     report = _run(tmp_path, [SearchArm(_market()), SearchArm(_market("0.5"))], min_windows=99)
     assert report.verdicts == {"off_0.5": VERDICT_NOT_SCORED}
+
+
+def test_refinance_scenario_removes_a_long_lock_edge(tmp_path: Path) -> None:
+    # The long arm quotes twice the 2-day market for 30 days and always fills. Held to
+    # maturity it earns double; with repayment on a 20% drop the 2-day market is already
+    # 50% under its rate, so every lock is returned the next hour.
+    _write_tape(tmp_path, rate=0.0004)
+
+    def long_lock() -> QuoteOffset:
+        inner = research_strategy("AlwaysMarketRateStrategy").create(period_days=30)
+        return QuoteOffset(inner, Decimal("1"))
+
+    arms = [SearchArm(_market()), SearchArm(ArmSpec("long", "p2", long_lock))]
+    series = {"p2": _candles()}
+    windows = compute_wfo_windows(series["p2"])
+
+    def verdicts(margin: Decimal | None) -> dict[str, str]:
+        runs = evaluate_search_arms(series, windows, arms, TapeDays(tmp_path, "fUST"),
+                                    ReplayTerms(Decimal("1000"), margin))
+        return build_search_report(runs, baseline="always_2d", run=SearchRun(
+            symbol="fUST", data_window="x", n_trials=42, min_windows=3)).verdicts
+
+    assert verdicts(None) == {"long": VERDICT_POSITIVE}
+    assert verdicts(Decimal("0.2")) == {"long": VERDICT_NEGATIVE}
+
+
+def test_scenario_label_does_not_depend_on_how_the_margin_was_typed() -> None:
+    assert (refinance_scenario(Decimal("0.2")) == refinance_scenario(Decimal("0.20"))
+            == refinance_scenario(Decimal("2E-1")) == "refinance_on_drop_0.2")

@@ -16,6 +16,7 @@ from scripts.run_decision_space_search import (
     Grid,
     SearchSetup,
     _amain,
+    _load_fixture_series,
     _parse_args,
     prepare_symbol,
 )
@@ -71,6 +72,9 @@ def test_period_arms_topic_scores_both_bounds_inside_the_tape(
     assert rc == 0
     payload = json.loads(out.with_suffix(".json").read_text())
     assert payload["n_trials"] == DEFAULT_N_TRIALS
+    # Each symbol is reported twice: held to maturity, then repaid on a 20% drop.
+    assert [(entry["symbol"], entry["scenario"]) for entry in payload["symbols"]] == [
+        ("fUST", "held_to_maturity"), ("fUST", "refinance_on_drop_0.2")]
     symbol = payload["symbols"][0]
     # June has candles but no tape: only April and May are scored.
     assert symbol["n_windows"] == 2
@@ -152,8 +156,40 @@ def test_grid_accepts_a_quote_below_market() -> None:
     assert args.grid.offsets == (Decimal("-0.02"), Decimal("0.02"))
 
 
+@pytest.mark.parametrize("margin", ["20", "0", "1", "abc", "nan"])
+def test_a_bad_refinance_margin_stops_before_anything_is_loaded(margin: str) -> None:
+    args = [*_ENTRY, "--topic", "period-arms", "--tape-root", "/nonexistent",
+            "--output", "/nonexistent/x.md"]
+    assert _parse_args([*args, "--refinance-margin", "0.25"]).refinance_margin == "0.25"
+    with pytest.raises(SystemExit):
+        _parse_args([*args, "--refinance-margin", margin])
+
+
+def test_database_mode_writes_the_report_and_the_run_record(
+    tmp_path: Path, inputs: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Database mode parses --start into a date; that must not replace the run-start
+    # object the record is written from at the very end of the run.
+    fixtures, tape = inputs
+
+    async def from_fixtures(symbols: list[str], start_mts: int) -> dict[str, dict[str, list[FundingCandle]]]:
+        assert start_mts == 1_640_995_200_000  # 2022-01-01, the default --start
+        return {symbol: _load_fixture_series(fixtures, symbol) for symbol in symbols}
+
+    import scripts.run_decision_space_search as runner
+
+    monkeypatch.setattr(runner, "_load_db_series", from_fixtures)
+    out = tmp_path / "db.md"
+    rc = asyncio.run(_amain([*_ENTRY, "--topic", "period-arms", "--tape-root", str(tape),
+                             "--symbols", "fUST", "--output", str(out), *_CELLS]))
+    assert rc == 0
+    record = json.loads(out.with_suffix(".run.json").read_text())
+    assert record["registry_entry"] == "test-entry"
+
+
 def _setup(tape: Path, grid: Grid | None) -> SearchSetup:
     return SearchSetup(tape_root=tape, grid=grid, n_trials=999, offer_amount=Decimal("1000"),
+                       refinance_margin=Decimal("0.2"),
                        cells=[], ap_cells=[],
                        ap=ApParams(ema_span=24, t1=Decimal("0.5"), t2=Decimal("2.0"),
                                    p_mid=7, p_long=14),
