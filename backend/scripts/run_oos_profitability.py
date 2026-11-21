@@ -50,10 +50,12 @@ from bfx_funding_bot.modules.strategy import CellConfig, Strategy
 logger = logging.getLogger("run_oos_profitability")
 
 START_MTS = int(datetime(2022, 1, 1, tzinfo=UTC).timestamp() * 1000)
-DEFAULT_N_TRIALS = 38  # cumulative strategy-layer configs tried on this data: 9 (Phase 3b: 6 MR + 3 RP)
+DEFAULT_N_TRIALS = 42  # cumulative strategy-layer configs tried on this data: 9 (Phase 3b: 6 MR + 3 RP)
 # + 24 (AdaptivePeriod two-round sweep: 3 p_long x 8 band) + 1 (MR-FRR-floor)
 # + 4 (2026-09-22 period-structure arms: always_30d, adaptive_period period-aware, mr_a30
-# period-aware, mr_a30 legacy diagnostic). SoT = the private
+# period-aware, mr_a30 legacy diagnostic)
+# + 4 (2026-11-21 the same tenor arms re-scored on the trade-tape replay by
+# scripts.run_decision_space_search: always_30d, mr_p2, mr_a30, adaptive_period). SoT = the private
 # strategy registry「DSR trials」段 — verdict 落地時同步更新這裡。
 # Undercounting trials inflates DSR (Bailey & López de Prado); the deflated-Sharpe factor
 DEFAULT_CELLS_YAML = Path("configs/cells.live.yaml")

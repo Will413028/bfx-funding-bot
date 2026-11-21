@@ -39,6 +39,11 @@ class BacktestConfig:
     replay_bound: Literal["conservative", "optimistic"] = "conservative"
     replay_max_wait_h: int = 24
     replay_offer_amount: Decimal = Decimal("1000")
+    # tape-replay only: no offer is placed in the last this-many hours of the
+    # record window. None = `replay_max_wait_h` (an offer needs its full wait).
+    # Arms compared across different waits share the longest wait here, so a
+    # shorter wait does not buy extra tradable hours at the window end.
+    replay_no_placement_tail_h: int | None = None
 
     def __post_init__(self) -> None:
         if not (Decimal("0") <= self.fee_rate <= Decimal("1")):
@@ -53,6 +58,12 @@ class BacktestConfig:
             raise ValueError(f"replay_bound must be conservative|optimistic, got {self.replay_bound!r}")
         if self.replay_max_wait_h <= 0:
             raise ValueError(f"replay_max_wait_h must be positive, got {self.replay_max_wait_h}")
+        if (self.replay_no_placement_tail_h is not None
+                and self.replay_no_placement_tail_h < self.replay_max_wait_h):
+            raise ValueError(
+                "replay_no_placement_tail_h must be >= replay_max_wait_h, got "
+                f"{self.replay_no_placement_tail_h} < {self.replay_max_wait_h}"
+            )
         if self.replay_offer_amount <= 0:
             raise ValueError(
                 f"replay_offer_amount must be positive, got {self.replay_offer_amount}"

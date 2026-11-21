@@ -90,6 +90,26 @@ def test_tape_replay_requires_tape_and_tape_requires_replay(tape: TapeDays) -> N
                      tape=tape)
 
 
+def test_no_placement_tail_stops_offers_earlier_than_the_wait(tmp_path: Path) -> None:
+    for day in range(10, 14):
+        write_day(tmp_path, "fUST", date(2026, 1, day), [])
+    tape = TapeDays(tmp_path, "fUST")
+
+    def trades(tail_h: int | None) -> int:
+        config = BacktestConfig(fill_model="tape-replay", replay_max_wait_h=6,
+                                replay_no_placement_tail_h=tail_h)
+        return run_backtest(_candles(), _Fixed(), config, tape=tape).n_trades
+
+    # Nothing fills: a decision every 9 candles (1h to the close + 6h wait + gap).
+    # The window ends at +95h. Alone, the last offer must be placed by +89h (10 offers);
+    # with a 24h tail, by +71h (8 offers).
+    assert trades(None) == 10
+    assert trades(24) == 8
+    with pytest.raises(ValueError, match="replay_no_placement_tail_h"):
+        BacktestConfig(fill_model="tape-replay", replay_max_wait_h=6,
+                       replay_no_placement_tail_h=5)
+
+
 def test_partly_filled_offer_counts_unfilled_share_of_lock_as_idle(tmp_path: Path) -> None:
     write_day(tmp_path, "fUST", date(2026, 1, 10), [(1, T0 + 2 * H, -250.0, 0.0003, 2)])
     write_day(tmp_path, "fUST", date(2026, 1, 11), [])

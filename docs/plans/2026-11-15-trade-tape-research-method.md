@@ -111,6 +111,7 @@
   - 停止條件：(a) 達樣本下限卻不過門檻 → 不進步驟 5，回報並比對業界排隊模型。
 
 - [ ] **5. runner 改走 replay，刪除期望值記帳、linear 與 K 線 learner**（被擋於：D3、步驟 4 用新樣本通過（D7））
+  - 步驟 6 已先完成（D8）：`run_decision_space_search.py` 從一開始就走 replay，不在本步改寫範圍；它從 `run_period_structure_backtest.py` import `build_arms`、`ApParams` 與預設值，改寫那支 runner 時這些名字要留著或一起搬。
   - 檔案：刪除與修改依盤點「去向」欄（每列已寫刪除或改寫）；另修改 `deploy/vm/ops/docker-compose.weekly-report.yml`、`deploy/vm/systemd/bfx-weekly-report.service`、`backend/ARCHITECTURE.md`、相關 ADR。
   - 範圍：照盤點「去向」欄逐列落地：刪 `compute_fill_prob`、`fill_alpha`、`fill_model` Literal 與 empirical／linear 分支、`EMPIRICAL_SOURCES`、`FillRateLearner`／`learn_fill_rate.py`、三支一次性 runner；其餘 runner 改走 replay，刪 `--fill-model`；`period_structure.py:278`、`band_sweep.py:301` 改印 replay 與邊界；每週工作刪 linear 那步（:86）、:85 與 `run_oos_profitability`（:87）改 replay，:84 book learner 保留（live artifact）；報告檔名 `*-period-structure-book.json` 改為 `*-period-structure-replay.json`，`diff_research_report` 對新檔名從零開始比對（舊檔留在 `docs/research/` 當歷史）；`ARCHITECTURE.md` 回測與 fill model 段落改寫；提到被刪機制的 ADR（`rg -ln "linear-baseline|fill_alpha|learn_fill_rate" docs/adr`）各加一行指向 ADR 2026-11-20；`BacktestIncompleteReason` 刪 `fill_model_*` 與 `_raise_for_unavailable`；quality ratchet 測試數下降時用 `Ratchet-Reason:`／`Removed-Test:` trailer。DB 既有 candle artifact 保留不刪（artifact 不可變）。
   - 消費端：`rg -ln "linear-baseline|fill_alpha|learn_fill_rate|FillRateLearner|run_phase3b_wfo_matrix|run_phase4_3|explore_mr_param|compute_fill_prob|--fill-model|EMPIRICAL_SOURCES" --hidden -g '!.git' .`
@@ -118,12 +119,13 @@
   - 驗收：`rg -n "linear-baseline|fill_alpha|compute_fill_prob|FillRateLearner|--fill-model|EMPIRICAL_SOURCES" backend deploy .claude` 無結果；`docs/` 只剩 ADR 與 `docs/research/` 的歷史文字；mutation：把任一 runner 改回期望值記帳，測試要失敗；全套單元測試綠；每週工作 :85、:87 的 timeout 依步驟 3 量到的 replay 耗時×3 重設，compose 各步 timeout 總和＋300 ≤ `TimeoutStartSec`，unit 檔預算註解同步。
   - 需要人做的事：發版核准。
 
-- [ ] **6. 決策空間搜尋 runner**（被擋於：步驟 5）
-  - 檔案：新增 `backend/scripts/run_decision_space_search.py` 與其測試；修改 `backend/scripts/run_oos_profitability.py`（`DEFAULT_N_TRIALS`）。不進每週工作。
-  - 範圍：`backend/scripts/run_decision_space_search.py`：在 replay 上搜尋（掛價偏移 × 期限 × 改價規則），沿用 calendar WFO、DSR、預登記；第一個預登記題目是重跑期限四臂（取代 2026-09-22 linear 結果）。
-  - 消費端：無（新 runner）。
-  - 不能動：既有 WFO／DSR 計算。
-  - 驗收：單元測試（窗切分、trials 計數寫入報告）；`DEFAULT_N_TRIALS`（`run_oos_profitability.py:53`，現值 38）加上本步預登記的臂數；跑出第一份報告進 `docs/research/`。
+- [ ] **6. 決策空間搜尋 runner**（被擋於：步驟 3；D8 起不再被步驟 5 擋住）——程式完成 2026-11-21，第一份報告待 VM 執行，見進度表
+  - 檔案：新增 `backend/src/bfx_funding_bot/modules/backtest/decision_search.py`、`backend/scripts/run_decision_space_search.py` 與兩者的測試；修改 `backend/src/bfx_funding_bot/modules/backtest/period_structure.py`（抽出 `symbol_to_json`，行為不變）、`backtest/config.py` 與 `backtest/engine.py`（新增 `replay_no_placement_tail_h`，預設行為不變）、`backend/scripts/run_oos_profitability.py`（`DEFAULT_N_TRIALS`）、`backend/ARCHITECTURE.md`。不進每週工作。
+  - 範圍：`run_decision_space_search.py` 直接走 `fill_model="tape-replay"`，和舊的期望值記帳並存（舊路徑在步驟 5 才刪）。每個臂用保守與樂觀兩個邊界各 replay 一次，沿用 calendar WFO，對 `always_2d` 做逐月配對差；兩個邊界的平均差 CI 同號才下結論，否則寫 `wait_for_live`。只評測試月每一天都有成交紀錄日檔的 window；評到的 window 少於 12 個不下結論（`too_few_windows`）；等待時間不同的臂共用同一個停止掛單的時點，等得短的臂不會在月底多出可放貸的時數。兩個題目：`--topic period-arms` 是第一個預登記題目，重跑期限臂（`always_30d`、`mr_p2`、`mr_a30`、`adaptive_period`，取代 2026-09-22 linear 結果；`mr_a30_legacy` 與 `always_frr` 在 replay 下沒有意義，不跑）；`--topic grid` 在（掛價偏移 × 期限 × 沒成交時等多久再決策）上搜尋 `AlwaysMarketRate`，每次開跑前先在 registry 預登記宣告空間。報告的固定限制寫明 replay 尚未正式驗收（D7），結論不作為 promote 的依據。
+  - 消費端：`rg -n "run_decision_space_search|decision_search|symbol_to_json|DEFAULT_N_TRIALS" backend docs deploy .claude`。
+  - 不能動：既有 WFO／DSR 計算；`replay.py`；`run_backtest` 的既有行為（只加預設關閉的 `replay_no_placement_tail_h`）；每週工作。
+  - 驗收：單元測試（兩個邊界同號才下結論、同價成交時 `wait_for_live`、等待時間短的臂掛單次數多、window 限制在成交紀錄範圍內（中間缺一天只丟那個 window）、window 太少不下結論、等待時間短但沒用到的臂和基準收益相同、缺成交紀錄標 `not_scored`、grid 參數不合法或缺序列時在開跑前報錯、trials 計數寫入報告、grid 的 `--n-trials` 低於已登記數加格點數就拒絕）；mutation 在複本跑：只跑一個邊界、verdict 只看一個邊界、拿掉 window 限制、拿掉 trials 下限檢查、`QuoteOffset` 不套偏移，各自要讓測試失敗；`DEFAULT_N_TRIALS`（`run_oos_profitability.py:53`）從 38 加上本步預登記的 4 個臂＝42；在 VM 跑出第一份報告（`period-arms`，兩幣），放 repo 外的研究筆記。
+  - 需要人做的事：無（VM 一次性容器唯讀執行，程式以唯讀掛載提供，不需要發版）。
 
 - [ ] **7. 每週工作接上 replay 驗證**（被擋於：步驟 4、5）
   - 檔案：修改 `deploy/vm/ops/docker-compose.weekly-report.yml`、`deploy/vm/systemd/bfx-weekly-report.service`、`backend/tests/scripts/test_vm_weekly_report.py`。
@@ -155,7 +157,9 @@
 
 - **D7 第 2 輪 review 找到量法 blocking 之後怎麼辦**（狀態：已決 2026-11-20，Will：照建議）：同意第三輪修正，修完 5 項 blocking 與 1 項 should 後重跑同一批 38 張，標「第二次事後調整」，只當參考；模型改進照樣合進 `dev`。步驟 5 的放行條件改成：恢復放貸後，用新的自己成交（至少 30 張、量法在開跑前凍結於本分支的 `report_replay_validation.py`）重跑並通過同一組門檻。
 
-拍板順序：D1–D7 全部已拍。
+- **D8 步驟 6 要不要等步驟 5**（狀態：已決 2026-11-21，Will：提前）：步驟 6 需要的是 replay 引擎（步驟 3），不是「舊方法已刪除」；D7 的新樣本驗收只擋步驟 5（刪舊方法、每週工作改走 replay）。步驟 6 提前到步驟 5 之前，搜尋 runner 直接走 `tape-replay`、與舊路徑並存。代價：這段期間的搜尋結論建立在尚未正式驗收的 replay 上，registry 一律標「replay 未正式驗收」，不作為 promote 的依據；步驟 4 用新樣本驗收沒過時，這批結論跟著作廢重跑。
+
+拍板順序：D1–D8 全部已拍。
 
 ## 進度
 
@@ -169,6 +173,6 @@
 | 3 replay 引擎 | 完成 | 單元 5492 passed（`-n auto`）、`mypy src/`、ruff、quality ratchet；golden 測試；mutation 3 輪共 31 個，非等價的全殺（期限不相容、正號、同價進保守、部分成交改全額、拿掉缺日 Incomplete、t0 含當下、偷看當小時成交、等待截短當成沒成交、閒置未截在 window 內、float 容差、排序檢查、排隊量等；存活 1 個是等價 mutant：負號篩過後 `-x`＝`abs(x)`）；`/code-review` 兩輪＋契約審查一輪：findings 21（blocking 0），fixed 19、recorded 2（K 線缺小時時 cooldown 以根數計的既有假設；從 book 快照推排隊量移到步驟 4），rejected 0；全量 replay 耗時（VM 一次性容器，`spike/replay_bench.py`，每小時一張 2 天期掛單、等 24h、兩個邊界）：fUST 42,768 張 88.7 秒、fUSD 225.8 秒，合計約 314 秒／設定，RSS 峰值 489 MB；期限四臂約 1,256 秒，在每週 1,800 秒內，停止條件未觸發 | CI（含 integration）待 PR | 本 PR |
 | 4 replay 驗證 | 進行中（程式完成；同批 38 張事後調整後 92.1%＝35/38（venue 時鐘容差更正後），只當參考；正式驗收等新樣本，D7） | 預登記；第一次執行 FAIL（65.8%）；D6 重跑 81.6% 經第 2 輪 review 判為不可採信；D7 修正後重跑 89.5%（排隊誤差中位數 0 分），見 `step4-validation.md`；單元、`mypy src/`、ruff；mutation 第一輪 16、D6 20、D7 10 個，全殺；`/code-review` 第 1 輪 findings 8：修 3、記錄 1、D6 處理 4；第 2 輪 findings 8（blocking 5）：D7 修 7（5 blocking、should、nit `keep`）、nit 缺日檢查也修；第 3 輪 findings 7（blocking 4）：修 3、記錄 2、駁回 2，修完重跑仍 89.5%；單元 5534 passed（`-n auto`） | CI（PR 待開）；新樣本驗收（恢復放貸後） | 本分支 |
 | 5 刪期望值記帳與 linear | 未開始 | | | |
-| 6 決策空間搜尋 | 未開始 | | | |
+| 6 決策空間搜尋 | 程式完成待驗收 | 單元 5597 passed（`-n auto`，第 2 輪修正前的 HEAD；之後只改 runner 與其測試，受影響的 3 個測試檔重跑通過）、`mypy src/`、ruff、lint-imports、quality ratchet（沒有新增 suppression）；`/code-review` 一輪＋契約審查一輪：findings 12（blocking 0），fixed 11、rejected 1（nit：runner 測試讀 repo 的 cells 設定檔，和既有的 `test_run_period_structure_backtest.py` 同一種做法）；mutation 21 個全殺（其中 1 個第一次存活，原因是測試的參數被 argparse 先擋掉，修測試後殺掉）；第一份報告 2026-11-21 在 VM 一次性容器跑完（`period-arms`，兩幣各 50 個測試月 2022-05..2026-06，p30 K 線只到 2026-07-19；約 14 分鐘）：4 個臂對 `always_2d` 在兩個邊界都是正的，但鎖倉算持有到期、沒有提前還款情境（ADR 2026-09-27 D3），長期限的結果偏樂觀，報告原文與判讀放 repo 外的研究筆記 | CI（含 integration） | 本 PR |
 | 7 每週驗證 | 未開始 | | | |
 | 8 收尾 | 未開始 | | | |
