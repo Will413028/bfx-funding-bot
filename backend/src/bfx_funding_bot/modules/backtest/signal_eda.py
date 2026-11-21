@@ -230,7 +230,7 @@ class BootstrapIC:
     n: int
 
 
-def block_bootstrap_ic(
+def block_bootstrap_ic(  # noqa: PLR0913
     signal: pd.Series,
     target: pd.Series,
     *,
@@ -338,7 +338,7 @@ def annualize_daily_spread_pp(spread_daily: float) -> float:
     return spread_daily * 365.0 * 100.0
 
 
-def decide_signal(
+def decide_signal(  # noqa: C901, PLR0911
     signal: str,
     obs: list[CellRegimeIC],
     *,

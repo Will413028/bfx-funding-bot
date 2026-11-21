@@ -46,7 +46,7 @@ class UncertaintyResolutionWorker(OperatorRequestWorker[UncertaintyResolutionReq
     model = UncertaintyResolutionRequestRow
     name = "uncertainty_resolution"
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         session_factory: async_sessionmaker[AsyncSession],

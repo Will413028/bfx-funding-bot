@@ -115,7 +115,7 @@ def write_outputs(
             ruamel.dump(doc, fh)
 
 
-def check_main_against_fixture(
+def check_main_against_fixture(  # noqa: PLR0913
     fixtures_dir: Path,
     main: Path,
     main_cells: tuple[CellConfig, ...],

@@ -81,7 +81,7 @@ async def read_warmup_history(
     )
 
 
-async def warmup_cell(
+async def warmup_cell(  # noqa: PLR0913
     *,
     cell: CellConfig,
     registry: StrategyRegistry,
@@ -160,7 +160,7 @@ async def _get_last_mts(session: AsyncSession, cell: CellConfig) -> int | None:
     return int(row) if row is not None else None
 
 
-async def rehydrate_boot_boundary(
+async def rehydrate_boot_boundary(  # noqa: PLR0913
     *,
     cells: Sequence[CellConfig],
     now_mts: int,

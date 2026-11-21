@@ -116,7 +116,7 @@ def _distinct_unmapped_realms(bind: sa.Connection, table_name: str) -> set[str]:
     return {str(row[0]) for row in rows if row[0] is not None}
 
 
-def _format_preflight_errors(
+def _format_preflight_errors(  # noqa: PLR0913
     *,
     null_rows: dict[str, int],
     unmapped_realms: Iterable[str],

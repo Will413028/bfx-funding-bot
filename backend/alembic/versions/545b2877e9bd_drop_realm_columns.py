@@ -580,7 +580,7 @@ def _assert_end_state(before: dict[str, tuple[int, str]]) -> None:
         raise RuntimeError(f"refuse: archive content changed in {', '.join(changed)}")
 
 
-def upgrade() -> None:
+def upgrade() -> None:  # noqa: C901
     _refuse_other_realms()
     _refuse_other_realms_in_the_read_archive()
     before = _archive_digests()

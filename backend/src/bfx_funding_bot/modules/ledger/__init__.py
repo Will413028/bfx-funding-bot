@@ -710,7 +710,7 @@ class LedgerObservations(Protocol):
     async def observation_window(
         self, session: AsyncSession, scope: Scope
     ) -> ObservationWindow: ...
-    async def accept(
+    async def accept(  # noqa: PLR0913, PLR0917
         self,
         session: AsyncSession,
         scope: Scope,
@@ -1177,7 +1177,7 @@ class PolicyStore(PolicyReader, Protocol):
     caller. The caller owns the transaction.
     """
 
-    async def apply_policy(
+    async def apply_policy(  # noqa: PLR0913
         self, session: AsyncSession, *, symbol: str, policy: CapitalPolicy,
         expected_revision: int, source: dict[str, Any],
         operator_request_id: UUID | None = None,
@@ -1245,7 +1245,7 @@ class CommandJournal(Protocol):
     starts only after the caller has committed.
     """
 
-    async def authorize(
+    async def authorize(  # noqa: PLR0913
         self, session: AsyncSession, scope: Scope, attempt: CommandAttempt,
         basis_token: str, *, now_ms: int, locked_guard: LockedCommandGuard,
     ) -> Authorized | CommandRefused: ...

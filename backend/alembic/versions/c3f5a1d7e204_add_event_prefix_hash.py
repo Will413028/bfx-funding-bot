@@ -98,7 +98,7 @@ def _json(value: Any) -> str:
                       default=str)
 
 
-def _event_id(row: Any) -> UUID:
+def _event_id(row: Any) -> UUID:  # noqa: C901
     payload = row.payload
     if not isinstance(payload, dict):
         raise TypeError("stored event payload must be an object")

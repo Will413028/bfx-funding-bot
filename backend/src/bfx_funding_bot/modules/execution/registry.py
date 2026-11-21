@@ -35,7 +35,7 @@ def build_executor(
     http: httpx.AsyncClient | None = None,
     auth_gate: AuthRequestGate | None = None,
 ) -> ExecutorSpec:
-    if "BFX_EXECUTOR" in os.environ:
+    if "BFX_EXECUTOR" in os.environ:  # noqa: TID251
         raise ExecutorConfigError("BFX_EXECUTOR is removed: the venue follows BFX_PHASE")
     if http is None:
         raise ExecutorConfigError("build_executor() requires an http client")

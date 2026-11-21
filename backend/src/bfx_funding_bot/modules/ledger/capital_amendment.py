@@ -80,7 +80,7 @@ def _amended(policy: CapitalPolicy, changes: PolicyChanges) -> CapitalPolicy:
         raise PolicyRefused(f"invalid_policy: {exc}") from exc
 
 
-async def amend_capital_policy(
+async def amend_capital_policy(  # noqa: PLR0913
     session: AsyncSession, *, store: PolicyStore, scope_lock: ScopeLock,
     symbol: str, changes: PolicyChanges, apply_digest: str | None, realm: str | None,
     origin: Mapping[str, str] | None = None, operator_request_id: UUID | None = None,

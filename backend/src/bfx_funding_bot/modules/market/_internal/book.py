@@ -60,7 +60,7 @@ class FundingBookStore(FundingBookProvider):
         # be withheld explicitly rather than left to age out.
         self._venue_maintenance = False
 
-    def set_venue_maintenance(self, active: bool) -> None:
+    def set_venue_maintenance(self, active: bool) -> None:  # noqa: FBT001
         # Invalidate on both edges: nothing seen during maintenance, including a
         # snapshot delivered by a resubscribe, may outlive it.
         if active != self._venue_maintenance:
@@ -228,7 +228,7 @@ class FundingBookStore(FundingBookProvider):
             return None
         return snapshot
 
-    def unavailable_reason(self, symbol: str, *, now_ms: int) -> BookUnavailable | None:
+    def unavailable_reason(self, symbol: str, *, now_ms: int) -> BookUnavailable | None:  # noqa: PLR0911
         """Name what is withholding this book, or None when it is priceable."""
         if self._venue_maintenance:
             return BookUnavailable.VENUE_MAINTENANCE
@@ -319,7 +319,7 @@ class _FundingBookWS(Protocol):
 class FundingBookService(FundingBookProvider):
     """Own the WS/REST lifecycle while exposing only the canonical store."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         store: FundingBookStore,

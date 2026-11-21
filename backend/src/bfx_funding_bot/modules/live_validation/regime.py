@@ -12,7 +12,7 @@ from bfx_funding_bot.modules.live_validation.tables import ConfigRegimeRow
 log = logging.getLogger(__name__)
 
 
-async def record_config_regime(
+async def record_config_regime(  # noqa: PLR0913
     session_factory: async_sessionmaker[AsyncSession],
     *,
     account_id: str,

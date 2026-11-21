@@ -290,7 +290,7 @@ def attribute_idle(*, window_bounds: list[tuple[int, int]]) -> list[WindowOutcom
     ]
 
 class VerdictState(Enum):
-    PASS = "PASS"
+    PASS = "PASS"  # noqa: S105
     INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
     FAIL = "FAIL"
     UNRELIABLE = "UNRELIABLE"
@@ -314,7 +314,7 @@ class G3Verdict:
 
 
 
-def decide_verdict(
+def decide_verdict(  # noqa: PLR0913
     *,
     headline_bot_vs_idle: Decimal,
     n_windows: int,

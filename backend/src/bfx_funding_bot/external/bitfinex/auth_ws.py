@@ -216,7 +216,7 @@ def _public_seq(msg: list[Any]) -> int | None:
     return None
 
 
-def _parse_channel_msg(msg: list[Any]) -> BfxWSEvent | None:
+def _parse_channel_msg(msg: list[Any]) -> BfxWSEvent | None:  # noqa: PLR0911
     if len(msg) < 2:
         return None
     raw_seq = _public_seq(msg)
@@ -378,7 +378,7 @@ class BitfinexAuthWSClient:
     Heartbeat watchdog: hb_timeout_s default 30s (advisory; reconnect on disconnect).
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         creds: Credentials,

@@ -143,7 +143,7 @@ def _apply_friction(
     return gross_rate, fill_prob
 
 
-def run_backtest(
+def run_backtest(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     candles: list[FundingCandle],
     strategy: Strategy,
     config: BacktestConfig,

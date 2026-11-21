@@ -104,7 +104,7 @@ def function_of(case_id: str) -> str:
 def read_report(report: Path) -> Run:
     """The failed and errored cases; a missing or unreadable report is a crashed run."""
     try:
-        root = ElementTree.parse(report).getroot()
+        root = ElementTree.parse(report).getroot()  # noqa: S314
     except (OSError, ElementTree.ParseError):
         return Run(frozenset(), frozenset(), crashed=True)
     failed: set[str] = set()
@@ -252,7 +252,7 @@ def _report(results: Mapping[str, Run | str | None], total: int) -> dict[str, An
     return report
 
 
-def in_functions(mutant: str, functions: Sequence[str], exact: bool = False) -> bool:
+def in_functions(mutant: str, functions: Sequence[str], exact: bool = False) -> bool:  # noqa: FBT001, FBT002
     """Whether ``mutant`` belongs to one of ``functions``, each a function or method name as
     written in the source (``_pull_if_stopped``, or ``DeploymentReconciler._pull_if_stopped``
     when two classes of the file have a method of that name). A bare name also means the
@@ -264,7 +264,7 @@ def in_functions(mutant: str, functions: Sequence[str], exact: bool = False) -> 
     return owner.removeprefix("x_") in functions
 
 
-def select_mutants(names: Sequence[str], functions: Sequence[str], derived: bool = False) -> list[str]:
+def select_mutants(names: Sequence[str], functions: Sequence[str], derived: bool = False) -> list[str]:  # noqa: FBT001, FBT002
     """The mutants of ``functions``, or all of ``names`` when no function is named. Every name
     must select at least one mutant: a misspelt name beside a good one would otherwise be
     dropped without a word, and the report would cover less than was asked.
@@ -300,7 +300,7 @@ def survivor_diffs(copy: Path, sources: Sequence[Path], module_name: str | None,
     return diffs
 
 
-def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Path,
+def build(sources: Sequence[Path], selection: Sequence[str], jobs: int, out: Path,  # noqa: PLR0913, PLR0917
           module_name: str | None = None, functions: Sequence[str] = (), *,
           derived_functions: bool = False, show_survivors: bool = False,
           max_mutants: int | None = None, max_diffs: int | None = None) -> dict[str, Any]:

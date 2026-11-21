@@ -166,7 +166,7 @@ def _bump(state: VenueState, kind: str, value: int) -> None:
     state.counters[kind] = max(state.counters.get(kind, 0), value)
 
 
-def apply(state: VenueState, event: VenueEvent) -> None:
+def apply(state: VenueState, event: VenueEvent) -> None:  # noqa: C901, PLR0912
     """Fold one event into `state` in place."""
     state.high_water_ms = max(state.high_water_ms, event.mts)
     match event:

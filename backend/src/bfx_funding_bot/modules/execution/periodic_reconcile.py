@@ -63,7 +63,7 @@ class _Deployment(Protocol):
 class PeriodicReconcile:
     SUB_TASK = "periodic_reconcile"
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         recovery: ObservationSink,
@@ -169,7 +169,7 @@ class PeriodicReconcile:
     async def _tick(self) -> None:
         try:
             cycle = await self._recovery.run(self._scope)
-        except Exception as exc:  # never let the backbone crash the daemon...
+        except Exception as exc:  # never let the backbone crash the daemon...  # noqa: BLE001
             # ...except on a key the venue itself refused: retrying it changes nothing, and
             # only a boot (credential recovery mode) runs without trading while it is
             # replaced. A bare 401/403 (a WAF page can send one) counts as a failure below.

@@ -70,7 +70,7 @@ async def check_row_counts(
 
 # ---------- 2. round-trip exact-match ----------
 
-async def check_round_trip(
+async def check_round_trip(  # noqa: C901, PLR0912, PLR0915
     session: AsyncSession,
     client: BitfinexREST,
     specs: list[SeriesSpec],

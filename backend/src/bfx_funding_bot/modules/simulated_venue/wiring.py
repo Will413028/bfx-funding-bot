@@ -15,7 +15,7 @@ from bfx_funding_bot.modules.simulated_venue.contracts import (
 )
 
 
-async def build_simulated_venue(
+async def build_simulated_venue(  # noqa: PLR0913
     *, account: SimAccount, config: SimulatedVenueConfig, store: VenueEventStore,
     feed: MarketFeed, clock_ms: Callable[[], int],
     faults: FaultPlan | None = None,

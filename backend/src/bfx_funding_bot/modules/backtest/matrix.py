@@ -181,7 +181,7 @@ def evaluate_strategy_qualification(
     )
 
 
-def run_cell_wfo(
+def run_cell_wfo(  # noqa: PLR0913, PLR0917
     strategy_spec: ResearchStrategySpec,
     candles: list[FundingCandle],
     eda_cell: dict[str, Any],

@@ -271,7 +271,7 @@ def build_symbol_report(
     )
 
 
-def render_markdown(reports: list[SymbolReport], *, data_window: str) -> str:
+def render_markdown(reports: list[SymbolReport], *, data_window: str) -> str:  # noqa: PLR0915
     lines: list[str] = []
     lines.append("# MR-with-FRR-floor backtest — SKIP FRR parking probe\n")
     lines.append(f"**Run date**: {datetime.now(UTC).isoformat()}")
@@ -442,7 +442,7 @@ def _report_to_json(reports: list[SymbolReport]) -> dict:  # type: ignore[type-a
 # ------------------------------------------------------------------- main
 
 
-async def _run_symbol(
+async def _run_symbol(  # noqa: PLR0913
     session: AsyncSession,
     *,
     symbol: str,

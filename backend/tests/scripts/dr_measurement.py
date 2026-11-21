@@ -18,7 +18,7 @@ from typing import Any
 _KIND = {"rpo_seconds": "backup", "rto_seconds": "restore"}
 
 
-def read_measurement(path: Path, *, key: str) -> int:
+def read_measurement(path: Path, *, key: str) -> int:  # noqa: C901
     try:
         with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:
             metadata = os.fstat(handle.fileno())

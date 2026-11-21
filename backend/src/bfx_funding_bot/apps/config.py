@@ -55,7 +55,7 @@ def require_simulated_realm(phase: str, realm: str) -> None:
         )
 
 
-def load_config(
+def load_config(  # noqa: C901, PLR0912, PLR0915
     *, cells_yaml_path: Path | None = None, simulated_venue: bool = False,
 ) -> MarketfeedConfig:
     """Read the bot's configuration from the environment.
@@ -145,7 +145,7 @@ def load_config(
     if optimizer_fee_rate_raw:
         try:
             optimizer_fee_rate = Decimal(optimizer_fee_rate_raw)
-        except Exception:
+        except Exception:  # noqa: BLE001
             raise ValueError(
                 f"BFX_OPTIMIZER_FEE_RATE must be a decimal, got {optimizer_fee_rate_raw!r}",
             ) from None

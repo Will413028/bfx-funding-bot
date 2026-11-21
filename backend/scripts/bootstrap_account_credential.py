@@ -73,7 +73,7 @@ def main() -> int:
         result = asyncio.run(_run(parser.parse_args()))
         print(json.dumps(result, sort_keys=True))
         return 0
-    except (Exception, KeyboardInterrupt) as exc:
+    except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001
         print(json.dumps(_failure(exc), sort_keys=True), file=sys.stderr)
         return 2
 

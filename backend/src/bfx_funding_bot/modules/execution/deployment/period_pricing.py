@@ -30,7 +30,7 @@ class PeriodPricer:
     max_down_pct: Decimal
     tick: Decimal
 
-    def price(
+    def price(  # noqa: PLR0911
         self,
         *,
         candidate: DecisionPayload,

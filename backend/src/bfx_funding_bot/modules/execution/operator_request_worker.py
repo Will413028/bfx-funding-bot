@@ -91,7 +91,7 @@ class OperatorRequestWorker[RowT, PreparedT](ABC):
     #: Log and error prefix.
     name: ClassVar[str]
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         session_factory: async_sessionmaker[AsyncSession],

@@ -151,7 +151,7 @@ def build_funding_status_router(*,
             # halves disagree: logged (field paths only, never the values) and refused.
             logger.error("funding_status_shape_mismatch: %s", field_paths(exc))
             raise HTTPException(status_code=503, detail="funding_status_unavailable") from None
-        except Exception:
+        except Exception:  # noqa: BLE001
             # Never return internal URLs, credentials, a different account, or cached amounts.
             raise HTTPException(status_code=503, detail="funding_status_unavailable") from None
 

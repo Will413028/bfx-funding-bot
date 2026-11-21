@@ -279,7 +279,7 @@ class _Alert:
 class AlertSink:
     """Bounded, de-duplicated, rate-limited alert queue with one delivery task."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         transport: Transport | None,
         *,
@@ -419,7 +419,7 @@ class AlertSink:
                 await asyncio.wait_for(self.transport.send(alert.text), timeout=self.send_timeout_s)
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 self._count(alert.event, "failed")
                 log.warning("alert_delivery_failed event=%s error=%s", alert.event,
                             type(exc).__name__ if not isinstance(exc, AlertDeliveryError) else exc)
@@ -471,7 +471,7 @@ def default_level(event: str, fields: Mapping[str, object]) -> str:
     return ALERT_EVENTS.get(event, WARNING)
 
 
-def title(event: str, fields: Mapping[str, object]) -> str:
+def title(event: str, fields: Mapping[str, object]) -> str:  # noqa: C901, PLR0911, PLR0912
     if event == TRADING_STATE_CHANGED:
         return f"trading state {fields.get('previous', '?')} -> {fields.get('state', '?')}"
     if event == PROTECTION_TRIPPED:
@@ -521,7 +521,7 @@ def title(event: str, fields: Mapping[str, object]) -> str:
     return event
 
 
-def render(event: str, *, level: str, fields: Mapping[str, object], context: str = "",
+def render(event: str, *, level: str, fields: Mapping[str, object], context: str = "",  # noqa: PLR0913
            notes: list[str] | None = None, host: str | None = None) -> str:
     scope = "/".join(part for part in (context, host or socket.gethostname()) if part)
     lines = [f"[bfx][{level.upper()}][{scope}] {title(event, fields)}"]

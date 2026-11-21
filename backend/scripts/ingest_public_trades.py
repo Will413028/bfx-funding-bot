@@ -222,7 +222,7 @@ class CollectResult:
     failed: list[str]  # "<symbol> <day>: <error>", each retried on the next run
 
 
-def collect(root: Path, symbols: Sequence[str], *, start: date, fetch: Fetch,
+def collect(root: Path, symbols: Sequence[str], *, start: date, fetch: Fetch,  # noqa: PLR0913
             sleep: Callable[[float], None] | None = None, pace_s: float = DEFAULT_PACE_S,
             now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
             log: Callable[[str], None] = print) -> CollectResult:
@@ -258,7 +258,7 @@ def collect(root: Path, symbols: Sequence[str], *, start: date, fetch: Fetch,
     return result
 
 
-def verify(root: Path, symbols: Sequence[str], days: Sequence[date], *, fetch: Fetch,
+def verify(root: Path, symbols: Sequence[str], days: Sequence[date], *, fetch: Fetch,  # noqa: PLR0913
            sleep: Callable[[float], None] | None = None, pace_s: float = DEFAULT_PACE_S,
            log: Callable[[str], None] = print) -> int:
     """Re-fetch existing days; raise TapeMismatchError on any difference. Never writes."""
@@ -345,9 +345,9 @@ def http_fetch(symbol: str, start_ms: int, end_ms: int) -> list[list[float | int
     url = (f"{BASE_URL.format(symbol=symbol)}?start={start_ms}&end={end_ms}"
            f"&limit={PAGE_LIMIT}&sort=1")
     for attempt in range(TRANSIENT_RETRIES + 1):
-        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})  # noqa: S310
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
                 payload = json.load(response)
             if isinstance(payload, list) and payload[:1] == ["error"] \
                     and "ratelimit" in str(payload).lower():

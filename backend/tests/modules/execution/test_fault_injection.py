@@ -412,7 +412,7 @@ async def run_fault_scenario(scenario: FaultScenario) -> FaultEvidence:
             outcome_kind = result.outcome_kind.value
             # Full raw response is never valid evidence, even if a venue echoes a secret.
             assert _API_SECRET not in str(getattr(result.outcome, "raw_response", None))
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001
             assert scenario.process_crash_at in {"after_intent", "during_send"}
             # The gate turns it into process fencing; the crash is the cause.
             assert isinstance(exc, SubmitOutcomeLostError)

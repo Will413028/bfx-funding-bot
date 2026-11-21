@@ -81,7 +81,7 @@ async def count_auto_resumes(session: AsyncSession, *, account_id: UUID, now_ms:
     return count or 0
 
 
-async def check_transition(
+async def check_transition(  # noqa: PLR0913
     *, current: TradingState | None, state: str, cause: str, actor: str, reason: str,
     now_ms: int = 0, auto_resumes_in_window: int = 0,
 ) -> None:
@@ -95,7 +95,7 @@ async def check_transition(
                         now_ms=now_ms, auto_resumes_in_window=auto_resumes_in_window)
 
 
-async def append_transition(
+async def append_transition(  # noqa: PLR0913
     session: AsyncSession, *, account_id: UUID, state: str, cause: str,
     actor: str, reason: str, now_ms: int, operator_request_id: UUID | None = None,
 ) -> TransitionResult:

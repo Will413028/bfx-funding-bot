@@ -91,7 +91,7 @@ def wallet_row(currency: str, wallet: Wallet, available: Decimal) -> list[Any]:
     return ["funding", currency, wallet.balance, 0, available, None, None]
 
 
-def notification(
+def notification(  # noqa: PLR0913, PLR0917
     mts: int, type_: str, data: Any, status: str, text: str, code: int | None = None,
 ) -> list[Any]:
     return [mts, type_, None, None, data, code, status, text]

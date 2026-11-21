@@ -220,7 +220,7 @@ class PeriodStructureReport:
     windows: dict[str, list[tuple[int, Decimal]]] = field(default_factory=dict)
 
 
-def build_report(
+def build_report(  # noqa: PLR0913
     *,
     symbol: str,
     runs: Mapping[str, ArmRun],

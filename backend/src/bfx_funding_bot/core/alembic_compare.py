@@ -38,7 +38,7 @@ def _normalize_json_default(rendered_default: str) -> str:
     return _JSON_TYPE_CAST.sub("", rendered_default).strip()
 
 
-def compare_server_default(
+def compare_server_default(  # noqa: PLR0913, PLR0917
     context: Any,
     inspected_column: Column[Any],
     metadata_column: Column[Any],
@@ -69,7 +69,7 @@ def include_object(
     object_: Any,
     name: str,
     type_: str,
-    reflected: bool,
+    reflected: bool,  # noqa: FBT001
     compare_to: Any,
 ) -> bool:
     """Keep the autogenerate surface aligned with migration ownership."""

@@ -78,7 +78,7 @@ class _AgingUnknown:
 class LedgerCycleEffects:
     """An ``ObservationSink`` that runs the cycle's effects after ``inner`` returned."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         inner: ObservationSink,
         *,
@@ -133,7 +133,7 @@ class LedgerCycleEffects:
     async def _guard(self, effect: str, work: Awaitable[None]) -> None:
         try:
             await work
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log.critical("ledger_cycle_effect_failed effect=%s err=%r", effect, exc)
 
     async def _protect(self, cycle: CycleResult) -> None:
@@ -147,7 +147,7 @@ class LedgerCycleEffects:
                     CapitalScope(self._scope.exchange_account_id, symbol, cell),
                     now_ms=self._clock(), session=None,
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 # Not judged: no trip, and no evidence that the condition cleared either.
                 unreadable = True
                 log.critical("ledger_cycle_capital_read_failed symbol=%s cell=%s err=%r",
@@ -169,7 +169,7 @@ class LedgerCycleEffects:
         # not a cell is configured for it (the capital read above only sees configured cells).
         try:
             unexplained = await self._unexplained_symbols(cycle)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             unreadable = True
             log.critical("ledger_cycle_conservation_read_failed err=%r", exc)
         else:

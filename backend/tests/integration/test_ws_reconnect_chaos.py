@@ -69,7 +69,7 @@ async def test_ws_disconnect_callback_fires_on_close(unused_tcp_port: int) -> No
                     received.append(c)
                     if len(received) >= 3:
                         return
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
 
         await asyncio.wait_for(collect(), timeout=3.0)

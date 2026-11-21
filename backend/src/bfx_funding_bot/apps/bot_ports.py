@@ -114,7 +114,7 @@ class CapitalPorts:
     venue_hint_sink: VenueHintSink
 
 
-def build_capital_ports(
+def build_capital_ports(  # noqa: PLR0913
     *,
     session_factory: async_sessionmaker[AsyncSession],
     scope: Scope,

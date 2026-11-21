@@ -38,7 +38,7 @@ class _TradingReadiness(Protocol):
 
 
 class _ExecutionEvents(Protocol):
-    async def emit_execution_event(
+    async def emit_execution_event(  # noqa: PLR0913
         self,
         event_name: str,
         *,
@@ -116,7 +116,7 @@ class ExecutionGate:
     def policy(self) -> ExecutionPolicy:
         return self._policy
 
-    async def prepare(
+    async def prepare(  # noqa: PLR0913
         self,
         candidate: DecisionPayload,
         *,
@@ -161,7 +161,7 @@ class ExecutionGate:
                 except Exception:
                     log.debug("execution_gate_duration_metric_failed", exc_info=True)
 
-    async def _prepare(
+    async def _prepare(  # noqa: PLR0913
         self,
         candidate: DecisionPayload,
         *,
@@ -270,7 +270,7 @@ class ExecutionGate:
         await self._observe_result(ready, reconcile_id, audit_context)
         return ready
 
-    async def _observe_result(
+    async def _observe_result(  # noqa: C901
         self,
         result: ReadyToSubmit | BlockedExecution | NoRecommendation,
         reconcile_id: str,
@@ -337,7 +337,7 @@ class ExecutionGate:
         except Exception:
             log.debug("execution_event_emit_failed", exc_info=True)
 
-    def _blocked_dependency(
+    def _blocked_dependency(  # noqa: C901, PLR0911, PLR0913
         self,
         *,
         candidate: DecisionPayload,
@@ -438,7 +438,7 @@ class ExecutionGate:
                 )
         return None
 
-    async def _audit_blocked(
+    async def _audit_blocked(  # noqa: PLR0913
         self,
         *,
         blocked: BlockedExecution,
@@ -483,7 +483,7 @@ class ExecutionGate:
         self._readiness.set_blocked(blocked.reason, blocked.failed_dependency)
         return blocked
 
-    def _audit_decision(
+    def _audit_decision(  # noqa: PLR0913
         self,
         *,
         candidate: DecisionPayload,
@@ -627,7 +627,7 @@ def _copy_evidence(value: object) -> object:
     raise TypeError(f"unsupported audit evidence value: {type(value).__name__}")
 
 
-def _normalize_fill_evidence(
+def _normalize_fill_evidence(  # noqa: PLR0911, PLR0913
     fill_evidence: object | None,
     *,
     candidate_symbol: str,
