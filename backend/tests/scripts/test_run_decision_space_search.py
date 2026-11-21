@@ -224,7 +224,8 @@ def test_a_run_leaves_a_record_of_its_config_inputs_and_outputs(
     assert record["code_version"]
     assert record["params"]["grid"] == {"offsets": ["0.5"], "periods": [2], "wait_hours": [24]}
     by_name = {item["name"]: item for item in record["inputs"]}
-    assert set(by_name) == {"tape:fUST", "candles:fUST:p2", "candles:fUST:p30", "candles:fUST:a30"}
+    # A 2-day grid reads p2 only: the loaded p30 and a30 series are not inputs of this run.
+    assert set(by_name) == {"tape:fUST", "candles:fUST:p2"}
     assert by_name["tape:fUST"]["items"] == 152
     assert (by_name["tape:fUST"]["first"], by_name["tape:fUST"]["last"]) == (
         "fUST/2024-01-01.csv.gz", "fUST/2024-05-31.csv.gz")
@@ -259,3 +260,33 @@ def test_a_run_without_a_registry_entry_is_refused() -> None:
     with pytest.raises(SystemExit):
         _parse_args(["--topic", "period-arms", "--tape-root", "/nonexistent",
                      "--output", "/nonexistent/x.md"])
+
+
+def test_grid_order_and_repeats_do_not_change_the_config_hash(
+    tmp_path: Path, inputs: tuple[Path, Path]
+) -> None:
+    one = _grid_run(inputs, tmp_path / "a.md", "0.5,0.6")
+    other = _grid_run(inputs, tmp_path / "b.md", "0.6,0.5,0.50")
+    assert one["config_sha256"] == other["config_sha256"]
+
+
+def test_a_record_that_cannot_be_built_stops_the_run_before_any_report(
+    tmp_path: Path, inputs: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.run_decision_space_search as runner
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("fingerprint failed")
+
+    monkeypatch.setattr(runner, "_input_fingerprints", refuse)
+    out = tmp_path / "grid.md"
+    with pytest.raises(ValueError, match="fingerprint failed"):
+        _grid_run(inputs, out, "0.5")
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("extra", [["--registry-entry", " padded "], ["--output", "/nonexistent/x.json"]])
+def test_a_bad_registry_entry_or_output_is_refused_at_parse_time(extra: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        _parse_args(["--registry-entry", "ok", "--topic", "period-arms", "--tape-root",
+                     "/nonexistent", "--output", "/nonexistent/x.md", *extra])

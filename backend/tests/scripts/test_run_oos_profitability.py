@@ -164,3 +164,20 @@ def test_an_ad_hoc_run_names_its_registry_entry_and_is_another_config(monkeypatc
     assert ad_hoc["registry_entry"] == "MeanReversion"
     assert ad_hoc["config_sha256"] != weekly["config_sha256"]
     assert more_trials["config_sha256"] == weekly["config_sha256"]
+
+
+def test_a_cells_file_without_cells_fails_before_writing_anything(monkeypatch, tmp_path):
+    import asyncio
+
+    class _Engine:
+        async def dispose(self) -> None:
+            return None
+
+    monkeypatch.setattr(mod, "Settings", lambda: None)
+    monkeypatch.setattr(mod, "make_engine", lambda _settings: _Engine())
+    monkeypatch.setattr(mod, "make_session_factory", lambda _engine: None)
+    monkeypatch.setattr(mod, "load_cells_only", lambda _path: [])
+    out = tmp_path / "oos.md"
+    monkeypatch.setattr(sys, "argv", ["run_oos_profitability", "--output", str(out)])
+    assert asyncio.run(mod._amain()) == 2
+    assert list(tmp_path.iterdir()) == []

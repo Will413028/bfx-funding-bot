@@ -78,7 +78,12 @@ from bfx_funding_bot.modules.backtest.run_record import (
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow, compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.strategy import CellConfig, Strategy
-from scripts.research_run_record import RunStart, write_research_run_record
+from scripts.research_run_record import (
+    RunStart,
+    registry_entry_arg,
+    report_path_arg,
+    write_research_run_record,
+)
 from scripts.run_oos_profitability import DEFAULT_N_TRIALS
 from scripts.run_period_structure_backtest import (
     DEFAULT_AP_CELLS,
@@ -311,9 +316,9 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     p.add_argument("--topic", required=True, choices=[TOPIC_PERIOD_ARMS, TOPIC_GRID])
     p.add_argument("--tape-root", type=Path, required=True)
-    p.add_argument("--output", required=True,
+    p.add_argument("--output", required=True, type=report_path_arg,
                    help="markdown path (.json and .run.json siblings auto)")
-    p.add_argument("--registry-entry", required=True,
+    p.add_argument("--registry-entry", required=True, type=registry_entry_arg,
                    help="name of the pre-registered registry row this run tests; "
                         "written to the run record (.run.json)")
     p.add_argument("--symbols", default=DEFAULT_SYMBOLS)
@@ -385,13 +390,15 @@ def _config_params(args: argparse.Namespace, symbols: Sequence[str]) -> dict[str
     the input fingerprints cover.
     """
     params: dict[str, object] = {
-        "topic": args.topic, "symbols": list(symbols),
+        "topic": args.topic, "symbols": sorted(set(symbols)),
         "offer_amount": Decimal(args.offer_amount),
         "p30_staleness_hours": args.p30_staleness_hours,
     }
     if args.grid is not None:
-        params["grid"] = {"offsets": list(args.grid.offsets), "periods": list(args.grid.periods),
-                          "wait_hours": list(args.grid.wait_hours)}
+        # Order and repeats on the command line do not change which arms are built.
+        params["grid"] = {"offsets": sorted(set(args.grid.offsets)),
+                          "periods": sorted(set(args.grid.periods)),
+                          "wait_hours": sorted(set(args.grid.wait_hours))}
         return params
     params["ap"] = {"ema_span": args.ap_ema_span, "t1": Decimal(args.ap_t1),
                     "t2": Decimal(args.ap_t2), "p_mid": args.ap_p_mid, "p_long": args.ap_p_long}
@@ -405,13 +412,14 @@ def _input_fingerprints(
     raw_by_symbol: Mapping[str, Mapping[str, Sequence[FundingCandle]]],
     tape_root: Path,
 ) -> list[InputFingerprint]:
-    """The tape folder and the candle series as loaded, for every symbol that was run."""
+    """The tape folder and the raw candle series the arms read, for every symbol to run."""
     inputs = []
     for item in prepared:
         inputs.append(fingerprint_files(f"tape:{item.symbol}", tape_root, f"{item.symbol}/*.csv.gz"))
         inputs.extend(
             fingerprint_candles(f"candles:{item.symbol}:{key}", candles)
             for key, candles in sorted(raw_by_symbol[item.symbol].items())
+            if key in item.series
         )
     return inputs
 
@@ -419,7 +427,7 @@ def _input_fingerprints(
 async def _amain(argv: Sequence[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = _parse_args(argv)
-    started_at = datetime.now(UTC)
+    start = RunStart.begin(args.registry_entry, "run_decision_space_search")
     symbols = _csv(args.symbols)
     setup = SearchSetup(
         tape_root=args.tape_root, grid=args.grid, n_trials=args.n_trials,
@@ -447,18 +455,20 @@ async def _amain(argv: Sequence[str]) -> int:
             logger.warning("%s: no candles, skipping", symbol)
             continue
         prepared.append(prepare_symbol(symbol, raw, setup))
-    reports = [run_symbol(item, setup) for item in prepared]
-    if not reports:
+    if not prepared:
         logger.error("no symbol produced a report")
         return 2
-    out = Path(args.output).expanduser()
+    # Before the first replay, like the checks above: the record describes the data the
+    # run starts from, and a record that cannot be built stops the run here.
+    params = _config_params(args, [item.symbol for item in prepared])
+    inputs = _input_fingerprints(prepared, raw_by_symbol, args.tape_root)
+    reports = [run_symbol(item, setup) for item in prepared]
+    out: Path = args.output
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render_search_markdown(reports, caveats=STANDING_CAVEATS))
     out.with_suffix(".json").write_text(json.dumps(search_report_to_json(reports), indent=2))
     record = write_research_run_record(
-        out, RunStart(args.registry_entry, "run_decision_space_search", started_at),
-        params=_config_params(args, [item.symbol for item in prepared]),
-        inputs=_input_fingerprints(prepared, raw_by_symbol, args.tape_root),
+        out, start, params=params, inputs=inputs,
     )
     logger.info("wrote %s, %s and %s", out, out.with_suffix(".json"), record)
     return 0

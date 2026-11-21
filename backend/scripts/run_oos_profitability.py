@@ -9,7 +9,7 @@ deflated-Sharpe check.
 
 Usage:
     cd backend
-    uv run python scripts/run_oos_profitability.py \\
+    uv run python -m scripts.run_oos_profitability \\
         --output /tmp/2026-05-28-canary-oos-profitability.md
 """
 from __future__ import annotations
@@ -51,7 +51,12 @@ from bfx_funding_bot.modules.performance.oos_profitability import (
     summarize_oos,
 )
 from bfx_funding_bot.modules.strategy import CellConfig, Strategy
-from scripts.research_run_record import RunStart, write_research_run_record
+from scripts.research_run_record import (
+    RunStart,
+    registry_entry_arg,
+    report_path_arg,
+    write_research_run_record,
+)
 
 logger = logging.getLogger("run_oos_profitability")
 
@@ -265,18 +270,19 @@ async def _run_cell(
 async def _amain() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--output", required=True, help="markdown output path (.json sibling auto)")
+    parser.add_argument("--output", required=True, type=report_path_arg,
+                        help="markdown output path (.json and .run.json siblings auto)")
     parser.add_argument("--n-trials", type=int, default=DEFAULT_N_TRIALS)
     parser.add_argument(
         "--cells", default=str(DEFAULT_CELLS_YAML),
         help="cells yaml path (default: configs/cells.live.yaml)",
     )
     parser.add_argument(
-        "--registry-entry", default=DEFAULT_REGISTRY_ENTRY,
+        "--registry-entry", default=DEFAULT_REGISTRY_ENTRY, type=registry_entry_arg,
         help="registry row this run tests; written to the run record (.run.json)",
     )
     args = parser.parse_args()
-    started_at = datetime.now(UTC)
+    start = RunStart.begin(args.registry_entry, "run_oos_profitability")
 
     # Bootstrap mirrors scripts/run_phase3b_wfo_matrix.py exactly:
     #   Settings() → make_engine(settings) → make_session_factory(engine)
@@ -301,12 +307,14 @@ async def _amain() -> int:
 
     data_window = f"{datetime.fromtimestamp(START_MTS / 1000, UTC):%Y-%m} .. now"
     md = render_markdown(reports, data_window=data_window)
-    out = Path(args.output)
+    if not reports:
+        logger.error("no cell in %s: nothing to report", args.cells)
+        return 2
+    out: Path = args.output
     out.write_text(md)
     out.with_suffix(".json").write_text(json.dumps(_report_to_json(reports), indent=2))
     record = write_research_run_record(
-        out, RunStart(args.registry_entry, "run_oos_profitability", started_at),
-        inputs=inputs,
+        out, start, inputs=inputs,
         # --n-trials is left out: it grows with the registry, not with what was tested.
         params={"cells_sha256": file_sha256(Path(args.cells)), "start_mts": START_MTS},
     )
