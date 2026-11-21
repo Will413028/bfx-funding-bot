@@ -83,5 +83,10 @@ async def test_an_unreachable_venue_leaves_the_gap_to_locf(factory: Any) -> None
 
 
 async def test_a_venue_that_never_answers_does_not_stall_the_tick(factory: Any) -> None:
-    mts = await asyncio.wait_for(_read(factory, _Rest(hang=True), timeout_s=0.05), timeout=5)
+    # The timeout must only expire inside the hung REST call: one that expires during the
+    # DB commit before it invalidates the in-memory sqlite connection (a busy machine
+    # turned 0.05 s into "no such table").
+    rest = _Rest(hang=True)
+    mts = await asyncio.wait_for(_read(factory, rest, timeout_s=1.0), timeout=10)
+    assert rest.calls == 1
     assert mts == [BOUNDARY - 3 * HOUR, BOUNDARY - 2 * HOUR]
