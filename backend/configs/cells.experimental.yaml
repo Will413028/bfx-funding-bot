@@ -2,7 +2,7 @@
 #
 # NOT deployed. NOT covered by derive_cells --check (that gate is MeanReversion-
 # specific; see cell_pipeline.check_against_fixture). Used by:
-#   uv run python scripts/run_oos_profitability.py \
+#   uv run python -m scripts.run_oos_profitability \
 #     --cells configs/cells.experimental.yaml --n-trials 4 --output ...
 # to compare adaptive-period vs AlwaysMarketRate (period alpha) and vs the
 # MeanReversion canary reports (bot-vs-idle), over the same OOS windows.
