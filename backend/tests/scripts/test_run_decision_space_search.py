@@ -128,7 +128,8 @@ def test_grid_requires_an_explicit_trials_number() -> None:
 
 
 @pytest.mark.parametrize("flags", [
-    ["--offsets", "-1,0.1", "--periods", "2", "--wait-hours", "24"],
+    # `=` form: argparse reads a separate "-1,0.1" as an option, not a value.
+    ["--offsets=-1,0.1", "--periods", "2", "--wait-hours", "24"],
     ["--offsets", "abc", "--periods", "2", "--wait-hours", "24"],
     ["--offsets", "0.1", "--periods", "1", "--wait-hours", "24"],
     ["--offsets", "0.1", "--periods", "121", "--wait-hours", "24"],
@@ -140,6 +141,13 @@ def test_grid_rejects_bad_values_before_loading_anything(flags: list[str]) -> No
     with pytest.raises(SystemExit):
         _parse_args(["--topic", "grid", *flags, "--n-trials", "999",
                      "--tape-root", "/nonexistent", "--output", "/nonexistent/x.md"])
+
+
+def test_grid_accepts_a_quote_below_market() -> None:
+    args = _parse_args(["--topic", "grid", "--offsets=-0.02,0.02", "--periods", "2",
+                        "--wait-hours", "24", "--n-trials", "999",
+                        "--tape-root", "/nonexistent", "--output", "/nonexistent/x.md"])
+    assert args.grid.offsets == (Decimal("-0.02"), Decimal("0.02"))
 
 
 def _setup(tape: Path, grid: Grid | None) -> SearchSetup:

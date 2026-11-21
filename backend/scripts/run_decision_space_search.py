@@ -298,7 +298,8 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--fixtures", type=Path, default=None, help="frozen candle dir (offline mode)")
     p.add_argument("--start", default=DEFAULT_START.strftime("%Y-%m-%d"), help="DB mode start (UTC)")
     p.add_argument("--offer-amount", default="1000")
-    p.add_argument("--offsets", default=None, help="grid: quote offsets over market, e.g. 0,0.02,0.05")
+    p.add_argument("--offsets", default=None, help="grid: quote offsets over market, e.g. 0,0.02,0.05; write a list that starts "
+                        "with a negative value as --offsets=-0.02,0.02")
     p.add_argument("--periods", default=None, help="grid: lock tenors in days, e.g. 2,30")
     p.add_argument("--wait-hours", default=None, help="grid: hours an unfilled offer rests, e.g. 6,24")
     p.add_argument("--n-trials", type=int, default=None,
