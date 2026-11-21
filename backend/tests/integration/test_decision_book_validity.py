@@ -155,7 +155,7 @@ async def test_expired_decision_is_durable_not_sent(stack, delay, expiring):
     gate._clock = lambda: now
     candidate = base.decision.model_copy(update={"offer_amount_usdt": Decimal(AMOUNT)})
     snap = book_store(-27900 if expiring == "book" else 1000).snapshot("fUST", now_ms=now)
-    price = PeriodPricer(max_down_pct=Decimal("0.15"), tick=Decimal("0.00000001")).price(
+    price = PeriodPricer(tick=Decimal("0.00000001")).price(
         candidate=candidate, snapshot=snap)
     ready = await ExecutionGate(policy=ExecutionPolicy.BOOK_GUARDED,
         audit=ExecutionDecisionRecorder(factory), readiness=_Readiness()).prepare(

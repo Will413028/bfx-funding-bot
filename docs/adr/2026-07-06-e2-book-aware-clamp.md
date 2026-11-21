@@ -30,7 +30,7 @@ Profit review（`e016197`）第二號 CONFIRMED finding：定價對 live book �
 ## Decision
 
 - **D1**：加純 policy `clamp_rate`（`book_clamp.py`）+ DeploymentReconciler 每 symbol 每 tick 抓一次 public `/v2/ticker/f{sym}`，套 taker / undercut / raise / floor / fallback 五分支。
-- **D2**：**up-clamp 無上界、down-clamp 以 `BFX_CLAMP_MAX_DOWN_PCT`（0.15）為 floor**。
+- **D2**：**up-clamp 無上界、down-clamp 以 `BFX_CLAMP_MAX_DOWN_PCT`（0.15）為 floor**。（down-clamp floor 已由 [2026-11-22-offer-price-follows-the-book-below-the-signal](2026-11-22-offer-price-follows-the-book-below-the-signal.md) 取代。）
 - **D3**：clamp enabled 時 **E1 sweep 的 ref_rate 同步對齊 `max(quote ref, ask−1tick)`**。
 - **D4**：ship **observe-only default**；enforce 是後續手動 canary（Task 5）。
 

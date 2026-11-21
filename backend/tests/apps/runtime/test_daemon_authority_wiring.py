@@ -55,7 +55,7 @@ async def _env_and_db(monkeypatch, tmp_path, httpx_mock, *, name: str, realm: st
     values = {
         "BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": realm,
         "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
-        "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
+        "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
         "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
         "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / name}.db",

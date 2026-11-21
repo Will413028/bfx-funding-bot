@@ -218,7 +218,7 @@ async def test_floor_catches_a_taker_priced_at_an_abnormally_low_signal() -> Non
     bid pays at least that much, so a broken, tiny signal would lend at it."""
     snapshot = book((0.00031, 2), (0.0003, 2), (0.00029, 2))
     candidate = post(rate=0.00001, amount=200)
-    priced = PeriodPricer(max_down_pct=Decimal("0.15"), tick=Decimal("0.00000001")).price(
+    priced = PeriodPricer(tick=Decimal("0.00000001")).price(
         candidate=candidate, snapshot=snapshot)
     assert priced.branch is PriceBranch.TAKER and priced.rate == Decimal("0.00001")
     result = await envelope(candidate.model_copy(update={"offer_rate": priced.rate}),

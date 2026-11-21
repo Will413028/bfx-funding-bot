@@ -39,7 +39,7 @@ async def _database(monkeypatch, tmp_path, *, phase: str, realm: str | None, pro
     if phase in {"live", "simulated"}:
         values.update({
             "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
-            "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
+            "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15",
             "BFX_SAFETY_CONFIG": str(_SAFETY),
         })
     for name, value in values.items():

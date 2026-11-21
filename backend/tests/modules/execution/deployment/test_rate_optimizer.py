@@ -73,8 +73,8 @@ def test_selects_highest_expected_net_rate() -> None:
     assert result.scores["taker"] == Decimal("0.00015300")
 
 
-def test_excludes_exact_period_quote_below_signal_floor() -> None:
-    """A stale or adverse exact-period quote cannot lower the signal floor."""
+def test_excludes_exact_period_quote_below_the_signal_rate() -> None:
+    """The optimizer never selects an exact-period quote under the signal rate."""
     result = RateOptimizer().select(
         signal_rate=Decimal("0.00020"),
         maker=_candidate("0.00019", "maker"),

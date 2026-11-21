@@ -1,4 +1,12 @@
-"""Exact-period market pricing for deployment candidates."""
+"""Exact-period market pricing for deployment candidates.
+
+A new offer is priced off the live book for its exact period: one tick under
+the lowest ask deep enough for it, or the signal rate when a bid already pays
+it. The hourly signal rate is not a lower bound: when the book has moved far
+below it the offer follows the book, because an offer left at a stale signal
+rate cannot fill (ADR 2026-11-22). The rate floor is the lending envelope's,
+enforced at submission by `OfferEnvelopeGuard`.
+"""
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -14,8 +22,8 @@ from bfx_funding_bot.modules.strategy import DecisionPayload
 class PriceBranch(StrEnum):
     TAKER = "taker"
     UNDERCUT = "undercut"
+    # Historical name: the offer follows a book that is below the signal rate.
     RAISE = "raise"
-    SIGNAL_FLOOR = "signal_floor"
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,7 +35,6 @@ class PriceDecision:
 
 @dataclass(frozen=True, slots=True)
 class PeriodPricer:
-    max_down_pct: Decimal
     tick: Decimal
 
     def price(  # noqa: PLR0911
@@ -79,25 +86,24 @@ class PeriodPricer:
                 },
             )
 
+        # An ask at or under one tick cannot be undercut by a positive rate: it is
+        # not a price to follow.
         eligible_asks = [
-            level for level in asks if _decimal(level.amount) >= amount
+            level for level in asks
+            if _decimal(level.amount) >= amount and _decimal(level.rate) > self.tick
         ]
         if not eligible_asks:
             return _blocked(candidate, BlockReason.INSUFFICIENT_PERIOD_DEPTH, "exact_period_ask")
 
         ask = min(eligible_asks, key=lambda level: level.rate)
         competitive = _decimal(ask.rate) - self.tick
-        floor = signal_rate * (Decimal("1") - self.max_down_pct)
         evidence = {
             "period_days": period_days,
             "ask_rate": str(_decimal(ask.rate)),
             "ask_amount": str(_decimal(ask.amount)),
             "competitive_rate": str(competitive),
-            "signal_floor": str(floor),
             "snapshot_id": snapshot.snapshot_id,
         }
-        if competitive < floor:
-            return PriceDecision(signal_rate, PriceBranch.SIGNAL_FLOOR, evidence)
         if competitive >= signal_rate:
             return PriceDecision(competitive, PriceBranch.UNDERCUT, evidence)
         return PriceDecision(competitive, PriceBranch.RAISE, evidence)
