@@ -32,6 +32,11 @@ from bfx_funding_bot.core.db import make_engine, make_session_factory, session_s
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.oos_eval import evaluate_oos_windows
+from bfx_funding_bot.modules.backtest.run_record import (
+    InputFingerprint,
+    file_sha256,
+    fingerprint_candles,
+)
 from bfx_funding_bot.modules.backtest.wfo import compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.performance.oos_profitability import (
@@ -46,6 +51,7 @@ from bfx_funding_bot.modules.performance.oos_profitability import (
     summarize_oos,
 )
 from bfx_funding_bot.modules.strategy import CellConfig, Strategy
+from scripts.research_run_record import RunStart, write_research_run_record
 
 logger = logging.getLogger("run_oos_profitability")
 
@@ -224,7 +230,14 @@ def _report_to_json(reports: list[CellReport]) -> dict:  # type: ignore[type-arg
     }
 
 
-async def _run_cell(session: AsyncSession, cell: CellConfig, n_trials: int) -> CellReport:
+# The weekly job re-validates the deployed cells; an ad-hoc run of another cells file
+# names its own registry row with --registry-entry.
+DEFAULT_REGISTRY_ENTRY = "deployed-cells-oos-revalidation"
+
+
+async def _run_cell(
+    session: AsyncSession, cell: CellConfig, n_trials: int
+) -> tuple[CellReport, InputFingerprint]:
     end_mts = int(datetime.now(UTC).timestamp() * 1000)
     candles = await get_candles_in_range(
         session, symbol=cell.symbol, timeframe=cell.timeframe,
@@ -245,7 +258,8 @@ async def _run_cell(session: AsyncSession, cell: CellConfig, n_trials: int) -> C
         baseline=research_strategy("AlwaysMarketRateStrategy"),
     )
     logger.info("%s: %d windows", cell.cell_id, len(windows))
-    return build_cell_report(cell, strat_outcomes, base_outcomes, n_trials)
+    report = build_cell_report(cell, strat_outcomes, base_outcomes, n_trials)
+    return report, fingerprint_candles(f"candles:{cell.cell_id}", candles)
 
 
 async def _amain() -> int:
@@ -257,7 +271,12 @@ async def _amain() -> int:
         "--cells", default=str(DEFAULT_CELLS_YAML),
         help="cells yaml path (default: configs/cells.live.yaml)",
     )
+    parser.add_argument(
+        "--registry-entry", default=DEFAULT_REGISTRY_ENTRY,
+        help="registry row this run tests; written to the run record (.run.json)",
+    )
     args = parser.parse_args()
+    started_at = datetime.now(UTC)
 
     # Bootstrap mirrors scripts/run_phase3b_wfo_matrix.py exactly:
     #   Settings() → make_engine(settings) → make_session_factory(engine)
@@ -267,10 +286,13 @@ async def _amain() -> int:
     session_factory = make_session_factory(engine)
 
     reports: list[CellReport] = []
+    inputs: list[InputFingerprint] = []
     try:
         for cell in load_cells_only(Path(args.cells)):
             async with session_scope(session_factory) as session:
-                reports.append(await _run_cell(session, cell, args.n_trials))
+                report, candles_fingerprint = await _run_cell(session, cell, args.n_trials)
+                reports.append(report)
+                inputs.append(candles_fingerprint)
     except Exception:
         logger.exception("OOS run failed")
         return 2
@@ -282,7 +304,13 @@ async def _amain() -> int:
     out = Path(args.output)
     out.write_text(md)
     out.with_suffix(".json").write_text(json.dumps(_report_to_json(reports), indent=2))
-    logger.info("wrote %s and %s", out, out.with_suffix(".json"))
+    record = write_research_run_record(
+        out, RunStart(args.registry_entry, "run_oos_profitability", started_at),
+        inputs=inputs,
+        # --n-trials is left out: it grows with the registry, not with what was tested.
+        params={"cells_sha256": file_sha256(Path(args.cells)), "start_mts": START_MTS},
+    )
+    logger.info("wrote %s, %s and %s", out, out.with_suffix(".json"), record)
     return 0
 
 
