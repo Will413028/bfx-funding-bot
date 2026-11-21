@@ -146,7 +146,6 @@ async def test_build_daemon_live_wires_reconcile_timing_and_queue_gauges(
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
-    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     configure_live_wiring_env(monkeypatch, tmp_path)
     await _prepare_env(monkeypatch, tmp_path, httpx_mock, db_name="metrics_live.db")
     monkeypatch.delenv("BFX_ALLOCATION_CAP_USDT", raising=False)

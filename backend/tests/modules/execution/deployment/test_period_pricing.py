@@ -54,7 +54,7 @@ def _level(*, rate: float, amount: float, period: int) -> FundingBookLevel:
 
 
 def _pricer() -> PeriodPricer:
-    return PeriodPricer(max_down_pct=Decimal("0.15"), tick=Decimal("0.00000001"))
+    return PeriodPricer(tick=Decimal("0.00000001"))
 
 
 def test_missing_exact_period_returns_period_not_found() -> None:
@@ -143,7 +143,7 @@ def test_exact_period_ask_is_undercut_when_competitive_rate_is_above_signal() ->
     assert result.branch is PriceBranch.UNDERCUT
 
 
-def test_exact_period_ask_raises_when_competitive_rate_is_between_floor_and_signal() -> None:
+def test_exact_period_ask_raises_when_competitive_rate_is_below_signal() -> None:
     candidate = _decision()
 
     result = _pricer().price(
@@ -156,7 +156,10 @@ def test_exact_period_ask_raises_when_competitive_rate_is_between_floor_and_sign
     assert result.branch is PriceBranch.RAISE
 
 
-def test_exact_period_ask_below_downside_floor_keeps_signal_rate() -> None:
+def test_exact_period_ask_far_below_signal_is_still_followed() -> None:
+    # The book is the market. An hourly signal rate 20% above it is stale, and an
+    # offer left there cannot fill; the lower bound on the rate is the lending
+    # envelope's floor, checked at submission, not the signal.
     candidate = _decision()
 
     result = _pricer().price(
@@ -165,8 +168,25 @@ def test_exact_period_ask_below_downside_floor_keeps_signal_rate() -> None:
     )
 
     assert isinstance(result, PriceDecision)
-    assert result.rate == Decimal("0.00020")
-    assert result.branch is PriceBranch.SIGNAL_FLOOR
+    assert result.rate == Decimal("0.00015999")
+    assert result.branch is PriceBranch.RAISE
+    assert "signal_floor" not in result.evidence
+
+
+def test_offer_follows_a_book_at_less_than_half_the_hourly_signal() -> None:
+    # 2026-11-21 16:51 UTC, fUST 2-day: the hourly signal was 0.00029645 while the
+    # lowest ask stood at 0.0001334. Three offers went out at the signal rate, 2.2x
+    # the market, and rested unfilled.
+    candidate = _decision(offer_rate=Decimal("0.00029645"))
+
+    result = _pricer().price(
+        candidate=candidate,
+        snapshot=_snapshot(_level(rate=0.0001334, amount=5000, period=14)),
+    )
+
+    assert isinstance(result, PriceDecision)
+    assert result.rate == Decimal("0.00013339")
+    assert result.branch is PriceBranch.RAISE
 
 
 def test_exact_period_requires_ask_depth_after_bid_cannot_take() -> None:

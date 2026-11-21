@@ -311,7 +311,7 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
    - **emptiest-first**：依各 cell 的 `cell_exposure` 由小到大，先填最空的；
    - 每筆上限是 `budget.max_new_offer`（policy 設了 `max_offer_amount` 時再取較小者），金額向下量化成 venue 金額；總分配 ≤ `spendable`；低於 `min_fill` 的丟棄。
 7. 定量後、送單前跑 reprice sweep（見 7b）；沒有 fill 則換下一個 symbol。
-7a. 逐 fill：（無 pre-sizing hook 時）重查 uncertainty，有 open UNKNOWN（或讀不到）即 `break`，該 symbol 剩下的 fill 都不送 → 重讀 `get_active(cell_id)`（過期則跳過）→ `choose_fingerprinted_amount` 選出不與使用中 fingerprint 衝突的金額（選不到則跳過）→ `SafetyGuardChain.evaluate` → 讀取該 symbol 的 book snapshot，以 `PeriodPricer` 對 **exact `period_days`** 定價（optimizer policy 另算候選，見 7c-ii）→ `ExecutionGate.prepare`（見 7c）→ `executor.submit`。只有 `acknowledged` 結果記為 submitted（`deployment_submitted`）；本 tick 得到 `unknown` 時記錄、emit 後 `continue`，之後的 fill 由 uncertainty guard 擋下（有 hook 時是 `SafetyGuardChain.evaluate` 內的 `uncertainty` guard，否則是上述重查）。scalar ticker 僅可作 telemetry，不能為 period-correct pricing 提供證據。
+7a. 逐 fill：（無 pre-sizing hook 時）重查 uncertainty，有 open UNKNOWN（或讀不到）即 `break`，該 symbol 剩下的 fill 都不送 → 重讀 `get_active(cell_id)`（過期則跳過）→ `choose_fingerprinted_amount` 選出不與使用中 fingerprint 衝突的金額（選不到則跳過）→ `SafetyGuardChain.evaluate` → 讀取該 symbol 的 book snapshot，以 `PeriodPricer` 對 **exact `period_days`** 定價：有夠深的 bid 願意付訊號利率就掛訊號利率（taker），否則掛最低賣價減一檔（高於訊號利率記 undercut、低於記 raise）。訊號利率不是下限，book 比它低多少都跟著 book；利率下限只由包絡在送單前把關（ADR 2026-11-22）（optimizer policy 另算候選，見 7c-ii）→ `ExecutionGate.prepare`（見 7c）→ `executor.submit`。只有 `acknowledged` 結果記為 submitted（`deployment_submitted`）；本 tick 得到 `unknown` 時記錄、emit 後 `continue`，之後的 fill 由 uncertainty guard 擋下（有 hook 時是 `SafetyGuardChain.evaluate` 內的 `uncertainty` guard，否則是上述重查）。scalar ticker 僅可作 telemetry，不能為 period-correct pricing 提供證據。
 
 7b. **Reprice sweep（E1）**：只在設定了 reprice policy 且本 tick 帶有 venue offers 時執行；只有通過第 5 步與第 6 步讀取（funding rule、capital read）的 symbol 會跑到，被停止、有 UNKNOWN 或讀取失敗的 symbol 在此之前已 `continue`。在定量後、送單前（即使沒有 fill 也會跑），比對 venue snapshot 的 resting offers 與現行 active quote：offer rate 高於最高 active quote rate ×(1+`BFX_REPRICE_TOLERANCE_PCT`) 且齡 ≥ `BFX_REPRICE_MIN_AGE_S` → `executor.cancel`（每 tick ≤ `BFX_REPRICE_MAX_CANCELS_PER_TICK` 筆；`BFX_REPRICE_ENABLED=false` 時僅 log `reprice_would_cancel`）。release 由 WS foc / 下次 reconcile 收斂，釋放資金下一 tick 以新 quote 重掛。無 active quote 的 symbol 不砍（resting 高價單留作 spike option）。**參考價**由 `BFX_REPRICE_REFERENCE` 決定：`quote`（預設）＝該 symbol active quote 最高 rate；`book`＝以 `PeriodPricer` 對當下 exact-period book、同期限、該 offer 剩餘金額重定價，多個 quote 取最高，book 或對應期限 quote 不可用時不砍——送單價本來就由 book 定，參考價用 signal quote 會在市場沒動時把合法價位砍掉（live 自 2026-09-27 起用 `book`，見 `deploy/vm/live.env`）。
 
@@ -351,7 +351,7 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 | Reconcile interval | ~90s（resync debounce 10s） | `BFX_RECONCILE_INTERVAL_S`, `BFX_RESYNC_MIN_INTERVAL_S` |
 | Period | 2 天（兩策略皆 `period_days=2`） | — |
 | Reprice sweep（E1） | enabled（canary 2026-07-07 起）；tolerance 10%；min age 30min；≤3 cancels/tick | `BFX_REPRICE_ENABLED`、`BFX_REPRICE_TOLERANCE_PCT`、`BFX_REPRICE_MIN_AGE_S`、`BFX_REPRICE_MAX_CANCELS_PER_TICK` |
-| Execution policy | `book_guarded`、`optimizer_live`；必須設定 book freshness/reconcile/down-bound，optimizer_live 另需 empirical artifact + fee | `BFX_EXECUTION_POLICY`、`BFX_BOOK_*`、`BFX_FILL_MODEL_ARTIFACT`、`BFX_OPTIMIZER_FEE_RATE` |
+| Execution policy | `book_guarded`、`optimizer_live`；必須設定 book freshness/reconcile，optimizer_live 另需 empirical artifact + fee | `BFX_EXECUTION_POLICY`、`BFX_BOOK_*`、`BFX_FILL_MODEL_ARTIFACT`、`BFX_OPTIMIZER_FEE_RATE` |
 
 ### 4a. 回測引擎契約（`modules/backtest/engine.py::run_backtest`）
 

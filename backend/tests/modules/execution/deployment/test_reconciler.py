@@ -399,11 +399,11 @@ def _bid_snapshot() -> MarketSnapshot:
     )
 
 
-def _signal_floor_snapshot() -> MarketSnapshot:
+def _far_below_signal_snapshot() -> MarketSnapshot:
     from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
 
     return MarketSnapshot(
-        snapshot_id="book-floor", symbol="fUST", bids=(),
+        snapshot_id="book-far-below", symbol="fUST", bids=(),
         asks=(FundingBookLevel(rate=0.0001, period=2, count=1, amount=100_000),),
         captured_at_ms=1_000, received_at_ms=1_000, source="ws",
         sequence_valid=True, checksum_valid=True, sequence=2,
@@ -434,9 +434,7 @@ def _eligibility_kwargs(
             audit=audit or _Audit(), readiness=_Readiness(),
         ),
         "execution_policy": execution_policy,
-        "period_pricer": PeriodPricer(
-            max_down_pct=D("0.15"), tick=D("0.00000001"),
-        ),
+        "period_pricer": PeriodPricer(tick=D("0.00000001")),
         "audit_context_factory": _AuditContexts(),
         "fill_model_provider": fill_model_provider,
     }
@@ -830,13 +828,13 @@ async def test_optimizer_live_requires_explicit_fee_rate() -> None:
 
 
 @pytest.mark.parametrize(
-    "snapshot", [_raise_snapshot(), _signal_floor_snapshot()],
-    ids=["raise", "signal_floor"],
+    "snapshot", [_raise_snapshot(), _far_below_signal_snapshot()],
+    ids=["raise", "far_below_signal"],
 )
 async def test_optimizer_live_does_not_fabricate_maker_for_signal_semantics(
     snapshot: MarketSnapshot,
 ) -> None:
-    """Raise and signal-floor pricing have no exact-period maker candidate."""
+    """A book below the signal rate (raise pricing) gives no exact-period maker candidate."""
     audit = _Audit()
     rec, executor, _safety = _build(
         exposure=D("370"),

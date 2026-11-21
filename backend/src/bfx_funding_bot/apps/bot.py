@@ -397,7 +397,6 @@ async def build_daemon(  # noqa: C901, PLR0912, PLR0915
     if (
         config.book_max_age_seconds is None
         or config.book_reconcile_interval_seconds is None
-        or config.book_max_down_pct is None
     ):
         raise ValueError(
             "the execution policy requires FundingBookService configuration",
@@ -781,10 +780,7 @@ async def build_daemon(  # noqa: C901, PLR0912, PLR0915
         execution_gate=execution_gate,
         execution_policy=config.execution_policy,
         optimizer_fee_rate=config.optimizer_fee_rate,
-        period_pricer=PeriodPricer(
-            max_down_pct=Decimal(str(config.book_max_down_pct)),
-            tick=Decimal("0.00000001"),
-        ),
+        period_pricer=PeriodPricer(tick=Decimal("0.00000001")),
         # Every decision names the build that made it: the revision and
         # image digest the deploy tool injected.
         audit_context_factory=_AuditContextFactory(

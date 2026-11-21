@@ -135,7 +135,6 @@ def load_config(  # noqa: C901, PLR0912, PLR0915
 
     book_max_age_seconds = required_float("BFX_BOOK_MAX_AGE_SECONDS")
     book_reconcile_interval_seconds = required_float("BFX_BOOK_RECONCILE_INTERVAL_SECONDS")
-    book_max_down_pct = required_float("BFX_BOOK_MAX_DOWN_PCT")
 
     fill_model_artifact = os.environ.get("BFX_FILL_MODEL_ARTIFACT", "").strip()
     if execution_policy is ExecutionPolicy.OPTIMIZER_LIVE and not fill_model_artifact:
@@ -267,7 +266,6 @@ def load_config(  # noqa: C901, PLR0912, PLR0915
         "execution_policy": execution_policy,
         "book_max_age_seconds": book_max_age_seconds,
         "book_reconcile_interval_seconds": book_reconcile_interval_seconds,
-        "book_max_down_pct": book_max_down_pct,
         "optimizer_fee_rate": optimizer_fee_rate,
         "fill_model_artifact": fill_model_artifact or None,
         "run_duration_hours": run_duration_h,
