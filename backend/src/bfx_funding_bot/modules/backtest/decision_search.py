@@ -58,7 +58,7 @@ SCENARIO_HELD = "held_to_maturity"
 
 
 def refinance_scenario(margin: Decimal) -> str:
-    return f"refinance_on_drop_{margin}"
+    return f"refinance_on_drop_{format(margin.normalize(), 'f')}"
 
 _MIN_WINDOWS_FOR_SHARPE = 3
 

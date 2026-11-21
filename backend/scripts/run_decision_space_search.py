@@ -337,6 +337,12 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--ap-p-long", type=int, default=14)
     p.add_argument("--p30-staleness-hours", type=int, default=12)
     args = p.parse_args(list(argv))
+    try:
+        margin_ok = Decimal(0) < Decimal(args.refinance_margin) < Decimal(1)
+    except ArithmeticError:
+        margin_ok = False
+    if not margin_ok:
+        p.error("--refinance-margin must be a fraction strictly between 0 and 1, e.g. 0.2")
     grid_flags = (args.offsets, args.periods, args.wait_hours)
     if args.topic == TOPIC_GRID:
         if None in grid_flags or args.n_trials is None:

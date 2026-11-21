@@ -21,6 +21,7 @@ from bfx_funding_bot.modules.backtest.decision_search import (
     SearchRun,
     build_search_report,
     evaluate_search_arms,
+    refinance_scenario,
     render_search_markdown,
     search_report_to_json,
     tape_days,
@@ -228,3 +229,8 @@ def test_refinance_scenario_removes_a_long_lock_edge(tmp_path: Path) -> None:
 
     assert verdicts(None) == {"long": VERDICT_POSITIVE}
     assert verdicts(Decimal("0.2")) == {"long": VERDICT_NEGATIVE}
+
+
+def test_scenario_label_does_not_depend_on_how_the_margin_was_typed() -> None:
+    assert (refinance_scenario(Decimal("0.2")) == refinance_scenario(Decimal("0.20"))
+            == refinance_scenario(Decimal("2E-1")) == "refinance_on_drop_0.2")

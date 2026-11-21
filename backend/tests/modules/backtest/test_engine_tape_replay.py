@@ -10,7 +10,11 @@ import pytest
 
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
-from bfx_funding_bot.modules.backtest.engine import BacktestIncomplete, run_backtest
+from bfx_funding_bot.modules.backtest.engine import (
+    BacktestIncomplete,
+    _held_ms_until_refinance,
+    run_backtest,
+)
 from bfx_funding_bot.modules.backtest.replay import TapeDays
 from bfx_funding_bot.modules.strategy import LendDecision
 from bfx_funding_bot.modules.strategy._internal.strategies.base import Strategy
@@ -226,3 +230,36 @@ def test_refinance_margin_and_reference_come_together(tape: TapeDays) -> None:
     for bad in ("0", "1", "-0.1"):
         with pytest.raises(ValueError, match="replay_refinance_margin"):
             BacktestConfig(fill_model="tape-replay", replay_refinance_margin=Decimal(bad))
+
+
+def _held(closes: list[str | None], *, lock_start: int, rate: str = "0.0002",
+          term_h: int = 48) -> int:
+    reference = ([T0 + i * H for i in range(len(closes))],
+                 [Decimal(c) if c is not None else None for c in closes])
+    return _held_ms_until_refinance(reference, lock_start_mts=lock_start,
+                                    locked_rate=Decimal(rate), margin=Decimal("0.2"),
+                                    term_ms=term_h * H)
+
+
+def test_repayment_happens_when_the_low_close_is_known_not_when_its_hour_opens() -> None:
+    flat, low = "0.0002", "0.0001"
+    # Lock starts 1ms into hour 2. Hour 3 closes low at +4h: that is when the borrower
+    # can act, 2h minus 1ms into the lock (not at +3h, when the close was still unknown).
+    assert _held([flat, flat, flat, low, flat], lock_start=T0 + 2 * H + 1) == 2 * H - 1
+    # The hour the lock starts in counts too: its close happens during the lock.
+    assert _held([flat, flat, low, flat], lock_start=T0 + 2 * H + 1) == H - 1
+    # A close before the lock started is history, not a trigger.
+    assert _held([low, low, flat, flat], lock_start=T0 + 2 * H + 1, term_h=2) == 2 * H
+
+
+def test_hours_without_a_print_do_not_trigger_repayment() -> None:
+    flat = "0.0002"
+    assert _held([flat, flat, None, "0", "-0.0001", flat], lock_start=T0 + H, term_h=4) == 4 * H
+
+
+def test_a_lock_the_reference_does_not_cover_cannot_be_scored(tape: TapeDays) -> None:
+    with pytest.raises(BacktestIncomplete) as exc:
+        _held(["0.0002"], lock_start=T0 + 5 * H)
+    assert exc.value.reason == "market_series_gap"
+    with pytest.raises(ValueError, match="refinance_reference is empty"):
+        run_backtest(_candles(), _Fixed(), _refinance_config(), tape=tape, refinance_reference=[])

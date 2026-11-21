@@ -153,6 +153,13 @@ def test_grid_accepts_a_quote_below_market() -> None:
     assert args.grid.offsets == (Decimal("-0.02"), Decimal("0.02"))
 
 
+@pytest.mark.parametrize("margin", ["20", "0", "1", "abc", "nan"])
+def test_a_bad_refinance_margin_stops_before_anything_is_loaded(margin: str) -> None:
+    with pytest.raises(SystemExit):
+        _parse_args(["--topic", "period-arms", "--refinance-margin", margin,
+                     "--tape-root", "/nonexistent", "--output", "/nonexistent/x.md"])
+
+
 def _setup(tape: Path, grid: Grid | None) -> SearchSetup:
     return SearchSetup(tape_root=tape, grid=grid, n_trials=999, offer_amount=Decimal("1000"),
                        refinance_margin=Decimal("0.2"),

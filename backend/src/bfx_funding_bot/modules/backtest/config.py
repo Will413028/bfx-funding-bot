@@ -66,7 +66,6 @@ class BacktestConfig:
                 f"{self.market_rate_source!r}"
             )
 
-
     def _validate_replay(self) -> None:
         if self.replay_bound not in ("conservative", "optimistic"):
             raise ValueError(f"replay_bound must be conservative|optimistic, got {self.replay_bound!r}")
@@ -87,6 +86,7 @@ class BacktestConfig:
             raise ValueError(
                 f"replay_offer_amount must be positive, got {self.replay_offer_amount}"
             )
+
 
 def compute_fill_prob(spread_pct: Decimal, fill_alpha: Decimal) -> Decimal:
     """Linear fill probability model.
