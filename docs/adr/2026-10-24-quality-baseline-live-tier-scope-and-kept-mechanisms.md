@@ -29,6 +29,7 @@ related-commits:
 ## Decision
 
 - **D1 不做**：負載測試與 Lighthouse 前端效能預算（沒有流量）；coding agent 的 host 權限（host 設定，不是 repo 品質項）；pre-push hook（PR 加 required checks 已是失敗點）。
+  - 2026-11-21 補（Prompt 3 複核）：PR 大小門檻移除（日常 PR 進 `dev` 時從未列為必過、發版 PR 一律跳過，實際沒擋任何東西）；改動行覆蓋率與 migration lint 的比較基準維持 `origin/main`（覆蓋率沒有門檻、只供 review 參考；migration lint 多檢查 `dev` 上未發版的 revision 是較大的範圍，不會漏）。
 - **D2 延後**（觸發條件）：
   - 無障礙與可用性 → Phase B（主控台給第二個人用時）。
   - webapi 的 Prometheus metrics → Phase B，或 webapi 發生效能事故。
