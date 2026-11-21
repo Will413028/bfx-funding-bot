@@ -651,3 +651,48 @@ ancestors = ["bfx_funding_bot.modules.execution"]
 depth = 0
 ignore_imports = []
 broken_contract_guidance = "Do not add ignores; move the shared piece below both siblings (ADR 2026-10-19 D2)."
+
+[[tool.importlinter.contracts]]
+id = "top-acyclic"
+name = "Top-level packages have no cycles between siblings"
+type = "acyclic_siblings"
+ancestors = ["bfx_funding_bot"]
+depth = 0
+ignore_imports = []
+broken_contract_guidance = "Do not add ignores; move the shared piece below both siblings."
+
+[[tool.importlinter.contracts]]
+id = "apps-acyclic"
+name = "Apps have no cycles between siblings"
+type = "acyclic_siblings"
+ancestors = ["bfx_funding_bot.apps"]
+depth = 0
+ignore_imports = []
+broken_contract_guidance = "Do not add ignores; move the shared piece below both siblings."
+
+[[tool.importlinter.contracts]]
+id = "core-acyclic"
+name = "Core has no cycles between siblings"
+type = "acyclic_siblings"
+ancestors = ["bfx_funding_bot.core"]
+depth = 0
+ignore_imports = []
+broken_contract_guidance = "Do not add ignores; move the shared piece below both siblings."
+
+[[tool.importlinter.contracts]]
+id = "ledger-acyclic"
+name = "Ledger submodules have no cycles between siblings"
+type = "acyclic_siblings"
+ancestors = ["bfx_funding_bot.modules.ledger"]
+depth = 0
+ignore_imports = []
+broken_contract_guidance = "Do not add ignores; move the shared piece below both siblings."
+
+[[tool.importlinter.contracts]]
+id = "market-acyclic"
+name = "Market submodules have no cycles between siblings"
+type = "acyclic_siblings"
+ancestors = ["bfx_funding_bot.modules.market"]
+depth = 0
+ignore_imports = []
+broken_contract_guidance = "Do not add ignores; move the shared piece below both siblings."

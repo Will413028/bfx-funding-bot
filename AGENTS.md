@@ -65,7 +65,7 @@ Bitfinex 自動放貸 SaaS 平台。
 
 - **行為變更補對應的回歸測試**；純文件改動核對指令、路徑與規格即可，不為文件或格式改動新增機械測試
 - **每個事故一份紀錄、一條先紅後綠的回歸測試**：紀錄照 `docs/incidents/TEMPLATE.md` 寫在 `docs/incidents/`；修補 PR 帶的回歸測試要在修補前的 commit 上失敗、修補後通過，證據寫進紀錄
-- **suppression 與測試數只往好的方向動**：`backend/quality-ratchet.json` 鎖住各類 suppression（`noqa`、`type: ignore`、`biome-ignore`、skip 等）的數量與 CI 實際執行的測試數，由 CI 的 `Quality ratchet` job 檢查（本機：`cd backend && uv run python scripts/quality_ratchet.py`）；import-linter 的 `ignore_imports` 由 `tests/architecture/test_import_contracts.py` 鎖住。移除 suppression 要把鎖定值調低；要放寬（多一個 suppression、測試數變少）時，PR 裡要有 commit 帶 `Ratchet-Reason:` trailer，測試數變少還要用 `Removed-Test:` trailer 列出每個被刪的測試
+- **suppression 與測試數只往好的方向動**：`backend/quality-ratchet.json` 鎖住各類 suppression（`noqa`、`type: ignore`、`biome-ignore`、skip 等）的數量與 CI 實際執行的測試數，由 CI 的 `Quality ratchet` job 檢查（本機：`cd backend && uv run python scripts/quality_ratchet.py`）；import-linter 的 `ignore_imports` 由 `tests/architecture/test_import_contracts.py` 鎖住。依賴方向與無環的 contract 在 `backend/pyproject.toml`（`[tool.importlinter]`，CI 跑 `cd backend && uv run lint-imports`）：`apps` 在最上層、`core` 不 import `external` 與 `modules`、`external` 不 import `modules`，套件最上層、`apps`、`core`、`modules` 以及 `execution`、`ledger`、`market` 的子模組之間不准有環；`tests/architecture/test_contracts_bite.py` 對每條 contract 在圖的副本植入一個違規，確認它真的會報錯（新增 contract 時一起被檢查）。移除 suppression 要把鎖定值調低；要放寬（多一個 suppression、測試數變少）時，PR 裡要有 commit 帶 `Ratchet-Reason:` trailer，測試數變少還要用 `Removed-Test:` trailer 列出每個被刪的測試
 - **套用 migration 一律使用 `cd backend && uv run alembic upgrade head`，不可用 MCP 直接執行 SQL**
 - 後端架構詳見 `backend/ARCHITECTURE.md`（runtime 架構/資料流/放貸演算法）；測試慣例與 SQLAlchemy/Alembic 工作流以各 module 註解與既有測試為準
 - 前端測試指令、架構慣例詳見 `frontend/AGENTS.md`
