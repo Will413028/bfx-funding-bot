@@ -62,7 +62,7 @@ async def load_snapshots(
     ]
 
 
-async def learn_book_and_store(
+async def learn_book_and_store(  # noqa: PLR0913
     session: AsyncSession,
     *,
     symbol: str,

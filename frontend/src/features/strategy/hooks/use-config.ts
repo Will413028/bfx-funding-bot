@@ -34,7 +34,7 @@ export function useSaveConfig(exchangeAccountId?: string) {
       );
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: configKeys.all });
+      void queryClient.invalidateQueries({ queryKey: configKeys.all });
     },
   });
 }
@@ -49,7 +49,7 @@ export function useResetConfig(exchangeAccountId?: string) {
       );
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: configKeys.all });
+      void queryClient.invalidateQueries({ queryKey: configKeys.all });
     },
   });
 }

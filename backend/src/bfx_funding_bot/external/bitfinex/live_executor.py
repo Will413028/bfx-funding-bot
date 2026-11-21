@@ -132,7 +132,7 @@ def parse_offer_response(raw: Any) -> SubmitOutcome:
     # The pure parser shares the same classifier as the HTTP shell.  This
     # prevents an unrecognized status (or a SUCCESS without an ID) from
     # being mislabelled as a rejection by a direct caller.
-    return classify_submit_response(200, raw, True)
+    return classify_submit_response(200, raw, True)  # noqa: FBT003
 
 
 def classify_cancel_response(
@@ -270,7 +270,7 @@ class BitfinexLiveExecutor:
         self._base_url = base_url.rstrip("/")
         self._clock = clock or (lambda: int(time.time() * 1000))
 
-    async def submit(
+    async def submit(  # noqa: C901, PLR0911, PLR0912
         self, offer: OfferRequest, account: HasCredentials, *,
         pre_send: Callable[[], bool] | None = None,
     ) -> SubmitOutcome:
@@ -313,7 +313,7 @@ class BitfinexLiveExecutor:
                 )
                 headers["bfx-apikey"] = credentials.api_key
                 headers["Content-Type"] = "application/json"
-            except Exception:
+            except Exception:  # noqa: BLE001
                 # No request has been started, so this is a durable NOT_SENT result;
                 # the command gate may safely resolve the pre-transport intent.
                 return SubmitNotSent("local_validation_failed")
@@ -375,7 +375,7 @@ class BitfinexLiveExecutor:
             except httpx.HTTPError as e:
                 log.warning("bitfinex_submit_network_error symbol=%s err_type=%s", offer.symbol, type(e).__name__)
                 return classify_submit_response(None, None, transport_started, e)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 # A response parser/shape error after the request is sent is also
                 # UNKNOWN.  Never let it fall through to the old FAILED branch.
                 log.warning("bitfinex_submit_response_error symbol=%s err_type=%s", offer.symbol, type(e).__name__)

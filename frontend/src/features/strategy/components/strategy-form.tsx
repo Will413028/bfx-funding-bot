@@ -54,6 +54,7 @@ interface StrategyFormProps {
   userConfig: UserConfig | null;
 }
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: baseline from when the rule was enabled; split before adding branches
 export function StrategyForm({
   exchangeAccountId,
   userConfig,

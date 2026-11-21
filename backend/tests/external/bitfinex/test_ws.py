@@ -158,7 +158,7 @@ async def _drain(client: BitfinexWSClient):
     try:
         async for _ in client.candles():
             pass
-    except Exception:
+    except Exception:  # noqa: BLE001
         pass
 
 

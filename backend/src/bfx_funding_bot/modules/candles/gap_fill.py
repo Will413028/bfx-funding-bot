@@ -22,7 +22,7 @@ _TIMEFRAME_MS = {"15m": 15 * 60_000, "30m": 30 * 60_000, "1h": 60 * 60_000}
 
 
 class _BitfinexProtocol(Protocol):
-    async def get_funding_candles(
+    async def get_funding_candles(  # noqa: PLR0913
         self,
         *,
         symbol: str,
@@ -47,7 +47,7 @@ class GapFillResult:
     candles_upserted: int
 
 
-async def fill_gap_from_rest(
+async def fill_gap_from_rest(  # noqa: PLR0913
     *,
     bitfinex: _BitfinexProtocol,
     session: AsyncSession,
@@ -94,7 +94,7 @@ async def fill_gap_from_rest(
     return GapFillResult(candles_fetched=len(fetched), candles_upserted=upserted)
 
 
-async def fill_missing_boundary(
+async def fill_missing_boundary(  # noqa: PLR0913
     *,
     bitfinex: _BitfinexProtocol,
     session: AsyncSession,

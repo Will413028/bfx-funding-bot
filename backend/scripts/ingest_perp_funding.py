@@ -129,7 +129,7 @@ async def _series_pass_check(
     )
 
 
-async def _amain() -> int:
+async def _amain() -> int:  # noqa: C901, PLR0915
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

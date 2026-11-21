@@ -80,7 +80,7 @@ def build_router(
             return JSONResponse(status_code=200, content=await trading_status.snapshot())
 
         @router.post("/dry-evaluate")
-        async def dry_evaluate_endpoint(
+        async def dry_evaluate_endpoint(  # noqa: PLR0913, PLR0917
             request: Request,
             symbol: str | None = Query(default=None),
             amount: float | None = Query(default=None),

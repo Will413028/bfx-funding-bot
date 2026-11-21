@@ -293,7 +293,7 @@ _RELATIONS = """SELECT c.oid, CASE n.nspname WHEN 'public' THEN c.relname
                 AND c.relkind IN ('r', 'p', 'v', 'm', 'f') ORDER BY 2"""
 
 
-def _effective(conn, role: str = "bfx_webapi") -> set[tuple[str, ...]]:
+def _effective(conn, role: str = "bfx_webapi") -> set[tuple[str, ...]]:  # noqa: C901
     """Everything ``role`` can do in ``public`` and ``legacy_archive``, through the privilege functions
     (so grants via PUBLIC or role membership count, not only its own ACL entries)."""
     found: set[tuple[str, ...]] = set()

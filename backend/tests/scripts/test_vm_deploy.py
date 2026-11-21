@@ -169,7 +169,7 @@ TOOLING = {
 _VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:\?|:-)([^}]*))?\}")
 
 
-def render_compose(compose_file: Path, env: Mapping[str, str]) -> dict[str, Any] | None:
+def render_compose(compose_file: Path, env: Mapping[str, str]) -> dict[str, Any] | None:  # noqa: C901
     """`docker compose config --no-env-resolution --format json`, for the part of Compose
     these files use (shape measured on Compose v5.1.4): variables interpolated, env_file
     and config/secret `file` paths made absolute against the compose file's directory,
@@ -410,7 +410,7 @@ class FakeHost:
     def count(self, predicate: Callable[[tuple[str, ...]], bool]) -> int:
         return sum(1 for call in self.calls if predicate(call))
 
-    def __call__(self, argv: Sequence[str], *, timeout: float, input_text: str | None = None,
+    def __call__(self, argv: Sequence[str], *, timeout: float, input_text: str | None = None,  # noqa: C901
                  env: Mapping[str, str] | None = None) -> Any:
         call = tuple(argv)
         self.calls.append(call)
@@ -536,7 +536,7 @@ class FakeHost:
             [{"verificationResult": {"statement": {"subject": [{"digest": {"sha256": subject[7:]}}]}}}])
         return bfx.CommandResult(self.gh_verify_exit, stdout, "")
 
-    def _git(self, where: Path, args: tuple[str, ...]) -> Any:
+    def _git(self, where: Path, args: tuple[str, ...]) -> Any:  # noqa: C901
         if where != self.mirror:
             assert where.parent == self.dr_root, where
             if args == ("rev-parse", "HEAD"):
@@ -631,7 +631,7 @@ class FakeHost:
     def _heads(self, call: tuple[str, ...]) -> tuple[str, ...]:
         return self.heads_by_digest.get(self._digest(call), self.heads)
 
-    def _compose(self, call: tuple[str, ...], env: Mapping[str, str] | None) -> Any:
+    def _compose(self, call: tuple[str, ...], env: Mapping[str, str] | None) -> Any:  # noqa: C901
         assert call[:5] == ("docker", "compose", "-p", "bfx-app", "-f")
         compose_file = Path(call[5])
         revision = compose_file.parent.name

@@ -408,7 +408,7 @@ class FakeDocker:
             f"{commands.BACKEND_REPOSITORY}\t{CANDIDATE_IMAGE}\n"
             f"ghcr.io/will413028/bfx-funding-bot-frontend\tsha256:{'f' * 64}\n")
 
-    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None,
+    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None,  # noqa: C901
                  input_text: str | None = None, env: dict[str, str] | None = None,
                  ) -> subprocess.CompletedProcess[str]:
         self.calls.append(command)

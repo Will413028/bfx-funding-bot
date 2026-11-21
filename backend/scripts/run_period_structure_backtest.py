@@ -136,7 +136,7 @@ def _mr_factory(params: dict[str, object]) -> Callable[[], Strategy]:
     )
 
 
-def build_arms(
+def build_arms(  # noqa: PLR0913
     *,
     symbol: str,
     series: dict[str, list[FundingCandle]],
@@ -203,7 +203,7 @@ def build_arms(
     return arms, notes
 
 
-def run_symbol(
+def run_symbol(  # noqa: PLR0913
     *,
     symbol: str,
     raw_series: dict[str, list[FundingCandle]],
@@ -340,7 +340,7 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     return p.parse_args(list(argv))
 
 
-async def _amain(argv: Sequence[str]) -> int:
+async def _amain(argv: Sequence[str]) -> int:  # noqa: C901
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = _parse_args(argv)
     symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]

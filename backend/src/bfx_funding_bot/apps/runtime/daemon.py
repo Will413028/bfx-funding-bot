@@ -290,7 +290,7 @@ class Daemon:
     public_data_failed: bool = False
     # Set when the account half failed (first): a later market data error does not reclassify.
     account_failed: bool = False
-    healthz_host: str = "0.0.0.0"
+    healthz_host: str = "0.0.0.0"  # noqa: S104
     healthz_port: int = 8080
     admin_token: str | None = field(default=None, repr=False)
     admin_read_token: str | None = field(default=None, repr=False)
@@ -522,7 +522,7 @@ class Daemon:
             return
         log.info("sub_task_exit name=credential_recovery_retry")
 
-    async def _credential_recheck_loop(self) -> None:
+    async def _credential_recheck_loop(self) -> None:  # noqa: C901
         """Recheck the key every :data:`CREDENTIAL_RECHECK_INTERVAL_S` while trading.
 
         Non-compliant, or refused by the venue itself (its body says 10100): raise, so the
@@ -686,7 +686,7 @@ class Daemon:
                 self.public_data_failed = True
             raise
 
-    async def _boot_and_run(self) -> None:
+    async def _boot_and_run(self) -> None:  # noqa: C901, PLR0912
         # Initial cell registration (was in startup)
         for cell in self.config.cells:
             self.scheduler.register_from_now(cell, now_ms=self.boot_mts)

@@ -461,7 +461,7 @@ class DaemonMetrics:
         except Exception:
             log.debug("metrics_observe_failed metric=event_loop_lag", exc_info=True)
 
-    def set_trading_ready(self, value: bool) -> None:
+    def set_trading_ready(self, value: bool) -> None:  # noqa: FBT001
         try:
             self.trading_ready.set(1.0 if value else 0.0)
         except Exception:

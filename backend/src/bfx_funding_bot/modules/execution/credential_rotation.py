@@ -209,7 +209,7 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
     model = CredentialRotationRequestRow
     name = "credential_rotation"
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         session_factory: async_sessionmaker[AsyncSession],
@@ -293,7 +293,7 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
                     ExchangeAccountCredential.lifecycle_status == "active",
                     CredentialRotationRequestRow.state == APPLIED,
                 ).limit(1))).first()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log.warning("credential_rotation_catch_up_failed reason=%s", type(exc).__name__)
             return
         if (applied is not None and applied.processed_at_ms is not None
@@ -308,7 +308,7 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
                     recipient_id=recipient_id, exchange_account_id=self.account_id,
                     run_id=self._run_id,
                     public_key=recipient.public_key, created_at_ms=self.clock()))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log.warning("credential_rotation_recipient_unpublished reason=%s", type(exc).__name__)
             return
         self._recipient = (recipient_id, recipient)
@@ -336,7 +336,7 @@ class CredentialRotationWorker(OperatorRequestWorker[CredentialRotationRequestRo
             return PreparedRotation(row_id, local)
         return PreparedRotation(row_id, await self._verify(local, stored_user_id))
 
-    async def _judge_locally(self, session: AsyncSession,
+    async def _judge_locally(self, session: AsyncSession,  # noqa: PLR0911
                              row: CredentialRotationRequestRow | None,
                              ) -> UnsealedCredential | Refused:
         if row is None or row.state != "requested":

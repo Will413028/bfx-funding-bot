@@ -36,7 +36,7 @@ _STATEMENT_START = re.compile(
     r"(?:;|\b(?:BEGIN|THEN|ELSE|LOOP))\s*$", re.IGNORECASE)
 
 
-def _lex(src: str) -> tuple[str, list[str]]:
+def _lex(src: str) -> tuple[str, list[str]]:  # noqa: C901
     """``src`` with comments removed and each string literal replaced by ``'#<n>'``."""
     out: list[str] = []
     literals: list[str] = []
@@ -164,7 +164,7 @@ def _is_if(frame: list[set[str]]) -> bool:
     return frame is not _CASE and frame is not _BEGIN
 
 
-def column_references(prosrc: str, tables: Iterable[str],
+def column_references(prosrc: str, tables: Iterable[str],  # noqa: C901
                       relnames: Mapping[str, str] | None = None) -> dict[str, set[str]]:
     """For each attached table, the ``NEW``/``OLD`` columns the body reads on it.
 

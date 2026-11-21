@@ -8,7 +8,7 @@ import type { ExchangeAccount } from "@/types";
  * accounts, callers deliberately select the first deterministic account; the
  * API scope is still always the UUID returned by this endpoint.
  */
-export function useExchangeAccounts() {
+function useExchangeAccounts() {
   return useQuery({
     queryKey: exchangeAccountKeys.list(),
     queryFn: () => apiClient.get<ExchangeAccount[]>("/exchange-accounts"),

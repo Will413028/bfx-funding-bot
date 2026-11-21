@@ -135,7 +135,7 @@ class IngressMiddleware:
 
         await self.app(scope, receive, send_with_headers)
 
-    def _check(self, request: Request) -> Response | None:
+    def _check(self, request: Request) -> Response | None:  # noqa: PLR0911
         settings = getattr(request.app.state, "ingress", None)
         if not isinstance(settings, IngressSettings):
             return _refuse(503, "ingress_not_configured")

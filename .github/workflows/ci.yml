@@ -60,6 +60,9 @@ jobs:
           pnpm biome check --error-on-warnings src/
           pnpm biome lint --error-on-warnings e2e/
 
+      - name: Dead code (knip)
+        run: pnpm knip
+
       - name: Unit tests
         run: pnpm vitest run --reporter=default --reporter=junit --outputFile.junit=junit/frontend.xml
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

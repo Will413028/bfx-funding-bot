@@ -63,7 +63,7 @@ class CapitalPolicyRequestWorker(OperatorRequestWorker[CapitalPolicyRequestRow, 
     model = CapitalPolicyRequestRow
     name = "capital_policy_request"
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         session_factory: async_sessionmaker[AsyncSession],

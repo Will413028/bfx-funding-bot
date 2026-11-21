@@ -71,7 +71,7 @@ async def _check_account(
         raise BootstrapError("bootstrap_credential_exists")
 
 
-async def bootstrap_credential(
+async def bootstrap_credential(  # noqa: PLR0913
     factory: async_sessionmaker[AsyncSession],
     *,
     exchange_account_id: UUID,
@@ -133,5 +133,5 @@ async def bootstrap_credential(
         return {"status": "verified", "applied": apply}
     except BootstrapError:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001
         raise BootstrapError(BOOTSTRAP_FAILED) from None

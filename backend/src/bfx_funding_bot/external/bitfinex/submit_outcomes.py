@@ -216,7 +216,7 @@ class SubmissionAttemptPayload:
     venue_offer_id: str | None = None
     last_event_seq: int | None = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self) -> None:  # noqa: C901, PLR0912
         if not self.execution_decision_id.strip():
             raise ValueError("execution_decision_id must be non-empty")
         try:
@@ -367,7 +367,7 @@ class SubmitCancelledNotSent(asyncio.CancelledError):
         self.outcome = SubmitNotSent(reason)
 
 
-def _structured_rejection_reason(body: Any) -> str | None:
+def _structured_rejection_reason(body: Any) -> str | None:  # noqa: PLR0911
     """Extract a bounded reason only from known Bitfinex error shapes."""
     if isinstance(body, list):
         # Funding REST responses use [mts, type, message_id, _, offer, code, status, text].
@@ -504,10 +504,10 @@ def key_refused_on_submit(outcome: object) -> VenueCredentialRejectedError | Non
     )
 
 
-def classify_submit_response(
+def classify_submit_response(  # noqa: C901, PLR0911, PLR0912
     http_status: int | None = None,
     parsed_body: Any = None,
-    transport_started: bool = False,
+    transport_started: bool = False,  # noqa: FBT001, FBT002
     exception: BaseException | None = None,
 ) -> SubmitOutcome:
     """Classify one submit attempt using conservative evidence rules.

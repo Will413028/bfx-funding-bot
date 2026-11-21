@@ -34,5 +34,5 @@ class HeartbeatMiddleware:
         finally:
             try:
                 self._probe.record_heartbeat("executor")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 log.warning("heartbeat_record_failed err=%r", exc)

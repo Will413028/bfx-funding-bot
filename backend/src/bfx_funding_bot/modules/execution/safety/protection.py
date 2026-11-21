@@ -289,7 +289,7 @@ class AutomaticProtection:
                         await task
         return getter.result() if getter in done else None
 
-    async def resume_if_cleared(self) -> bool:
+    async def resume_if_cleared(self) -> bool:  # noqa: PLR0911
         """Lift the current HALTED/auto if its condition has cleared; True if lifted.
 
         Cleared means: nothing pending or queued, the halt is at least
@@ -302,7 +302,7 @@ class AutomaticProtection:
             return False
         try:
             current = await self._trading.current()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log.warning("auto_resume_state_unreadable error=%r", exc)
             return False
         if current is None or current.state != HALTED or current.cause != CAUSE_AUTO:
@@ -329,7 +329,7 @@ class AutomaticProtection:
         except IllegalTradingTransition as exc:
             log.warning("auto_resume_refused state_id=%s error=%s", current.id, exc)
             return False
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log.warning("auto_resume_failed state_id=%s error=%r", current.id, exc)
             return False
         if not result.changed:
@@ -361,7 +361,7 @@ class AutomaticProtection:
                     result = await self._trading.transition(
                         HALTED, cause=CAUSE_AUTO, actor=f"auto:{first.trigger}", reason=reason,
                         now_ms=self._clock())
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
                     error = repr(exc)
                 else:
                     error = None

@@ -100,7 +100,7 @@ class _SqlCommandJournal:
         self._session_factory = session_factory
         self._max_snapshot_age_ms = max_snapshot_age_ms
 
-    async def authorize(
+    async def authorize(  # noqa: PLR0913
         self, session: AsyncSession, scope: Scope, attempt: CommandAttempt,
         basis_token: str, *, now_ms: int, locked_guard: LockedCommandGuard,
     ) -> Authorized | CommandRefused:
@@ -256,7 +256,7 @@ class _SqlLedgerObservations:
     ) -> QueryHandle:
         return await clock.begin_query(session, scope, started_at_ms)
 
-    async def accept(
+    async def accept(  # noqa: PLR0913, PLR0917
         self,
         session: AsyncSession,
         scope: Scope,
@@ -307,7 +307,7 @@ def build_ledger_managed_offers() -> LedgerManagedOffers:
 
 
 class _LedgerObservationCycle:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self, session_factory: async_sessionmaker[AsyncSession], venue: VenueObservation,
         *, journal_port: LedgerJournal, observations: LedgerObservations,
         now_ms: Callable[[], int], grace_ms: int, settle_ms: int,
@@ -356,7 +356,7 @@ class _LedgerObservationCycle:
         return CycleResult(accepted.decision, accepted.observation_id, resolutions)
 
 
-def build_observation_sink(
+def build_observation_sink(  # noqa: PLR0913
     session_factory: async_sessionmaker[AsyncSession], venue: VenueObservation,
     *, grace_ms: int, journal_port: LedgerJournal | None = None,
     observations: LedgerObservations | None = None,

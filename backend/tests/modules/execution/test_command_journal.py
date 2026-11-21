@@ -75,7 +75,7 @@ class Uncertainty:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("command", ["submit", "cancel", "snapshot_changed"])
-async def test_gate_port_guard_transaction_and_transport_after_commit(command):
+async def test_gate_port_guard_transaction_and_transport_after_commit(command):  # noqa: C901
     ready = _ready()
     ready = replace(ready, decision=ready.decision.model_copy(update={"offer_amount_usdt": Decimal("12.49990001")}))
     sessions = Sessions(SimpleNamespace(outcome="ready", applied_rate=ready.decision.offer_rate,

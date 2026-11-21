@@ -207,11 +207,11 @@ class BitfinexVenueObservation:
                       await self._rest.fetch_active_loan_observations(ctx=self._ctx, budget=budget))
         return Observation(
             wallets, offers, credits + loans,
-            Coverage(True, True, True, True, False, False, 1, 1, 1, 1, 0, 0),
+            Coverage(True, True, True, True, False, False, 1, 1, 1, 1, 0, 0),  # noqa: FBT003
             self._clock_ms(),
         )
 
-    async def _history[Row, Normalized](
+    async def _history[Row, Normalized](  # noqa: PLR0913
         self, fetch: Callable[..., Awaitable[CoveredHistory[Row]]],
         normalize: Callable[[Row], Normalized], *, stream: str, symbol: str,
         start_ms: int, end_ms: int, budget: ObservationRequestBudget,
@@ -222,11 +222,11 @@ class BitfinexVenueObservation:
                 ctx=self._ctx, symbol=symbol, start_ms=start_ms, end_ms=end_ms,
                 max_pages=HISTORY_PAGE_CAP, budget=budget,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             # A failed pager cannot certify any range. Count attempted requests,
             # including the failed page; do not retain uncertified partial rows.
             self._alert(stream, symbol, reason=type(exc).__name__)
-            return CoveredHistory((), False, budget.requests_used - before, start_ms, end_ms)
+            return CoveredHistory((), False, budget.requests_used - before, start_ms, end_ms)  # noqa: FBT003
         rows: list[Normalized] = []
         complete = covered.complete
         for row in covered.rows:
@@ -259,7 +259,7 @@ class BitfinexVenueObservation:
         # The window already carries some terminal rows; only the others need a lookup.
         need = sorted(set(vanished) - have)
         if not need:
-            return _OfferEnds(windowed, (), True, (), frozenset())
+            return _OfferEnds(windowed, (), True, (), frozenset())  # noqa: FBT003
         lookup = await self._rest.fetch_offer_history_by_ids(
             ctx=self._ctx, symbol=symbol, offer_ids=need, budget=budget)
         by_id: list[OfferHistory] = []

@@ -53,7 +53,7 @@ def _direction(event: Mapping[str, Any]) -> tuple[str | None, str | None]:
     )
 
 
-def compute_m1(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+def compute_m1(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:  # noqa: C901
     signals: dict[tuple[str, str, str, str], Mapping[str, Any]] = {}
     divergences: dict[tuple[str, str, str, str], Mapping[str, Any]] = {}
     quality = {"direction_unknown": 0, "orphan_divergence": 0, "malformed_events": 0}
@@ -175,7 +175,7 @@ def _budget_hours(value: Any) -> int | None:
     return value
 
 
-def compute_m2(manifest: Mapping[str, Any] | None) -> dict[str, Any]:
+def compute_m2(manifest: Mapping[str, Any] | None) -> dict[str, Any]:  # noqa: C901, PLR0911, PLR0912
     if manifest is None:
         return _unavailable("WFO window manifest not provided")
     if not isinstance(manifest, Mapping):

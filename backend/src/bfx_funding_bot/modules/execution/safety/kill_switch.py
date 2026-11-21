@@ -106,7 +106,7 @@ def _bounded(text: str, *, secrets: Iterable[str] = ()) -> str:
 
 
 class KillSwitch:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         trading_state: TradingStateRepository,
@@ -227,7 +227,7 @@ class KillSwitch:
                 symbols.update(record.symbol for record in
                                await self._uncertainty.list_open(session, scope))
                 symbols.update(await self._offers.live_symbols(session, scope))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             error = f"scope_unreadable: {type(exc).__name__}"
         currencies = {currency for currency in map(funding_currency, symbols) if currency}
         unmapped = sorted(symbol for symbol in symbols if funding_currency(symbol) is None)
@@ -245,7 +245,7 @@ class KillSwitch:
         status: str | None
         try:
             answer = await self._venue.cancel_all_funding_offers(currency=currency, ctx=self._ctx)
-        except Exception as exc:  # recorded, then the next currency is still tried
+        except Exception as exc:  # recorded, then the next currency is still tried  # noqa: BLE001
             phase, status = "failed", None
             detail = _bounded(f"{type(exc).__name__}: {exc}", secrets=(
                 self._ctx.credentials.api_key, self._ctx.credentials.api_secret))
@@ -261,14 +261,14 @@ class KillSwitch:
         return CancelAllOutcome(currency=currency, phase=phase, detail=detail, venue_status=status,
                                 attempt_id=attempt, recorded=requested and recorded)
 
-    async def _record_only(self, halted: TradingState, currency: str, actor: str,
+    async def _record_only(self, halted: TradingState, currency: str, actor: str,  # noqa: PLR0913, PLR0917
                            phase: str, detail: str, request: UUID | None) -> CancelAllOutcome:
         attempt = uuid4()
         recorded = await self._append(halted, attempt, currency, phase, actor, None, detail, request)
         return CancelAllOutcome(currency=currency, phase=phase, detail=detail,
                                 attempt_id=attempt, recorded=recorded)
 
-    async def _append(self, halted: TradingState, attempt: UUID, currency: str, phase: str,
+    async def _append(self, halted: TradingState, attempt: UUID, currency: str, phase: str,  # noqa: PLR0913, PLR0917
                       actor: str, venue_status: str | None, detail: str | None,
                       request: UUID | None) -> bool:
         """Record one phase. A failed audit write never stops the kill itself."""

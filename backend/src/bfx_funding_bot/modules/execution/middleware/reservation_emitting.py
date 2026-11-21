@@ -25,7 +25,7 @@ from bfx_funding_bot.modules.ledger import ManagedOfferReader, UncertaintyReader
 class ReservationEmittingMiddleware:
     """ExecutorPort wrapper: every command passes the account command gate."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         inner: VenueOrderPort,
         *,

@@ -53,7 +53,7 @@ log = logging.getLogger(__name__)
 SYSTEM_RESOLVER = "system:reconcile"
 
 
-def _terms(
+def _terms(  # noqa: PLR0913, PLR0917
     attempt_id: UUID, symbol: str, payload: object, digest: str, started_at_ms: int,
     unknown_recorded_at_ms: int,
 ) -> UnknownTerms | None:

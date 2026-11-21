@@ -18,7 +18,7 @@ from bfx_funding_bot.modules.candles.repository import (
 from bfx_funding_bot.modules.market import BackfillCursorStuck, BackfillStats, SeriesSpec
 
 
-async def backfill_candles(
+async def backfill_candles(  # noqa: PLR0913
     *,
     bitfinex: BitfinexREST,
     session: AsyncSession,
@@ -55,7 +55,7 @@ async def backfill_candles(
     return fetched, stored
 
 
-async def backfill_candles_to_earliest(
+async def backfill_candles_to_earliest(  # noqa: PLR0913
     *,
     client: BitfinexREST,
     session: AsyncSession,

@@ -50,7 +50,7 @@ class CapitalPolicyGuard:
 
     async def evaluate(self, decision: DecisionPayload, ctx: AccountContext) -> GuardResult:
         if decision.decision_outcome != DecisionOutcome.POST:
-            return GuardResult(True, self.name)
+            return GuardResult(True, self.name)  # noqa: FBT003
         try:
             scope = self.scope
             if ctx.account_id != str(scope.exchange_account_id) or not ctx.capital_cell_id:
@@ -59,15 +59,15 @@ class CapitalPolicyGuard:
                 CapitalScope(scope.exchange_account_id, decision.symbol, ctx.capital_cell_id),
                 now_ms=self.clock(), session=ctx.command_session)
             if isinstance(view, CapitalBlocked):
-                return GuardResult(False, self.name, f"capital_unavailable: {view.reason}")
+                return GuardResult(False, self.name, f"capital_unavailable: {view.reason}")  # noqa: FBT003
             amount = decision.offer_amount_usdt
             if amount is None:
                 raise ValueError("offer_amount_missing")
             if not amount.is_finite() or amount <= 0 or amount > view.budget.max_new_offer:
-                return GuardResult(False, self.name, view.budget.reason or "insufficient_deployable_funds")
-            return GuardResult(True, self.name)
-        except Exception as exc:
-            return GuardResult(False, self.name, f"capital_unavailable: {exc}")
+                return GuardResult(False, self.name, view.budget.reason or "insufficient_deployable_funds")  # noqa: FBT003
+            return GuardResult(True, self.name)  # noqa: FBT003
+        except Exception as exc:  # noqa: BLE001
+            return GuardResult(False, self.name, f"capital_unavailable: {exc}")  # noqa: FBT003
 
 
 class ManualKillGuard:
@@ -116,7 +116,7 @@ class ManualKillGuard:
                 state = await self._trading_state.current(ctx.command_session)
             else:
                 state = await self._trading_state.current()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return GuardResult(
                 allowed=False, guard_name=self.name,
                 reason=f"trading state unreadable — failing closed: {exc!r}",
@@ -219,7 +219,7 @@ class UncertaintyGuard:
     def __init__(self, *, reader: UncertaintyReader) -> None:
         self._reader = reader
 
-    async def evaluate(
+    async def evaluate(  # noqa: PLR0911
         self, decision: DecisionPayload, ctx: AccountContext,
     ) -> GuardResult:
         if decision.decision_outcome != DecisionOutcome.POST:
@@ -238,7 +238,7 @@ class UncertaintyGuard:
                 Scope(account_id),
                 decision.symbol,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return GuardResult(
                 allowed=False,
                 guard_name=self.name,

@@ -30,7 +30,7 @@ def _outcome(result: BacktestResult, month_mts: int) -> WindowOutcome:
     )
 
 
-def evaluate_oos_windows(
+def evaluate_oos_windows(  # noqa: PLR0913
     candles: list[FundingCandle],
     windows: list[WfoWindow],
     make_strategy: Callable[[], Strategy],

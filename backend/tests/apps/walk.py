@@ -24,7 +24,7 @@ def _is_legacy(obj: object) -> bool:
     )
 
 
-def _children(obj: Any) -> Iterator[tuple[str, Any]]:
+def _children(obj: Any) -> Iterator[tuple[str, Any]]:  # noqa: C901
     if isinstance(obj, dict):
         for key, value in obj.items():
             yield f"[{key!r}]", value

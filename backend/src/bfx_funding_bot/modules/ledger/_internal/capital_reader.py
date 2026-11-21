@@ -335,7 +335,7 @@ async def _read(
     # Current open uncertainty: an UNKNOWN without resolution, or any quarantine
     # the basis has not seen (it keeps blocking until a new basis lists it).
     uncertainties: list[UncertaintyFact] = [
-        UncertaintyFact(attempt_id, account, symbol, True)
+        UncertaintyFact(attempt_id, account, symbol, True)  # noqa: FBT003
         for attempt_id, symbol in open_unknowns(
             [(row.attempt_id, row.symbol) for row in unresolved]
             + [(row.attempt_id, row.symbol) for row in tail],
@@ -345,7 +345,7 @@ async def _read(
     ]
     seen = {row.quarantine_id for row in listed}
     uncertainties.extend(
-        UncertaintyFact(row.quarantine_id, account, row.symbol, True)
+        UncertaintyFact(row.quarantine_id, account, row.symbol, True)  # noqa: FBT003
         for row in later
         if row.quarantine_id not in seen
     )

@@ -107,7 +107,7 @@ def main() -> int:
     except GrantRefusedError as exc:
         print(json.dumps({"status": "blocked", "reason": str(exc)}), file=sys.stderr)
         return 2
-    except Exception:
+    except Exception:  # noqa: BLE001
         # Never expose a connection URL, DB bind values or credentials.
         print('{"status":"blocked","reason":"grant_failed"}', file=sys.stderr)
         return 2

@@ -89,7 +89,7 @@ def _role_exists(conn: Connection, name: str) -> bool:
     )
 
 
-def resolve_offer_cells(
+def resolve_offer_cells(  # noqa: C901
     links: Iterable[Link],
     decisions: Iterable[tuple[str, str | None, str | None]],
     diagnostics: Iterable[tuple[Any, Any]],
@@ -149,7 +149,7 @@ def _by_scope(conn: Connection) -> Mapping[Scope, list[Link]]:
     return links
 
 
-def _require_frozen_source(conn: Connection, has_rows: bool) -> None:
+def _require_frozen_source(conn: Connection, has_rows: bool) -> None:  # noqa: FBT001
     if not has_rows:
         return
     authority = conn.execute(text(

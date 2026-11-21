@@ -190,7 +190,7 @@ class LedgerOperatorEvidence:
             raise ResolutionRejected("incomplete_offer_history_coverage")
         return VerifiedEvidence(evidence_ref, query.started_at_ms, observation.query_finished_at_ms)
 
-    async def resolution_context(
+    async def resolution_context(  # noqa: PLR0911
         self, session: AsyncSession, scope: Scope, subject: ResolutionSubject
     ) -> ResolutionEvidence:
         """What an operator may cite now: the latest accepted observation and what the attempt

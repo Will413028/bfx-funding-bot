@@ -99,7 +99,7 @@ def executed_tests(junit_dir: Path) -> int:
         raise SystemExit(f"no JUnit reports under {junit_dir}")
     executed = 0
     for report in reports:
-        for case in ElementTree.parse(report).getroot().iter("testcase"):
+        for case in ElementTree.parse(report).getroot().iter("testcase"):  # noqa: S314
             if case.find("skipped") is None:
                 executed += 1
     return executed

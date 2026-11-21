@@ -90,7 +90,7 @@ class _CandlesRepoProtocol(Protocol):
 
 
 class SignalEngine:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         phase: Phase,
@@ -109,7 +109,7 @@ class SignalEngine:
         self.quote_store = quote_store
         self._clock = clock or (lambda: int(time.time() * 1000))
 
-    async def process_candle(
+    async def process_candle(  # noqa: PLR0913
         self,
         *,
         cell: CellConfig,
@@ -213,7 +213,7 @@ class SignalEngine:
             },
         })
 
-    async def _emit_signal_divergence_warn(
+    async def _emit_signal_divergence_warn(  # noqa: PLR0913
         self,
         correlation_id: UUID,
         cell: CellConfig,

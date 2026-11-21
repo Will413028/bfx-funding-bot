@@ -318,7 +318,7 @@ class _FakeRunner:
         self.image_labels = json.dumps(IMAGE_LABELS)
         self.streams: list[tuple[str, ...]] = []
 
-    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    def __call__(self, command: tuple[str, ...], *, timeout: float | None = None, input_text: str | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:  # noqa: C901
         self.commands.append(command)
         self.timeouts.append(timeout)
         if _is_verifier(command):

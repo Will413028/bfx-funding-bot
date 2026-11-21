@@ -156,7 +156,7 @@ class _Classifier:
             self.block(symbol, "credit_provenance_conflict", venue_offer_id=venue_id)
 
 
-async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID) -> UUID:
+async def write_basis(session: AsyncSession, scope: Scope, observation_id: UUID) -> UUID:  # noqa: C901, PLR0912, PLR0915
     """Classify the just-accepted observation and write its basis in this transaction.
 
     Every input is a stored row of the observation, its evidence included (the port's
@@ -590,7 +590,7 @@ def _trades_cover(anchor_ms: int, observation: LedgerObservationRow) -> bool:
     )
 
 
-def _can_quarantine(
+def _can_quarantine(  # noqa: PLR0913, PLR0917
     started_at_ms: int,
     venue_id: str,
     active_ids: Iterable[str],

@@ -95,7 +95,7 @@ class OfferEnvelopeGuard:
     """
     name = OFFER_ENVELOPE
 
-    def __init__(self, *, authority: CapitalAuthority, offers: ManagedOfferReader, scope: Scope,
+    def __init__(self, *, authority: CapitalAuthority, offers: ManagedOfferReader, scope: Scope,  # noqa: PLR0913
                  session_factory: async_sessionmaker[AsyncSession], book: FundingBookProvider,
                  clock: Callable[[], int]) -> None:
         self._authority = authority
@@ -115,11 +115,11 @@ class OfferEnvelopeGuard:
         return applied.policy, count
 
     def _block(self, reason: str) -> GuardResult:
-        return GuardResult(False, self.name, reason)
+        return GuardResult(False, self.name, reason)  # noqa: FBT003
 
-    async def evaluate(self, decision: DecisionPayload, ctx: AccountContext) -> GuardResult:
+    async def evaluate(self, decision: DecisionPayload, ctx: AccountContext) -> GuardResult:  # noqa: C901, PLR0911, PLR0912
         if decision.decision_outcome != DecisionOutcome.POST:
-            return GuardResult(True, self.name)
+            return GuardResult(True, self.name)  # noqa: FBT003
         amount = decision.offer_amount_usdt
         if amount is None or not amount.is_finite() or amount <= 0:
             return self._block("offer_amount_invalid")
@@ -133,7 +133,7 @@ class OfferEnvelopeGuard:
             else:
                 async with self._session_factory() as session:
                     policy, open_offers = await self._policy_and_open(session, decision.symbol)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return self._block(f"policy_unavailable: {exc}")
         envelope = policy.envelope
         if envelope is None or policy.max_offer_amount is None:
@@ -150,7 +150,7 @@ class OfferEnvelopeGuard:
             return self._block(f"open_offers {open_offers} >= limit {envelope.max_open_offers}")
         try:
             snapshot = self._book.snapshot(decision.symbol, now_ms=self._clock())
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return self._block(f"rate_reference_unavailable: {exc}")
         if (snapshot is None or snapshot.symbol != decision.symbol
                 or not snapshot.sequence_valid or not snapshot.checksum_valid):
@@ -163,7 +163,7 @@ class OfferEnvelopeGuard:
             return self._block(f"offer_rate {rate} < floor {floor} (median bid {reference} x "
                                f"{envelope.rate_floor_ratio}, absolute "
                                f"{envelope.min_daily_rate})")
-        return GuardResult(True, self.name)
+        return GuardResult(True, self.name)  # noqa: FBT003
 
 
 class CommandThrottle:
@@ -176,7 +176,7 @@ class CommandThrottle:
     cancel waits for the next token and never counts toward that stop.
     """
 
-    def __init__(self, *, capacity: int, refill_per_second: float, trip_blocks: int,
+    def __init__(self, *, capacity: int, refill_per_second: float, trip_blocks: int,  # noqa: PLR0913
                  trip_window_s: float, protection: ProtectionPort | None,
                  clock: Callable[[], float] = time.monotonic) -> None:
         if capacity <= 0 or refill_per_second <= 0 or trip_blocks <= 0 or trip_window_s <= 0:
@@ -233,7 +233,7 @@ def require_pre_trade_limits(cfg: PreTradeLimitsCfg | None) -> PreTradeLimitsCfg
     return cfg
 
 
-def build_pre_trade_guards(*, authority: CapitalAuthority, offers: ManagedOfferReader,
+def build_pre_trade_guards(*, authority: CapitalAuthority, offers: ManagedOfferReader,  # noqa: PLR0913
                            scope: Scope, session_factory: async_sessionmaker[AsyncSession],
                            book: FundingBookProvider | None,
                            clock: Callable[[], int]) -> list[OfferEnvelopeGuard]:

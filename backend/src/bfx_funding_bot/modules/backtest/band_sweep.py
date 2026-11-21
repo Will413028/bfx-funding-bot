@@ -44,7 +44,7 @@ def enumerate_bands() -> list[tuple[Decimal, Decimal]]:
 _GAP_MINUTES_DEFAULT = 30  # matches BacktestConfig.gap_minutes default
 
 
-def simulate_period_path(
+def simulate_period_path(  # noqa: PLR0913
     candles: list[FundingCandle],
     *,
     strategy_spec: ResearchStrategySpec,
@@ -215,7 +215,7 @@ def _median_active(strat: list[WindowOutcome], base: list[WindowOutcome]) -> Dec
     return percentile(paired, Decimal("0.5")) if paired else Decimal("0")
 
 
-def build_band_result(
+def build_band_result(  # noqa: PLR0913
     *,
     t1: Decimal,
     t2: Decimal,

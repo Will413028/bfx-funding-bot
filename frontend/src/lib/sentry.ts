@@ -4,6 +4,9 @@
 // every string, user, cookies and auth headers are dropped, and no trace headers are
 // added to outgoing requests; an event that cannot be scrubbed is not sent. Notifications are decided in Sentry (new issue,
 // regression); paging stays on symptoms.
+
+import { isProduction, sentryRelease } from "@/lib/env";
+
 const REDACTED = "[redacted]";
 const EMAIL = /[A-Za-z0-9._%+-]+(?:@|%40)[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 const IPV4 = /(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9.])/g;
@@ -68,8 +71,8 @@ export function scrubEvent<T extends object>(event: T): T | null {
 export function sentryOptions(dsn: string) {
   return {
     dsn,
-    release: process.env.NEXT_PUBLIC_SENTRY_RELEASE || undefined,
-    environment: process.env.NODE_ENV === "production" ? "prod" : "development",
+    release: sentryRelease,
+    environment: isProduction ? "prod" : "development",
     sendDefaultPii: false,
     tracesSampleRate: 0,
     tracePropagationTargets: [],

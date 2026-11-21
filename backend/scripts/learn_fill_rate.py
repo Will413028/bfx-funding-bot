@@ -47,7 +47,7 @@ _MODEL_VERSION = "g13-candle-v2"  # v2: horizon counts only candles wholly insid
 _SCHEMA_VERSION = 1
 
 
-def build_fill_model_artifact(
+def build_fill_model_artifact(  # noqa: PLR0913
     *,
     source: str,
     symbol: str,
@@ -115,7 +115,7 @@ def build_fill_model_artifact(
     )
 
 
-async def learn_and_store(
+async def learn_and_store(  # noqa: PLR0913
     session: AsyncSession,
     *,
     symbol: str,

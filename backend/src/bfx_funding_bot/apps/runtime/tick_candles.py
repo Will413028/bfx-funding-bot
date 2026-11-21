@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 BOUNDARY_GAP_FILL_TIMEOUT_S = 10.0
 
 
-async def read_tick_candles(
+async def read_tick_candles(  # noqa: PLR0913
     *,
     session_factory: async_sessionmaker[AsyncSession],
     bitfinex: BitfinexREST,

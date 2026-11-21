@@ -112,7 +112,7 @@ def _strategy_attributes(
     return {}
 
 
-def _normalize_signal_score(
+def _normalize_signal_score(  # noqa: PLR0911
     cell: CellConfig, diagnostics: StrategyDiagnostics,
     candle: FundingCandle, ld: LendDecision | None,
 ) -> float:

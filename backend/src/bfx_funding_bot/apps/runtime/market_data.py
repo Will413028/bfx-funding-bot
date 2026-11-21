@@ -142,7 +142,7 @@ class MarketDataRuntime:
                 reconnect_count_last_hour=self.ws_client.reconnect_count_last_hour(),
             )
 
-    async def _ws_consume_with_reconnect(self) -> None:
+    async def _ws_consume_with_reconnect(self) -> None:  # noqa: C901, PLR0912, PLR0915
         """WS recv + reconnect loop. Never exits unless daemon shuts down.
 
         Spec: Flow 3 (WS disconnect → reconnect). Exponential backoff via

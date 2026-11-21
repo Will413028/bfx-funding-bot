@@ -96,7 +96,7 @@ def _credits(
     return by_symbol
 
 
-async def symbol_verdicts(
+async def symbol_verdicts(  # noqa: C901, PLR0912, PLR0913, PLR0915
     session: AsyncSession,
     *,
     previous: AcceptedCapitalBasisRow | None,
