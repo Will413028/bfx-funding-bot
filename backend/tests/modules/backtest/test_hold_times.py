@@ -124,12 +124,23 @@ def test_the_rule_is_not_run_where_it_cannot_be_judged() -> None:
     # An FRR-marked credit (rate 0) has no trigger a close could be under.
     frr = measure_holds([_credit(1, opened_h=2, held_h=5, rate=Decimal(0))], _reference(low), MARGIN)
     assert frr[0].predicted_ms is None
-    # A 30-day credit: the series ends 5 days in without the rule firing, so the other
-    # 25 days of candles that could still have fired it are missing.
+    # A 30-day credit on a 5-day series: 25 days of candles that could fire the rule are
+    # missing, so it is left out whether or not the rule fired on the days that exist.
     long_credit = _credit(2, opened_h=2, held_h=3, period_days=30)
     assert measure_holds([long_credit], _reference({}), MARGIN)[0].predicted_ms is None
-    # Had the rule fired inside the loaded range, the prediction stands.
-    assert measure_holds([long_credit], _reference(low), MARGIN)[0].predicted_ms == H
+    assert measure_holds([long_credit], _reference(low), MARGIN)[0].predicted_ms is None
+
+
+def test_a_hole_in_the_series_keeps_the_credit_out_of_the_comparison() -> None:
+    full = _reference({})
+    credit = _credit(1, opened_h=1, held_h=1)
+    assert measure_holds([credit], full, MARGIN)[0].predicted_ms == 48 * H
+    # Hours 3..59 are missing: most of the term has no candle that could fire the rule.
+    holed = [c for c in full if not T0 + 3 * H <= c.mts < T0 + 60 * H]
+    assert measure_holds([credit], holed, MARGIN)[0].predicted_ms is None
+    # A few missing hours are tolerated (the series drops isolated slots).
+    nearly = [c for c in full if c.mts not in (T0 + 7 * H, T0 + 20 * H)]
+    assert measure_holds([credit], nearly, MARGIN)[0].predicted_ms == 48 * H
 
 
 def test_a_loan_that_ends_as_a_same_shaped_credit_opens_is_flagged() -> None:
@@ -141,3 +152,7 @@ def test_a_loan_that_ends_as_a_same_shaped_credit_opens_is_flagged() -> None:
                         amount=Decimal("250"), opened_mts=T0 + 2 * H, closed_mts=T0 + 48 * H)
     assert loans_that_became_credits([loan, used, other]) == 1
     assert loans_that_became_credits([loan, other]) == 0
+    # Two loans cannot both have become the one credit.
+    twin = EndedCredit(credit_id=4, kind="loan", symbol="fUST", rate=RATE, period_days=2,
+                       amount=Decimal("100"), opened_mts=T0, closed_mts=T0 + 2 * H)
+    assert loans_that_became_credits([loan, twin, used]) == 1

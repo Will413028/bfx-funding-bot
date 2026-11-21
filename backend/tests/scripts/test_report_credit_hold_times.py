@@ -12,6 +12,7 @@ import pytest
 import scripts.report_credit_hold_times as report
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.hold_times import EndedCredit
+from bfx_funding_bot.modules.live_validation.tables import FundingCreditHistoryRow
 
 H = 3_600_000
 T0 = 1_768_003_200_000  # 2026-01-10T00:00:00Z
@@ -58,6 +59,7 @@ def test_report_groups_by_kind_and_places_the_measurement(
     assert abs(Decimal(symbol["summaries"]["credit"]["position"]) - Decimal("0.5")) < Decimal("1e-9")
     assert symbol["loans_that_look_converted"] == 0
     assert symbol["credits"][1]["held_hours"] == "1.0000"
+    assert symbol["summaries"]["credit"]["median_held_hours"] == "24.5000"
     assert [c["credit_id"] for c in symbol["credits"]] == [1, 2, 3]
     assert symbol["credits"][1]["early"] is True
     markdown = out.read_text()
@@ -84,11 +86,48 @@ def test_a_bad_margin_is_refused(margin: str) -> None:
         report._parse_args([*good, "--refinance-margin", margin])
 
 
-def test_a_sample_pooled_over_accounts_is_refused() -> None:
+def _row(credit_id: int, account: UUID, *, closed: int | None, amount: str = "-100") -> FundingCreditHistoryRow:
+    return FundingCreditHistoryRow(
+        exchange_account_id=account, kind="credit", credit_id=credit_id, symbol="fUST", side=1,
+        mts_create=T0, mts_update=T0, amount=Decimal(amount), status="CLOSED", rate=RATE,
+        period_days=2, mts_opening=T0 + H, mts_last_payout=closed)
+
+
+def test_rows_become_ended_credits_of_one_account() -> None:
     one, two = UUID(int=1), UUID(int=2)
-    report.single_account([one, one], "fUST")
+    credits, open_rows, account = report.credits_from_rows(
+        [_row(1, one, closed=T0 + 5 * H), _row(2, one, closed=None)], "fUST")
+    assert (len(credits), open_rows, account) == (1, 1, one)
+    assert (credits[0].amount, credits[0].opened_mts, credits[0].closed_mts) == (
+        Decimal("100"), T0 + H, T0 + 5 * H)
+    # A sample pooled over accounts is refused, whichever rows are still open.
     with pytest.raises(SystemExit, match="2 exchange accounts"):
-        report.single_account([one, two, one], "fUST")
+        report.credits_from_rows([_row(1, one, closed=T0 + 5 * H), _row(2, two, closed=None)], "fUST")
+    assert report.credits_from_rows([], "fUST") == ([], 0, None)
+
+
+def test_one_report_covers_one_account_across_symbols_and_records_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    one, two = UUID(int=1), UUID(int=2)
+
+    def loader(accounts: list[UUID]):  # type-free helper: returns the stubbed _load
+        async def load(symbols: list[str], account_id: UUID | None) -> list[report.SymbolData]:
+            return [report.SymbolData(sym, _data().credits, 0, _data().reference, acc)
+                    for sym, acc in zip(symbols, accounts, strict=True)]
+        return load
+
+    out = tmp_path / "hold.md"
+    argv = ["--registry-entry", "x", "--symbols", "fUSD,fUST", "--output", str(out)]
+    monkeypatch.setattr(report, "_load", loader([one, two]))
+    with pytest.raises(SystemExit, match="2 exchange accounts"):
+        asyncio.run(report._amain(argv))
+    monkeypatch.setattr(report, "_load", loader([one, one]))
+    assert asyncio.run(report._amain(argv)) == 0
+    payload = json.loads(out.with_suffix(".json").read_text())
+    assert payload["symbols"][0]["exchange_account_id"] == str(one)
+    record = json.loads(out.with_suffix(".run.json").read_text())
+    assert str(one) in json.dumps(record)
 
 
 def test_candles_are_loaded_to_the_term_end_of_every_credit() -> None:

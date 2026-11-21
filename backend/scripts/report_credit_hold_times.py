@@ -82,14 +82,30 @@ class SymbolData:
     credits: list[EndedCredit]
     open_rows: int  # rows without a close time, left out
     reference: list[FundingCandle]
+    account_id: UUID | None = None  # the one account the credits belong to
 
 
-def single_account(account_ids: Sequence[UUID], symbol: str) -> None:
+def single_account(account_ids: Sequence[UUID], scope: str) -> UUID | None:
     """One report describes one account's borrowers: refuse a pooled sample."""
-    distinct = sorted({str(account_id) for account_id in account_ids})
+    distinct = sorted(set(account_ids), key=str)
     if len(distinct) > 1:
-        raise SystemExit(f"{symbol}: credits from {len(distinct)} exchange accounts; pass "
+        raise SystemExit(f"{scope}: credits from {len(distinct)} exchange accounts; pass "
                          "--exchange-account-id")
+    return distinct[0] if distinct else None
+
+
+def credits_from_rows(
+    rows: Sequence[FundingCreditHistoryRow], symbol: str
+) -> tuple[list[EndedCredit], int, UUID | None]:
+    """Ended credits of one account, the rows left out for having no close, the account."""
+    account_id = single_account([row.exchange_account_id for row in rows], symbol)
+    credits = [
+        EndedCredit(credit_id=row.credit_id, kind=row.kind, symbol=row.symbol, rate=row.rate,
+                    period_days=row.period_days, amount=abs(row.amount),
+                    opened_mts=row.mts_opening, closed_mts=row.mts_last_payout)
+        for row in rows if row.mts_last_payout is not None
+    ]
+    return credits, len(rows) - len(credits), account_id
 
 
 def reference_end_mts(credits: Sequence[EndedCredit]) -> int:
@@ -112,21 +128,14 @@ async def _load(symbols: Sequence[str], account_id: UUID | None) -> list[SymbolD
                 rows = (await session.execute(query.order_by(
                     FundingCreditHistoryRow.mts_opening, FundingCreditHistoryRow.credit_id,
                 ))).scalars().all()
-                single_account([row.exchange_account_id for row in rows], symbol)
-                credits = [
-                    EndedCredit(credit_id=row.credit_id, kind=row.kind, symbol=row.symbol,
-                                rate=row.rate, period_days=row.period_days,
-                                amount=abs(row.amount), opened_mts=row.mts_opening,
-                                closed_mts=row.mts_last_payout)
-                    for row in rows if row.mts_last_payout is not None
-                ]
+                credits, open_rows, found_account = credits_from_rows(rows, symbol)
                 reference: list[FundingCandle] = []
                 if credits:
                     reference = await get_candles_in_range(
                         session, symbol=symbol, timeframe="1h", period_agg="p2",
                         start_mts=min(c.opened_mts for c in credits) - _REFERENCE_PAD_MS,
                         end_mts=reference_end_mts(credits))
-            out.append(SymbolData(symbol, credits, len(rows) - len(credits), reference))
+            out.append(SymbolData(symbol, credits, open_rows, reference, found_account))
     finally:
         await engine.dispose()
     return out
@@ -186,14 +195,19 @@ def to_json(
     rows_by_symbol: dict[str, list[HoldRow]], *, margin: Decimal,
 ) -> dict[str, object]:
     def summary(s: HoldSummary) -> dict[str, object]:
-        return {key: (str(value) if isinstance(value, Decimal) else value)
-                for key, value in vars(s).items()}
+        values = {key: (str(value) if isinstance(value, Decimal) else value)
+                  for key, value in vars(s).items()}
+        if s.median_held_hours is not None:
+            values["median_held_hours"] = str(s.median_held_hours.quantize(Decimal("0.0001")))
+        return values
 
     return {
         "refinance_margin": str(margin),
         "symbols": [
             {
-                "symbol": data.symbol, "open_rows_left_out": data.open_rows,
+                "symbol": data.symbol,
+                "exchange_account_id": str(data.account_id) if data.account_id else None,
+                "open_rows_left_out": data.open_rows,
                 "loans_that_look_converted": loans_that_became_credits(data.credits),
                 "summaries": {kind: summary(s) for kind, s in summaries.items()},
                 "credits": [
@@ -247,6 +261,9 @@ async def _amain(argv: Sequence[str]) -> int:
     if not loaded:
         logger.error("no ended credits for %s", symbols)
         return 2
+    # Across symbols too: one report, one account. The record names the account measured.
+    account_id = single_account([data.account_id for data in loaded if data.account_id],
+                                ",".join(symbols))
     missing = [data.symbol for data in loaded if not data.reference]
     if missing:
         logger.error("no 2-day candles over the credits of %s", missing)
@@ -266,8 +283,7 @@ async def _amain(argv: Sequence[str]) -> int:
     record = write_research_run_record(
         out, start,
         params={"symbols": symbols, "refinance_margin": margin,
-                "exchange_account_id": (str(args.exchange_account_id)
-                                        if args.exchange_account_id else None)},
+                "exchange_account_id": str(account_id) if account_id else None},
         # The credit rows themselves are in the .json output, whose hash the record carries.
         inputs=[fingerprint_candles(f"candles:{data.symbol}:p2", data.reference)
                 for data in loaded],

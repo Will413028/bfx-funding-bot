@@ -13,7 +13,7 @@ scenarios: 0 = the refinance scenario, 1 = held to maturity.
 """
 from __future__ import annotations
 
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -28,6 +28,8 @@ _MS_PER_HOUR = 3_600_000
 EARLY_TOLERANCE_MS = _MS_PER_HOUR
 # The borrower's view of the market at the close: the last hourly close, if recent.
 _MAX_REFERENCE_AGE_MS = 3 * _MS_PER_HOUR
+# The share of a credit's term the hourly series must cover for the rule to be judged on it.
+MIN_TERM_COVERAGE = Decimal("0.9")
 
 
 @dataclass(frozen=True)
@@ -97,22 +99,26 @@ def _rule_prediction(
     """The refinance rule's hold for this credit, or None when it cannot be run.
 
     It cannot when the rate is not a real fixed rate (0 marks an FRR credit: no
-    close can be under its trigger), when no candle overlaps the credit, or when
-    the rule did not fire but the series ends before the term does: the candles
-    that could still have fired it are missing.
+    close can be under its trigger), or when the candles do not cover the term:
+    the series ends early, or has a hole. A missing hour could have been the one
+    that fires the rule, so a credit with less than `MIN_TERM_COVERAGE` of its
+    term on the series is left out whether or not the rule fired on the rest.
     """
     if credit.rate <= 0:
         return None
+    mts = series[0]
+    end_mts = credit.opened_mts + term_ms
+    # Candles whose close falls inside the term, the hour the credit opened in included.
+    covered = bisect_left(mts, end_mts - _MS_PER_HOUR + 1) - bisect_right(
+        mts, credit.opened_mts - _MS_PER_HOUR)
+    if covered * _MS_PER_HOUR < MIN_TERM_COVERAGE * term_ms:
+        return None
     try:
-        predicted = held_ms_until_refinance(
+        return held_ms_until_refinance(
             series, lock_start_mts=credit.opened_mts, locked_rate=credit.rate,
             margin=margin, term_ms=term_ms)
     except BacktestIncomplete:
         return None
-    last_close_mts = series[0][-1] + _MS_PER_HOUR
-    if predicted == term_ms and last_close_mts < credit.opened_mts + term_ms - _MS_PER_HOUR:
-        return None
-    return predicted
 
 
 def _drop_at(
@@ -140,11 +146,16 @@ def loans_that_became_credits(credits: Sequence[EndedCredit], *, within_ms: int 
         if credit.kind == "credit":
             key = (credit.amount, credit.rate, credit.period_days)
             opened_by_shape.setdefault(key, []).append(credit.opened_mts)
-    return sum(
-        1 for loan in credits if loan.kind == "loan"
-        and any(abs(opened - loan.closed_mts) <= within_ms
-                for opened in opened_by_shape.get((loan.amount, loan.rate, loan.period_days), ()))
-    )
+    converted = 0
+    for loan in credits:
+        if loan.kind != "loan":
+            continue
+        openings = opened_by_shape.get((loan.amount, loan.rate, loan.period_days), [])
+        match = next((o for o in openings if abs(o - loan.closed_mts) <= within_ms), None)
+        if match is not None:
+            openings.remove(match)  # one credit explains one loan
+            converted += 1
+    return converted
 
 
 def _weighted_fraction(rows: Sequence[HoldRow], held: Sequence[int]) -> Decimal | None:
