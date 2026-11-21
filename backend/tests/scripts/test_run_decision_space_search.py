@@ -6,6 +6,7 @@ import json
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -25,6 +26,7 @@ from tests.modules.backtest.test_replay import write_day
 _HOUR = 3_600_000
 _T0 = 1_704_067_200_000  # 2024-01-01T00:00Z
 _REPO = Path(__file__).resolve().parents[2]
+_ENTRY = ["--registry-entry", "test-entry"]
 _CELLS = ["--cells", str(_REPO / "configs/cells.yaml"),
           "--ap-cells", str(_REPO / "configs/cells.experimental-p14.yaml")]
 
@@ -65,7 +67,7 @@ def test_period_arms_topic_scores_both_bounds_inside_the_tape(
     tmp_path: Path, inputs: tuple[Path, Path]
 ) -> None:
     out = tmp_path / "report.md"
-    rc = asyncio.run(_amain(["--topic", "period-arms", *_base(*inputs, out)]))
+    rc = asyncio.run(_amain([*_ENTRY, "--topic", "period-arms", *_base(*inputs, out)]))
     assert rc == 0
     payload = json.loads(out.with_suffix(".json").read_text())
     assert payload["n_trials"] == DEFAULT_N_TRIALS
@@ -90,7 +92,7 @@ def test_period_arms_topic_scores_both_bounds_inside_the_tape(
 def test_grid_topic_builds_one_arm_per_point(tmp_path: Path, inputs: tuple[Path, Path]) -> None:
     out = tmp_path / "grid.md"
     rc = asyncio.run(_amain([
-        "--topic", "grid", "--offsets", "0,0.5", "--periods", "2,30", "--wait-hours", "6,24",
+        *_ENTRY, "--topic", "grid", "--offsets", "0,0.5", "--periods", "2,30", "--wait-hours", "6,24",
         "--n-trials", str(DEFAULT_N_TRIALS + 7), *_base(*inputs, out),
     ]))
     assert rc == 0
@@ -114,7 +116,7 @@ def test_grid_size_excludes_the_baseline_point_and_duplicates() -> None:
 
 
 def test_grid_refuses_an_undercounted_trials_number(inputs: tuple[Path, Path]) -> None:
-    args = ["--topic", "grid", "--offsets", "0.1,0.2", "--periods", "2", "--wait-hours", "24",
+    args = [*_ENTRY, "--topic", "grid", "--offsets", "0.1,0.2", "--periods", "2", "--wait-hours", "24",
             "--tape-root", "/nonexistent", "--output", "/nonexistent/x.md"]
     with pytest.raises(SystemExit):
         _parse_args([*args, "--n-trials", str(DEFAULT_N_TRIALS + 1)])
@@ -123,7 +125,7 @@ def test_grid_refuses_an_undercounted_trials_number(inputs: tuple[Path, Path]) -
 
 def test_grid_requires_an_explicit_trials_number() -> None:
     with pytest.raises(SystemExit):
-        _parse_args(["--topic", "grid", "--offsets", "0.1", "--periods", "2", "--wait-hours", "24",
+        _parse_args([*_ENTRY, "--topic", "grid", "--offsets", "0.1", "--periods", "2", "--wait-hours", "24",
                      "--tape-root", "/nonexistent", "--output", "/nonexistent/x.md"])
 
 
@@ -139,12 +141,12 @@ def test_grid_requires_an_explicit_trials_number() -> None:
 ])
 def test_grid_rejects_bad_values_before_loading_anything(flags: list[str]) -> None:
     with pytest.raises(SystemExit):
-        _parse_args(["--topic", "grid", *flags, "--n-trials", "999",
+        _parse_args([*_ENTRY, "--topic", "grid", *flags, "--n-trials", "999",
                      "--tape-root", "/nonexistent", "--output", "/nonexistent/x.md"])
 
 
 def test_grid_accepts_a_quote_below_market() -> None:
-    args = _parse_args(["--topic", "grid", "--offsets=-0.02,0.02", "--periods", "2",
+    args = _parse_args([*_ENTRY, "--topic", "grid", "--offsets=-0.02,0.02", "--periods", "2",
                         "--wait-hours", "24", "--n-trials", "999",
                         "--tape-root", "/nonexistent", "--output", "/nonexistent/x.md"])
     assert args.grid.offsets == (Decimal("-0.02"), Decimal("0.02"))
@@ -187,7 +189,7 @@ def test_grid_topic_does_not_read_the_cells_files(tmp_path: Path, inputs: tuple[
     fixtures, tape = inputs
     out = tmp_path / "grid.md"
     rc = asyncio.run(_amain([
-        "--topic", "grid", "--offsets", "0.5", "--periods", "2", "--wait-hours", "24",
+        *_ENTRY, "--topic", "grid", "--offsets", "0.5", "--periods", "2", "--wait-hours", "24",
         "--n-trials", "999", "--fixtures", str(fixtures), "--tape-root", str(tape),
         "--symbols", "fUST", "--output", str(out), "--cells", str(tmp_path / "missing.yaml"),
     ]))
@@ -197,3 +199,94 @@ def test_grid_topic_does_not_read_the_cells_files(tmp_path: Path, inputs: tuple[
 def test_registered_trials_include_the_replayed_period_arms() -> None:
     # 38 before this runner + always_30d, mr_p2, mr_a30, adaptive_period on the replay.
     assert DEFAULT_N_TRIALS == 42
+
+
+def _grid_run(
+    inputs: tuple[Path, Path], out: Path, offsets: str, entry: str = "test-entry"
+) -> dict[str, Any]:
+    fixtures, tape = inputs
+    rc = asyncio.run(_amain([
+        "--registry-entry", entry, "--topic", "grid", "--offsets", offsets, "--periods", "2",
+        "--wait-hours", "24", "--n-trials", "999", "--fixtures", str(fixtures),
+        "--tape-root", str(tape), "--symbols", "fUST", "--output", str(out),
+    ]))
+    assert rc == 0
+    record: dict[str, Any] = json.loads(out.with_suffix(".run.json").read_text())
+    return record
+
+
+def test_a_run_leaves_a_record_of_its_config_inputs_and_outputs(
+    tmp_path: Path, inputs: tuple[Path, Path]
+) -> None:
+    record = _grid_run(inputs, tmp_path / "grid.md", "0.5")
+    assert record["registry_entry"] == "test-entry"
+    assert record["runner"] == "run_decision_space_search"
+    assert record["code_version"]
+    assert record["params"]["grid"] == {"offsets": ["0.5"], "periods": [2], "wait_hours": [24]}
+    by_name = {item["name"]: item for item in record["inputs"]}
+    # A 2-day grid reads p2 only: the loaded p30 and a30 series are not inputs of this run.
+    assert set(by_name) == {"tape:fUST", "candles:fUST:p2"}
+    assert by_name["tape:fUST"]["items"] == 152
+    assert (by_name["tape:fUST"]["first"], by_name["tape:fUST"]["last"]) == (
+        "fUST/2024-01-01.csv.gz", "fUST/2024-05-31.csv.gz")
+    assert [o["name"] for o in record["outputs"]] == ["grid.md", "grid.json"]
+
+
+def test_a_rerun_shares_the_config_hash_and_another_grid_or_entry_does_not(
+    tmp_path: Path, inputs: tuple[Path, Path]
+) -> None:
+    first = _grid_run(inputs, tmp_path / "a.md", "0.5")
+    rerun = _grid_run(inputs, tmp_path / "b.md", "0.50")
+    other_grid = _grid_run(inputs, tmp_path / "c.md", "0.6")
+    other_entry = _grid_run(inputs, tmp_path / "d.md", "0.5", entry="another-row")
+    assert first["config_sha256"] == rerun["config_sha256"]
+    assert first["inputs"] == rerun["inputs"]
+    assert len({first["config_sha256"], other_grid["config_sha256"],
+                other_entry["config_sha256"]}) == 3
+
+
+def test_the_record_shows_when_the_tape_changed(tmp_path: Path, inputs: tuple[Path, Path]) -> None:
+    _fixtures, tape = inputs
+    before = _grid_run(inputs, tmp_path / "a.md", "0.5")
+    write_day(tape, "fUST", date(2024, 5, 31), [(9_999_999, _T0 + 151 * 24 * _HOUR + 1, -1.0, 0.001, 2)])
+    after = _grid_run(inputs, tmp_path / "b.md", "0.5")
+    assert before["config_sha256"] == after["config_sha256"]
+    tape_before, tape_after = (
+        next(i for i in r["inputs"] if i["name"] == "tape:fUST") for r in (before, after))
+    assert tape_before["sha256"] != tape_after["sha256"]
+
+
+def test_a_run_without_a_registry_entry_is_refused() -> None:
+    with pytest.raises(SystemExit):
+        _parse_args(["--topic", "period-arms", "--tape-root", "/nonexistent",
+                     "--output", "/nonexistent/x.md"])
+
+
+def test_grid_order_and_repeats_do_not_change_the_config_hash(
+    tmp_path: Path, inputs: tuple[Path, Path]
+) -> None:
+    one = _grid_run(inputs, tmp_path / "a.md", "0.5,0.6")
+    other = _grid_run(inputs, tmp_path / "b.md", "0.6,0.5,0.50")
+    assert one["config_sha256"] == other["config_sha256"]
+
+
+def test_a_record_that_cannot_be_built_stops_the_run_before_any_report(
+    tmp_path: Path, inputs: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scripts.run_decision_space_search as runner
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise ValueError("fingerprint failed")
+
+    monkeypatch.setattr(runner, "_input_fingerprints", refuse)
+    out = tmp_path / "grid.md"
+    with pytest.raises(ValueError, match="fingerprint failed"):
+        _grid_run(inputs, out, "0.5")
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("extra", [["--registry-entry", " padded "], ["--output", "/nonexistent/x.json"]])
+def test_a_bad_registry_entry_or_output_is_refused_at_parse_time(extra: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        _parse_args(["--registry-entry", "ok", "--topic", "period-arms", "--tape-root",
+                     "/nonexistent", "--output", "/nonexistent/x.md", *extra])

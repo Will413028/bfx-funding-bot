@@ -17,11 +17,16 @@ a finished run is never extended, a new space is a new registry row):
 
   fixtures (offline candles; the tape is still read from --tape-root):
     uv run python -m scripts.run_decision_space_search --topic period-arms \\
+        --registry-entry "<registry row>" \\
         --tape-root <tape> --fixtures fixtures/candles --output /tmp/search.md
 
   database (VM research container, candles from the DB, tape mounted read-only):
     python -m scripts.run_decision_space_search --topic period-arms \\
+        --registry-entry "<registry row>" \\
         --tape-root /tape --output /reports/<date>-decision-search-period-arms.md
+
+Every run writes `<output>.run.json` beside the report: the registry row, code version,
+parameters and a fingerprint of the tape and candles it read (`scripts/research_run_record.py`).
 """
 from __future__ import annotations
 
@@ -30,7 +35,7 @@ import asyncio
 import json
 import logging
 import sys
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -64,9 +69,21 @@ from bfx_funding_bot.modules.backtest.period_structure import (
     to_hourly_grid,
 )
 from bfx_funding_bot.modules.backtest.replay import TapeDays
+from bfx_funding_bot.modules.backtest.run_record import (
+    InputFingerprint,
+    file_sha256,
+    fingerprint_candles,
+    fingerprint_files,
+)
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow, compute_wfo_windows
 from bfx_funding_bot.modules.candles.repository import get_candles_in_range
 from bfx_funding_bot.modules.strategy import CellConfig, Strategy
+from scripts.research_run_record import (
+    RunStart,
+    registry_entry_arg,
+    report_path_arg,
+    write_research_run_record,
+)
 from scripts.run_oos_profitability import DEFAULT_N_TRIALS
 from scripts.run_period_structure_backtest import (
     DEFAULT_AP_CELLS,
@@ -299,7 +316,11 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     p.add_argument("--topic", required=True, choices=[TOPIC_PERIOD_ARMS, TOPIC_GRID])
     p.add_argument("--tape-root", type=Path, required=True)
-    p.add_argument("--output", required=True, help="markdown path (.json sibling auto)")
+    p.add_argument("--output", required=True, type=report_path_arg,
+                   help="markdown path (.json and .run.json siblings auto)")
+    p.add_argument("--registry-entry", required=True, type=registry_entry_arg,
+                   help="name of the pre-registered registry row this run tests; "
+                        "written to the run record (.run.json)")
     p.add_argument("--symbols", default=DEFAULT_SYMBOLS)
     p.add_argument("--fixtures", type=Path, default=None, help="frozen candle dir (offline mode)")
     p.add_argument("--start", default=DEFAULT_START.strftime("%Y-%m-%d"), help="DB mode start (UTC)")
@@ -361,9 +382,52 @@ def _parse_grid(p: argparse.ArgumentParser, args: argparse.Namespace) -> Grid:
     return grid
 
 
+def _config_params(args: argparse.Namespace, symbols: Sequence[str]) -> dict[str, object]:
+    """What defines the configuration: a re-run with the same values is the same trial.
+
+    Left out on purpose: paths (where data and reports live), `--n-trials` (it grows
+    with the registry and does not change what was tested) and the data itself, which
+    the input fingerprints cover.
+    """
+    params: dict[str, object] = {
+        "topic": args.topic, "symbols": sorted(set(symbols)),
+        "offer_amount": Decimal(args.offer_amount),
+        "p30_staleness_hours": args.p30_staleness_hours,
+    }
+    if args.grid is not None:
+        # Order and repeats on the command line do not change which arms are built.
+        params["grid"] = {"offsets": sorted(set(args.grid.offsets)),
+                          "periods": sorted(set(args.grid.periods)),
+                          "wait_hours": sorted(set(args.grid.wait_hours))}
+        return params
+    params["ap"] = {"ema_span": args.ap_ema_span, "t1": Decimal(args.ap_t1),
+                    "t2": Decimal(args.ap_t2), "p_mid": args.ap_p_mid, "p_long": args.ap_p_long}
+    params["cells_sha256"] = file_sha256(args.cells)
+    params["ap_cells_sha256"] = file_sha256(args.ap_cells) if args.ap_cells.exists() else None
+    return params
+
+
+def _input_fingerprints(
+    prepared: Sequence[PreparedSymbol],
+    raw_by_symbol: Mapping[str, Mapping[str, Sequence[FundingCandle]]],
+    tape_root: Path,
+) -> list[InputFingerprint]:
+    """The tape folder and the raw candle series the arms read, for every symbol to run."""
+    inputs = []
+    for item in prepared:
+        inputs.append(fingerprint_files(f"tape:{item.symbol}", tape_root, f"{item.symbol}/*.csv.gz"))
+        inputs.extend(
+            fingerprint_candles(f"candles:{item.symbol}:{key}", candles)
+            for key, candles in sorted(raw_by_symbol[item.symbol].items())
+            if key in item.series
+        )
+    return inputs
+
+
 async def _amain(argv: Sequence[str]) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = _parse_args(argv)
+    start = RunStart.begin(args.registry_entry, "run_decision_space_search")
     symbols = _csv(args.symbols)
     setup = SearchSetup(
         tape_root=args.tape_root, grid=args.grid, n_trials=args.n_trials,
@@ -391,15 +455,22 @@ async def _amain(argv: Sequence[str]) -> int:
             logger.warning("%s: no candles, skipping", symbol)
             continue
         prepared.append(prepare_symbol(symbol, raw, setup))
-    reports = [run_symbol(item, setup) for item in prepared]
-    if not reports:
+    if not prepared:
         logger.error("no symbol produced a report")
         return 2
-    out = Path(args.output).expanduser()
+    # Before the first replay, like the checks above: the record describes the data the
+    # run starts from, and a record that cannot be built stops the run here.
+    params = _config_params(args, [item.symbol for item in prepared])
+    inputs = _input_fingerprints(prepared, raw_by_symbol, args.tape_root)
+    reports = [run_symbol(item, setup) for item in prepared]
+    out: Path = args.output
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render_search_markdown(reports, caveats=STANDING_CAVEATS))
     out.with_suffix(".json").write_text(json.dumps(search_report_to_json(reports), indent=2))
-    logger.info("wrote %s and %s", out, out.with_suffix(".json"))
+    record = write_research_run_record(
+        out, start, params=params, inputs=inputs,
+    )
+    logger.info("wrote %s, %s and %s", out, out.with_suffix(".json"), record)
     return 0
 
 

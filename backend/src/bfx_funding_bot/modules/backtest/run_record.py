@@ -71,7 +71,7 @@ def _decimal_text(value: Decimal) -> str:
     return "0" if value == 0 else format(value.normalize(), "f")
 
 
-def _file_sha256(path: Path) -> str:
+def file_sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as stream:
         while chunk := stream.read(_CHUNK):
@@ -98,7 +98,7 @@ def fingerprint_files(name: str, root: Path, pattern: str) -> InputFingerprint:
         relative = path.relative_to(root).as_posix()
         h.update(relative.encode("utf-8"))
         h.update(b"\0")
-        h.update(bytes.fromhex(_file_sha256(path)))
+        h.update(bytes.fromhex(file_sha256(path)))
     return InputFingerprint(
         name=name, kind="files", sha256=h.hexdigest(), items=len(paths),
         first=paths[0].relative_to(root).as_posix(), last=paths[-1].relative_to(root).as_posix(),
@@ -202,7 +202,7 @@ def build_run_record(
     plain_params = _plain(params)
     if not isinstance(plain_params, dict):
         raise TypeError("params must be a mapping")
-    outputs = tuple(OutputFile(name=p.name, sha256=_file_sha256(p)) for p in output_files)
+    outputs = tuple(OutputFile(name=p.name, sha256=file_sha256(p)) for p in output_files)
     output_names = [o.name for o in outputs]
     if len(set(output_names)) != len(output_names):
         raise ValueError(f"duplicate output file names: {sorted(output_names)}")
