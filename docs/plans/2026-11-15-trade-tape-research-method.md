@@ -128,7 +128,7 @@
   - 驗收：單元測試（兩個邊界同號才下結論、同價成交時 `wait_for_live`、等待時間短的臂掛單次數多、window 限制在成交紀錄範圍內（中間缺一天只丟那個 window）、window 太少不下結論、等待時間短但沒用到的臂和基準收益相同、缺成交紀錄標 `not_scored`、grid 參數不合法或缺序列時在開跑前報錯、trials 計數寫入報告、grid 的 `--n-trials` 低於已登記數加格點數就拒絕）；mutation 在複本跑：只跑一個邊界、verdict 只看一個邊界、拿掉 window 限制、拿掉 trials 下限檢查、`QuoteOffset` 不套偏移，各自要讓測試失敗；`DEFAULT_N_TRIALS`（`run_oos_profitability.py:53`）從 38 加上本步預登記的 4 個臂＝42；在 VM 跑出第一份報告（`period-arms`，兩幣），放 repo 外的研究筆記。
   - 需要人做的事：無（VM 一次性容器唯讀執行，程式以唯讀掛載提供，不需要發版）。
 
-- [ ] **6b. 搜尋 runner 加上提前還款情境**（被擋於：步驟 6；D9）
+- [x] **6b. 搜尋 runner 加上提前還款情境**（被擋於：步驟 6；D9）——完成 2026-11-21（PR #453），見進度表
   - 檔案：修改 `backend/src/bfx_funding_bot/modules/backtest/config.py`、`engine.py`、`decision_search.py`、`backend/scripts/run_decision_space_search.py` 與三者的測試、`backend/ARCHITECTURE.md`。
   - 範圍：步驟 6 的第一份報告把每筆鎖倉算成持有到期，違反 ADR 2026-09-27 的 R1（評估鎖更長的規則要先把借方利率下跌就還款算進去）。replay 記帳新增還款情境：`BacktestConfig.replay_refinance_margin`＋`run_backtest(refinance_reference=...)`，鎖倉開始後 2 天期市場收盤價第一次比鎖定利率低超過 margin 的那個小時就還款，利息算到那時、資金可以再放；規則與預設 0.2 照 ADR 2026-09-27 D3 與 `period_threshold.py` 的 `refinance_on_drop`，不另選參數。搜尋 runner 每個幣別固定報兩個情境（`held_to_maturity`、`refinance_on_drop_0.2`），各自對 `always_2d` 下結論。不算新的 trial：臂與參數不變，只多一種記帳情境（和兩個成交邊界同一類）。
   - 消費端：`rg -n "replay_refinance_margin|refinance_reference|evaluate_search_arms\(|ReplayTerms|run_symbol\(" backend`。
@@ -184,6 +184,6 @@
 | 4 replay 驗證 | 進行中（程式完成；同批 38 張事後調整後 92.1%＝35/38（venue 時鐘容差更正後），只當參考；正式驗收等新樣本，D7） | 預登記；第一次執行 FAIL（65.8%）；D6 重跑 81.6% 經第 2 輪 review 判為不可採信；D7 修正後重跑 89.5%（排隊誤差中位數 0 分），見 `step4-validation.md`；單元、`mypy src/`、ruff；mutation 第一輪 16、D6 20、D7 10 個，全殺；`/code-review` 第 1 輪 findings 8：修 3、記錄 1、D6 處理 4；第 2 輪 findings 8（blocking 5）：D7 修 7（5 blocking、should、nit `keep`）、nit 缺日檢查也修；第 3 輪 findings 7（blocking 4）：修 3、記錄 2、駁回 2，修完重跑仍 89.5%；單元 5534 passed（`-n auto`） | CI（PR 待開）；新樣本驗收（恢復放貸後） | 本分支 |
 | 5 刪期望值記帳與 linear | 未開始 | | | |
 | 6 決策空間搜尋 | 完成 | 單元 5597 passed（`-n auto`，第 2 輪修正前的 HEAD；之後只改 runner 與其測試，受影響的 3 個測試檔重跑通過）、`mypy src/`、ruff、lint-imports、quality ratchet（沒有新增 suppression）；`/code-review` 一輪＋契約審查一輪：findings 12（blocking 0），fixed 11、rejected 1（nit：runner 測試讀 repo 的 cells 設定檔，和既有的 `test_run_period_structure_backtest.py` 同一種做法）；mutation 21 個全殺（其中 1 個第一次存活，原因是測試的參數被 argparse 先擋掉，修測試後殺掉）；第一份報告 2026-11-21 在 VM 一次性容器跑完（`period-arms`，兩幣各 50 個測試月 2022-05..2026-06，p30 K 線只到 2026-07-19；約 14 分鐘）：4 個臂對 `always_2d` 在兩個邊界都是正的，但鎖倉算持有到期、沒有提前還款情境（ADR 2026-09-27 D3），長期限的結果偏樂觀，報告原文與判讀放 repo 外的研究筆記 | 無（CI 在 `e34c9636` 綠） | PR #451 |
-| 6b 提前還款情境 | 進行中 | | | |
+| 6b 提前還款情境 | 完成 | 單元 5610 passed（`-n auto`，commit `6b0650b8`；另有 1 個與本步無關的失敗：`test_bootstrap_account_credential` 的子行程在平行滿載時超過 15 秒逾時，單獨跑通過）；`mypy src/`、ruff、lint-imports、quality ratchet（沒有新增 suppression）；`/code-review` 一輪＋契約審查一輪：findings 11（blocking 0），fixed 8、recorded 1（`run_backtest` 的 replay 分支拆出，記在步驟 5）、rejected 2；mutation 20 個全殺；CI（含 integration）在 `2b48ba8e` 綠；第二份報告 2026-11-21 在 VM 一次性容器跑完（程式 `4510d4d7`，`period-arms` 兩幣各 50 個測試月、兩個情境，約 28 分鐘）：持有到期情境與第一份報告數字相同；還款情境四個臂對 `always_2d` 在兩幣、兩個邊界都為負。結論照預登記：長期限與 MR／AP 的優勢取決於未量測的借方還款行為，等 live 的持有時間樣本；與 ADR 2026-09-27 D1 一致 | 無 | PR #453 |
 | 7 每週驗證 | 未開始 | | | |
 | 8 收尾 | 未開始 | | | |
