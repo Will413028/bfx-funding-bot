@@ -68,6 +68,7 @@
     },
     {
       "includes": ["**/e2e/**"],
+      "linter": { "rules": { "style": { "noProcessEnv": "off" } } },
       "formatter": { "enabled": false },
       "assist": { "enabled": false }
     }
