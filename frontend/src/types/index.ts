@@ -34,41 +34,29 @@ export type ExchangeAccount = Schemas["ExchangeAccountResponse"];
 
 // ── Strategy Config ──
 
-export type AmountConfig = Schemas["Range"];
-export type RateConfig = Schemas["Range"];
-export type PeriodConfig = Schemas["Range"];
 export type StrategyConfig = Schemas["StrategyConfigBody"];
 export type UserConfig = Schemas["AccountConfigDraftResponse"];
 
 // ── Funding status (the daemon's status, forwarded by the web API) ──
 
 // Canonical live authority: Decimal values stay strings throughout the UI.
-export type CapitalPolicy = Schemas["CapitalPolicyStatus"];
-export type CapitalBudget = Schemas["CapitalBudgetStatus"];
-export type CapitalStatus =
-  | Schemas["CapitalUnavailable"]
-  | Schemas["CapitalAvailable"];
+type CapitalPolicy = Schemas["CapitalPolicyStatus"];
 export type FundingStatus = Schemas["FundingStatus"];
 
 // ── Trading control (lending envelope ADR 2026-09-25 D4: state, resume, kill) ──
 
 export type TradingStateView = Schemas["TradingStateView"];
-export type TradingStateName = TradingStateView["state"];
-export type TradingCause = TradingStateView["cause"];
 
 export type TradingControlRequest = Schemas["TradingControlRequest"];
-export type TradingControlAction = TradingControlRequest["action"];
-export type TradingControlRequestState = TradingControlRequest["state"];
 
 /** The latest venue cancel-all phase per currency for the HALTED in force. */
-export type CancelAllPhase = Schemas["CancelAllPhase"];
-export type BuildIdentity = Schemas["BuildIdentity"];
+type CancelAllPhase = Schemas["CancelAllPhase"];
+type BuildIdentity = Schemas["BuildIdentity"];
 export type TradingControlOverview = Schemas["TradingControlOverview"];
 
 export type CurrencyRequest = Schemas["CurrencyRequest"];
-export type CurrencyAction = CurrencyRequest["action"];
 /** The terms every new offer must stay inside; decimals stay strings. */
-export type OfferEnvelope = Schemas["OfferEnvelope"];
+type OfferEnvelope = Schemas["OfferEnvelope"];
 /** Every currency with an applied CapitalPolicy (its own request outbox). */
 export type CurrencyPolicy = Schemas["CurrencyPolicy"];
 
@@ -78,7 +66,6 @@ export type CurrencyPolicy = Schemas["CurrencyPolicy"];
 export type Position = Schemas["PositionResponse"];
 /** GET /offers: managed offer (default: pending/unknown/claimed only). */
 export type OfferClaim = Schemas["OfferClaimResponse"];
-export type OfferClaimState = OfferClaim["state"];
 
 /**
  * The event types the history filter offers. The API types `eventType` as a
@@ -98,7 +85,6 @@ export type ExecutionEventType =
 
 /** GET /executions: one history row, newest first. */
 export type ExecutionEvent = Schemas["ExecutionEventResponse"];
-export type ExecutionEventsPagination = Schemas["ExecutionsPagination"];
 /** GET /executions: full response envelope. */
 export type ExecutionEventsResponse = Schemas["ExecutionsPage"];
 
@@ -109,7 +95,7 @@ export type ExecutionEventsResponse = Schemas["ExecutionsPage"];
  * (`operator_commands.evidence_summary`). The API types the summary as an open
  * map of scalars, so this narrowing is the console's.
  */
-export interface UncertaintyEvidenceSummary {
+interface UncertaintyEvidenceSummary {
   outcomeReason?: string | null;
   observedAtMs?: number | null;
   candidateCount?: number | null;
@@ -118,7 +104,6 @@ export interface UncertaintyEvidenceSummary {
   coverage?: Record<string, boolean>;
 }
 
-export type UncertaintyBlockedScope = Schemas["BlockedScope"];
 /** Latest server-derived evidence that can authorize an operator resolution. */
 export type UncertaintyResolutionContext =
   Schemas["UncertaintyResolutionContext"];
@@ -128,16 +113,12 @@ export type Uncertainty = Omit<
   Schemas["UncertaintyResponse"],
   "evidenceSummary"
 > & { evidenceSummary: UncertaintyEvidenceSummary };
-export type UncertaintyKind = Uncertainty["kind"];
-export type UncertaintyState = Uncertainty["state"];
 
 /**
  * One queued operator adjudication. The web API only records the request; the
  * account daemon applies it and reports the outcome here (ADR D4').
  */
 export type UncertaintyResolutionRequest = Schemas["ResolutionRequestResponse"];
-export type UncertaintyResolutionRequestState =
-  UncertaintyResolutionRequest["state"];
 
 // ── Attribution ──
 

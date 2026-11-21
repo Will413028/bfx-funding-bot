@@ -9,17 +9,17 @@ import {
 import dynamic from "next/dynamic";
 import { useState } from "react";
 import { ApiError } from "@/lib/api-client";
+import { isDevelopment } from "@/lib/env";
 
-const ReactQueryDevtools =
-  process.env.NODE_ENV === "development"
-    ? dynamic(
-        () =>
-          import("@tanstack/react-query-devtools").then(
-            (mod) => mod.ReactQueryDevtools,
-          ),
-        { ssr: false },
-      )
-    : () => null;
+const ReactQueryDevtools = isDevelopment
+  ? dynamic(
+      () =>
+        import("@tanstack/react-query-devtools").then(
+          (mod) => mod.ReactQueryDevtools,
+        ),
+      { ssr: false },
+    )
+  : () => null;
 
 /**
  * A 401 means the operator capability is gone (removed grant or membership): drop every

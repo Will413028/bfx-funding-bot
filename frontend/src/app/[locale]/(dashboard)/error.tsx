@@ -1,6 +1,7 @@
 "use client";
 
 import { useTranslations } from "next-intl";
+import { isDevelopment } from "@/lib/env";
 
 export default function DashboardError({
   error,
@@ -15,9 +16,7 @@ export default function DashboardError({
     <div className="flex min-h-screen flex-col items-center justify-center gap-4">
       <h1 className="text-2xl font-bold">{t("error")}</h1>
       <p className="text-sm text-muted-foreground">
-        {process.env.NODE_ENV === "development"
-          ? error.message
-          : t("unexpectedError")}
+        {isDevelopment ? error.message : t("unexpectedError")}
       </p>
       <button
         type="button"

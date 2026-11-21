@@ -19,6 +19,8 @@ const DROPPED_HEADERS = new Set([
   "true-client-ip",
 ]);
 
+import { isProduction, sentryRelease } from "@/lib/env";
+
 export function scrubText(text: string): string {
   return text
     .replace(EMAIL, REDACTED)
@@ -68,8 +70,8 @@ export function scrubEvent<T extends object>(event: T): T | null {
 export function sentryOptions(dsn: string) {
   return {
     dsn,
-    release: process.env.NEXT_PUBLIC_SENTRY_RELEASE || undefined,
-    environment: process.env.NODE_ENV === "production" ? "prod" : "development",
+    release: sentryRelease,
+    environment: isProduction ? "prod" : "development",
     sendDefaultPii: false,
     tracesSampleRate: 0,
     tracePropagationTargets: [],
