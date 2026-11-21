@@ -44,6 +44,11 @@ class BacktestConfig:
     # Arms compared across different waits share the longest wait here, so a
     # shorter wait does not buy extra tradable hours at the window end.
     replay_no_placement_tail_h: int | None = None
+    # tape-replay only: the borrower repays a lock the first hour the 2-day market
+    # (`run_backtest(refinance_reference=...)`) closes more than this fraction below
+    # the locked rate, and the capital is free again. None = every lock is held to
+    # maturity, which overstates tenors longer than 2 days (ADR 2026-09-27 D3).
+    replay_refinance_margin: Decimal | None = None
 
     def __post_init__(self) -> None:
         if not (Decimal("0") <= self.fee_rate <= Decimal("1")):
@@ -54,6 +59,15 @@ class BacktestConfig:
             raise ValueError(f"fill_alpha must be positive, got {self.fill_alpha}")
         if self.fill_horizon_h <= 0:
             raise ValueError(f"fill_horizon_h must be positive, got {self.fill_horizon_h}")
+        self._validate_replay()
+        if self.market_rate_source != "candle_close":
+            raise ValueError(
+                f"market_rate_source must be 'candle_close', got "
+                f"{self.market_rate_source!r}"
+            )
+
+
+    def _validate_replay(self) -> None:
         if self.replay_bound not in ("conservative", "optimistic"):
             raise ValueError(f"replay_bound must be conservative|optimistic, got {self.replay_bound!r}")
         if self.replay_max_wait_h <= 0:
@@ -64,16 +78,15 @@ class BacktestConfig:
                 "replay_no_placement_tail_h must be >= replay_max_wait_h, got "
                 f"{self.replay_no_placement_tail_h} < {self.replay_max_wait_h}"
             )
+        if (self.replay_refinance_margin is not None
+                and not Decimal(0) < self.replay_refinance_margin < Decimal(1)):
+            raise ValueError(
+                f"replay_refinance_margin must be in (0, 1), got {self.replay_refinance_margin}"
+            )
         if self.replay_offer_amount <= 0:
             raise ValueError(
                 f"replay_offer_amount must be positive, got {self.replay_offer_amount}"
             )
-        if self.market_rate_source != "candle_close":
-            raise ValueError(
-                f"market_rate_source must be 'candle_close', got "
-                f"{self.market_rate_source!r}"
-            )
-
 
 def compute_fill_prob(spread_pct: Decimal, fill_alpha: Decimal) -> Decimal:
     """Linear fill probability model.

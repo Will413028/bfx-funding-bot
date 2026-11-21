@@ -1,5 +1,6 @@
 import math
-from collections.abc import Callable, Mapping
+from bisect import bisect_right
+from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 from typing import NoReturn
 
@@ -143,6 +144,32 @@ def _apply_friction(
     return gross_rate, fill_prob
 
 
+def _held_ms_until_refinance(
+    reference: tuple[list[int], list[Decimal | None]],
+    *,
+    lock_start_mts: int,
+    locked_rate: Decimal,
+    margin: Decimal,
+    term_ms: int,
+) -> int:
+    """How long a lock lasts when the borrower repays on a cheaper 2-day market.
+
+    The same rule as `period_threshold.simulate`'s `refinance_on_drop`: from the
+    first reference hour after the lock starts, the first close under
+    `locked_rate * (1 - margin)` ends the lock at that hour.
+    """
+    mts, closes = reference
+    trigger = locked_rate * (1 - margin)
+    end_mts = lock_start_mts + term_ms
+    for j in range(bisect_right(mts, lock_start_mts), len(mts)):
+        if mts[j] >= end_mts:
+            break
+        close = closes[j]
+        if close is not None and close < trigger:
+            return mts[j] - lock_start_mts
+    return term_ms
+
+
 def run_backtest(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     candles: list[FundingCandle],
     strategy: Strategy,
@@ -155,6 +182,7 @@ def run_backtest(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     fill_models_by_agg: Mapping[str, FillRateModel] | None = None,
     tape: TapeDays | None = None,
     same_rate_queue_ahead: Callable[[HypotheticalOffer], Decimal | None] | None = None,
+    refinance_reference: Sequence[FundingCandle] | None = None,
 ) -> BacktestResult:
     """Run a strategy over a candle series and return summary metrics.
 
@@ -194,6 +222,12 @@ def run_backtest(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     offer, from book snapshots where they exist; `queue_fill_rate` averages the
     queue estimate over the offers it covered. A missing tape day raises
     `BacktestIncomplete("tape_day_missing")`.
+
+    `refinance_reference` (required by, and only allowed with,
+    `replay_refinance_margin`) is the hourly 2-day market series. A filled lock
+    ends the first hour that series closes more than the margin below the locked
+    rate: interest stops there and the strategy may decide again. Without it
+    every lock runs its full tenor.
     """
     if market_candles is not None and market_series_by_agg is not None:
         raise ValueError("pass market_candles or market_series_by_agg, not both")
@@ -208,6 +242,10 @@ def run_backtest(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         raise ValueError("tape is only used with fill_model='tape-replay'")
     if not replaying and same_rate_queue_ahead is not None:
         raise ValueError("same_rate_queue_ahead is only used with fill_model='tape-replay'")
+    if (config.replay_refinance_margin is None) != (refinance_reference is None):
+        raise ValueError("replay_refinance_margin and refinance_reference come together")
+    if not replaying and refinance_reference is not None:
+        raise ValueError("refinance_reference is only used with fill_model='tape-replay'")
     if replaying and (fill_model is not None or fill_models_by_agg is not None
                       or market_candles is not None or market_series_by_agg is not None):
         raise ValueError("tape-replay prices fills from the tape: no fill models or market series")
@@ -264,6 +302,10 @@ def run_backtest(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
     max_wait_ms = config.replay_max_wait_h * 3_600_000
     no_placement_tail_ms = (config.replay_no_placement_tail_h or config.replay_max_wait_h) * 3_600_000
     cooldown_until_idx = -1
+    reference: tuple[list[int], list[Decimal | None]] | None = None
+    if refinance_reference is not None:
+        ordered = sorted(refinance_reference, key=lambda c: c.mts)
+        reference = ([c.mts for c in ordered], [c.close for c in ordered])
     # Assumes 1h candles: gap_minutes / 60 gives candle count. Other timeframes (5m, 1D) miscount.
     gap_candles = math.ceil(config.gap_minutes / 60)
     one_minus_fee = Decimal("1") - config.fee_rate
@@ -286,6 +328,7 @@ def run_backtest(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
             continue
 
         lock_start_mts = candle.mts
+        held_days = Decimal(decision.period_days)
         if replaying:
             assert tape is not None  # guarded above
             # decide() read this candle's close, known only when the hour ends:
@@ -319,7 +362,14 @@ def run_backtest(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
                        else placed_mts - candle.mts + window_ms)
             idle_ms += wait_ms
             lock_start_mts = candle.mts + wait_ms
-            lock_candles = decision.period_days * 24 if fill_prob > 0 else 0
+            held_ms = decision.period_days * 24 * _MS_PER_HOUR
+            if reference is not None and fill_prob > 0:
+                assert config.replay_refinance_margin is not None  # guarded above
+                held_ms = _held_ms_until_refinance(
+                    reference, lock_start_mts=lock_start_mts, locked_rate=decision.rate,
+                    margin=config.replay_refinance_margin, term_ms=held_ms)
+                held_days = Decimal(held_ms) / _MS_PER_DAY
+            lock_candles = math.ceil(held_ms / _MS_PER_HOUR) if fill_prob > 0 else 0
             next_cooldown = i + math.ceil(wait_ms / _MS_PER_HOUR) + lock_candles + gap_candles
         else:
             if series_maps is not None:
@@ -346,7 +396,7 @@ def run_backtest(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
                 decision, pricing_candle, config, trade_model
             )
             next_cooldown = i + decision.period_days * 24 + gap_candles
-        period = Decimal(decision.period_days)
+        period = held_days
         if config.truncate_at_window_end:
             remaining_days = Decimal(effective_end - lock_start_mts) / _MS_PER_DAY
             period = min(period, max(remaining_days, Decimal("0")))
@@ -356,7 +406,7 @@ def run_backtest(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917
         if replaying and fill_prob > 0:
             # The unfilled share of a partly filled offer sits out the lock too,
             # clipped to the record window whether or not interest is truncated.
-            in_window_days = min(Decimal(decision.period_days),
+            in_window_days = min(held_days,
                                  max(Decimal(effective_end - lock_start_mts) / _MS_PER_DAY,
                                      Decimal(0)))
             idle_ms += int((Decimal(1) - fill_prob) * in_window_days * _MS_PER_DAY)

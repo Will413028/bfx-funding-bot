@@ -43,12 +43,15 @@ from bfx_funding_bot.core.db import make_engine, make_session_factory, session_s
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.decision_search import (
+    SCENARIO_HELD,
     QuoteOffset,
+    ReplayTerms,
     SearchArm,
     SearchReport,
     SearchRun,
     build_search_report,
     evaluate_search_arms,
+    refinance_scenario,
     render_search_markdown,
     search_report_to_json,
     tape_days,
@@ -83,6 +86,7 @@ logger = logging.getLogger("run_decision_space_search")
 TOPIC_PERIOD_ARMS = "period-arms"
 TOPIC_GRID = "grid"
 BASELINE_WAIT_H = 24
+DEFAULT_REFINANCE_MARGIN = "0.2"  # ADR 2026-09-27 D3
 MIN_PERIOD_DAYS, MAX_PERIOD_DAYS = 2, 120  # Bitfinex funding offer tenors
 # Every arm stops placing offers the longest wait before each month end, so a long
 # wait eats the month for all of them: a week is the most a monthly window can carry.
@@ -99,10 +103,12 @@ STANDING_CAVEATS = (
     "FRR fills cannot be told apart on the tape and are not excluded (optimistic bias).",
     "No market-impact model: every offer is --offer-amount against the full recorded volume; "
     "fUST tenors of 15 days and more trade 150-472 a day at p10.",
-    "Every lock is held to maturity. Borrowers can repay early at no cost and do so when "
-    "rates fall, which overstates tenors longer than 2 days (ADR 2026-09-27 D3: the "
-    "rate-contingent repayment case is the decisive one). A longer-tenor arm that wins here "
-    "has not been tested against that case.",
+    "Each symbol is reported under two repayment scenarios. held_to_maturity credits every "
+    "lock in full, which overstates tenors longer than 2 days: borrowers can repay at no cost. "
+    "refinance_on_drop_<margin> ends a lock the first hour the 2-day market closes more than "
+    "the margin below the locked rate (ADR 2026-09-27 D3, the decisive case). Real borrower "
+    "behaviour is unmeasured and lies somewhere between; an arm counts only if it holds under "
+    "the refinance scenario.",
     "The two bounds bound fills, not returns: an offer the conservative bound leaves unfilled "
     "is re-quoted a day later, sometimes at a higher rate.",
     "Locks are truncated at window end, every window starts with free capital, and the last "
@@ -183,6 +189,7 @@ class SearchSetup:
     grid: Grid | None  # None = the period-arms topic
     n_trials: int
     offer_amount: Decimal
+    refinance_margin: Decimal
     cells: Sequence[CellConfig]
     ap_cells: Sequence[CellConfig]
     ap: ApParams
@@ -251,10 +258,14 @@ def prepare_symbol(
     return PreparedSymbol(symbol, series, windows, arms, tuple(notes))
 
 
-def run_symbol(prepared: PreparedSymbol, setup: SearchSetup) -> SearchReport:
+def run_symbol(
+    prepared: PreparedSymbol, setup: SearchSetup, refinance_margin: Decimal | None
+) -> SearchReport:
+    """One symbol under one repayment scenario (`refinance_margin` None = held to maturity)."""
     runs = evaluate_search_arms(
         prepared.series, prepared.windows, prepared.arms,
-        TapeDays(setup.tape_root, prepared.symbol), offer_amount=setup.offer_amount)
+        TapeDays(setup.tape_root, prepared.symbol),
+        ReplayTerms(setup.offer_amount, refinance_margin))
     p2 = prepared.series["p2"]
     first = datetime.fromtimestamp(p2[0].mts / 1000, UTC)
     last = datetime.fromtimestamp(p2[-1].mts / 1000, UTC)
@@ -263,6 +274,8 @@ def run_symbol(prepared: PreparedSymbol, setup: SearchSetup) -> SearchReport:
     return build_search_report(runs, baseline=ARM_ALWAYS_2D, run=SearchRun(
         symbol=prepared.symbol, data_window=f"{first:%Y-%m-%d} .. {last:%Y-%m-%d}",
         n_trials=setup.n_trials, notes=prepared.notes,
+        scenario=(SCENARIO_HELD if refinance_margin is None
+                  else refinance_scenario(refinance_margin)),
     ))
 
 
@@ -304,6 +317,9 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--fixtures", type=Path, default=None, help="frozen candle dir (offline mode)")
     p.add_argument("--start", default=DEFAULT_START.strftime("%Y-%m-%d"), help="DB mode start (UTC)")
     p.add_argument("--offer-amount", default="1000")
+    p.add_argument("--refinance-margin", default=DEFAULT_REFINANCE_MARGIN,
+                   help="second scenario: the borrower repays once the 2-day market is this "
+                        "fraction below the locked rate (ADR 2026-09-27 D3 used 0.2)")
     p.add_argument("--offsets", default=None, help="grid: quote offsets over market, e.g. 0,0.02,0.05; write a list that starts "
                         "with a negative value as --offsets=-0.02,0.02")
     p.add_argument("--periods", default=None, help="grid: lock tenors in days, e.g. 2,30")
@@ -368,6 +384,7 @@ async def _amain(argv: Sequence[str]) -> int:
     setup = SearchSetup(
         tape_root=args.tape_root, grid=args.grid, n_trials=args.n_trials,
         offer_amount=Decimal(args.offer_amount),
+        refinance_margin=Decimal(args.refinance_margin),
         # Only the period-arms topic reads the deployed cell parameters.
         cells=load_cells_only(args.cells) if args.grid is None else [],
         ap_cells=(load_cells_only(args.ap_cells)
@@ -391,7 +408,8 @@ async def _amain(argv: Sequence[str]) -> int:
             logger.warning("%s: no candles, skipping", symbol)
             continue
         prepared.append(prepare_symbol(symbol, raw, setup))
-    reports = [run_symbol(item, setup) for item in prepared]
+    reports = [run_symbol(item, setup, margin)
+               for item in prepared for margin in (None, setup.refinance_margin)]
     if not reports:
         logger.error("no symbol produced a report")
         return 2

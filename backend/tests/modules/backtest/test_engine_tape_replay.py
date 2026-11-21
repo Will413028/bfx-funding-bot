@@ -161,3 +161,68 @@ def test_queue_provider_rejected_outside_replay() -> None:
     with pytest.raises(ValueError, match="same_rate_queue_ahead"):
         run_backtest(_candles(), _Fixed(), BacktestConfig(fill_model="linear-baseline"),
                      same_rate_queue_ahead=lambda offer: Decimal(0))
+
+
+def _full_fill_tape(tmp_path: Path) -> TapeDays:
+    """A trade above our rate every 2 hours over the four days: every offer fills at once."""
+    for day in range(10, 14):
+        day_ms = T0 + (day - 10) * 24 * H
+        write_day(tmp_path, "fUST", date(2026, 1, day), [
+            (day * 100 + k, day_ms + k * 2 * H + 1, -5000.0, 0.0003, 2) for k in range(12)
+        ])
+    return TapeDays(tmp_path, "fUST")
+
+
+def _reference(drop_from_hour: int | None) -> list[FundingCandle]:
+    """The 2-day market: at our rate, then half of it from `drop_from_hour` on."""
+    return [FundingCandle(symbol="fUST", timeframe="1h", period_agg="p2", mts=T0 + i * H,
+                          close=RATE / 2 if drop_from_hour is not None and i >= drop_from_hour
+                          else RATE)
+            for i in range(96)]
+
+
+def _refinance_config() -> BacktestConfig:
+    return BacktestConfig(fill_model="tape-replay", replay_refinance_margin=Decimal("0.2"))
+
+
+def test_borrower_repays_when_the_two_day_market_drops_below_the_margin(tmp_path: Path) -> None:
+    tape = _full_fill_tape(tmp_path)
+    held = run_backtest(_candles(), _Fixed(), _config(), tape=tape)
+    # First offer: placed +1h, filled +2h, a 48h lock. The market halves at +10h, more
+    # than 20% under the locked rate, so the borrower repays 8h into the lock.
+    early = run_backtest(_candles(), _Fixed(), _refinance_config(), tape=tape,
+                         refinance_reference=_reference(drop_from_hour=10))
+    assert held.n_trades == 2
+    # After the drop every new lock is repaid the next hour: many short locks.
+    assert early.n_trades > 10
+    assert early.gross_monthly_return_pct < held.gross_monthly_return_pct / 2
+
+
+def test_no_drop_means_the_lock_is_held_to_maturity(tmp_path: Path) -> None:
+    tape = _full_fill_tape(tmp_path)
+    held = run_backtest(_candles(), _Fixed(), _config(), tape=tape)
+    same = run_backtest(_candles(), _Fixed(), _refinance_config(), tape=tape,
+                        refinance_reference=_reference(drop_from_hour=None))
+    assert same.model_dump(exclude={"strategy_name"}) == held.model_dump(exclude={"strategy_name"})
+
+
+def test_a_drop_inside_the_margin_does_not_trigger_repayment(tmp_path: Path) -> None:
+    tape = _full_fill_tape(tmp_path)
+    held = run_backtest(_candles(), _Fixed(), _config(), tape=tape)
+    # Half the rate is a 50% drop: a 60% margin tolerates it.
+    config = BacktestConfig(fill_model="tape-replay", replay_refinance_margin=Decimal("0.6"))
+    same = run_backtest(_candles(), _Fixed(), config, tape=tape,
+                        refinance_reference=_reference(drop_from_hour=10))
+    assert same.n_trades == held.n_trades
+    assert same.gross_monthly_return_pct == held.gross_monthly_return_pct
+
+
+def test_refinance_margin_and_reference_come_together(tape: TapeDays) -> None:
+    with pytest.raises(ValueError, match="refinance_reference"):
+        run_backtest(_candles(), _Fixed(), _refinance_config(), tape=tape)
+    with pytest.raises(ValueError, match="refinance_reference"):
+        run_backtest(_candles(), _Fixed(), _config(), tape=tape,
+                     refinance_reference=_reference(None))
+    for bad in ("0", "1", "-0.1"):
+        with pytest.raises(ValueError, match="replay_refinance_margin"):
+            BacktestConfig(fill_model="tape-replay", replay_refinance_margin=Decimal(bad))

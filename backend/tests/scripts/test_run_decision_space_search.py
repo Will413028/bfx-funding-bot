@@ -69,6 +69,9 @@ def test_period_arms_topic_scores_both_bounds_inside_the_tape(
     assert rc == 0
     payload = json.loads(out.with_suffix(".json").read_text())
     assert payload["n_trials"] == DEFAULT_N_TRIALS
+    # Each symbol is reported twice: held to maturity, then repaid on a 20% drop.
+    assert [(entry["symbol"], entry["scenario"]) for entry in payload["symbols"]] == [
+        ("fUST", "held_to_maturity"), ("fUST", "refinance_on_drop_0.2")]
     symbol = payload["symbols"][0]
     # June has candles but no tape: only April and May are scored.
     assert symbol["n_windows"] == 2
@@ -152,6 +155,7 @@ def test_grid_accepts_a_quote_below_market() -> None:
 
 def _setup(tape: Path, grid: Grid | None) -> SearchSetup:
     return SearchSetup(tape_root=tape, grid=grid, n_trials=999, offer_amount=Decimal("1000"),
+                       refinance_margin=Decimal("0.2"),
                        cells=[], ap_cells=[],
                        ap=ApParams(ema_span=24, t1=Decimal("0.5"), t2=Decimal("2.0"),
                                    p_mid=7, p_long=14),
