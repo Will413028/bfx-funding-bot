@@ -99,6 +99,12 @@ STANDING_CAVEATS = (
     "FRR fills cannot be told apart on the tape and are not excluded (optimistic bias).",
     "No market-impact model: every offer is --offer-amount against the full recorded volume; "
     "fUST tenors of 15 days and more trade 150-472 a day at p10.",
+    "Every lock is held to maturity. Borrowers can repay early at no cost and do so when "
+    "rates fall, which overstates tenors longer than 2 days (ADR 2026-09-27 D3: the "
+    "rate-contingent repayment case is the decisive one). A longer-tenor arm that wins here "
+    "has not been tested against that case.",
+    "The two bounds bound fills, not returns: an offer the conservative bound leaves unfilled "
+    "is re-quoted a day later, sometimes at a higher rate.",
     "Locks are truncated at window end, every window starts with free capital, and the last "
     "wait of each window places no offer.",
     "Deployed MR/AP params were selected on 2022-2026 data, in-sample to selection.",
