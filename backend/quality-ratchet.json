@@ -1,6 +1,6 @@
 {
   "suppressions": {
-    "noqa": 745,
+    "noqa": 744,
     "ruff: ignore": 2,
     "type: ignore": 274,
     "pyright: ignore": 0,

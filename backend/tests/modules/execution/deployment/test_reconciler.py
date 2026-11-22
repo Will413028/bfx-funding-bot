@@ -230,6 +230,11 @@ class _FakeSafety:
             reason=None if self.allowed else "blocked",
         )
 
+    async def dry_evaluate(self, decision, ctx):
+        from bfx_funding_bot.modules.execution.safety.chain import DryRunReport
+        return DryRunReport(would_submit=self.allowed,
+                            blocked_by=None if self.allowed else "fake")
+
 
 class _AuthoritativePreSizingSafety(_FakeSafety):
     async def evaluate_before_sizing(self, symbol, ctx) -> GuardResult:
@@ -2092,20 +2097,55 @@ async def test_long_tenor_resting_offer_blocks_another() -> None:
     assert all(d.offer_duration_days == 2 for d in ex.submitted)
 
 
-async def test_long_tenor_refused_by_the_guards_falls_back_to_the_signal_tenor() -> None:
-    class _RefuseLong(_FakeSafety):
-        async def evaluate(self, decision, ctx) -> GuardResult:
-            if decision.offer_duration_days == 7:
-                return GuardResult(allowed=False, guard_name="offer_envelope",
-                                   reason="offer_rate < floor")
-            return await super().evaluate(decision, ctx)
+class _TenorGuard:
+    """A guard of the real chain that refuses the given tenors."""
+    name = "offer_envelope"
 
-    rec, ex, audit = _build_long(safety=_RefuseLong())
+    def __init__(self, *refused_days: int) -> None:
+        self._refused = refused_days
+
+    async def evaluate(self, decision, ctx) -> GuardResult:
+        refused = decision.offer_duration_days in self._refused
+        return GuardResult(allowed=not refused, guard_name=self.name,
+                           reason="offer_rate < floor" if refused else None)
+
+
+def _real_chain(guard: _TenorGuard):
+    from bfx_funding_bot.core.health import HealthProbe
+    from bfx_funding_bot.modules.execution.safety.chain import SafetyGuardChain
+    diagnostics = _CapturingSink()
+    chain = SafetyGuardChain(
+        guards=[guard], probe=HealthProbe(), diagnostics=diagnostics, phase=Phase.LIVE,
+        strategy=StrategyName.MEAN_REVERSION, cell="fUST_a30", account_id="default",
+    )
+    return chain, diagnostics
+
+
+def _triggers(diagnostics: _CapturingSink) -> list[dict]:
+    return [e for e in diagnostics.events if e["event_type"] == EventType.SAFETY_TRIGGER.value]
+
+
+async def test_long_tenor_refused_by_the_guards_falls_back_to_the_signal_tenor() -> None:
+    chain, diagnostics = _real_chain(_TenorGuard(7))
+    rec, ex, audit = _build_long(safety=chain)
     await rec.deploy(long_tenor=_zero_exposure())
     assert [d.offer_duration_days for d in ex.submitted] == [2, 2]
     tenor = audit.all[0].model_evidence["optimizer"]["tenor"]
     assert tenor["failed_condition"] == 7
     assert tenor["guard"] == "offer_envelope"
+    # Trying the long tenor is not a blocked offer: with the envelope's floor differing by
+    # tenor it happens every tick, and would bury the real blocks in safety_trigger.
+    assert _triggers(diagnostics) == []
+
+
+async def test_long_tenor_fallback_still_reports_a_block_of_the_offer_it_sends() -> None:
+    chain, diagnostics = _real_chain(_TenorGuard(2, 7))
+    rec, ex, _ = _build_long(safety=chain)
+    await rec.deploy(long_tenor=_zero_exposure())
+    assert ex.submitted == []
+    blocked_days = [t["payload"]["decision_snapshot"]["offer_duration_days"]
+                    for t in _triggers(diagnostics)]
+    assert blocked_days == [2, 2]
 
 
 def test_long_tenor_refuses_quote_reference_reprice() -> None:

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from math import isfinite
 from typing import Any, Protocol, cast
@@ -23,6 +23,7 @@ from bfx_funding_bot.core.errors import ExecutorAuthError
 from bfx_funding_bot.core.telemetry import Phase
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.external.bitfinex.funding_rules import (
+    FundingAmountEvidence,
     FundingRuleProvider,
     submit_amount,
 )
@@ -35,6 +36,7 @@ from bfx_funding_bot.modules.execution.contracts import (
     BlockedExecution,
     BlockReason,
     ExecutionPolicy,
+    NoRecommendation,
     ReadyToSubmit,
 )
 from bfx_funding_bot.modules.execution.deployment.eligibility import ExecutionGate
@@ -88,6 +90,7 @@ from bfx_funding_bot.modules.execution.protocols import (
     SubmittedOrder,
 )
 from bfx_funding_bot.modules.execution.reconcile_monitors import StoppedOffersMonitor
+from bfx_funding_bot.modules.execution.safety.chain import DryRunReport
 from bfx_funding_bot.modules.execution.safety.protection import (
     ProtectionPort,
     capital_block_trigger,
@@ -151,6 +154,10 @@ class _SafetyChainProtocol(Protocol):
         self, decision: DecisionPayload, ctx: AccountContext,
     ) -> GuardResult: ...
 
+    async def dry_evaluate(
+        self, decision: DecisionPayload, ctx: AccountContext,
+    ) -> DryRunReport: ...
+
 
 class _EventSinkProtocol(Protocol):
     async def emit(self, event: dict[str, Any]) -> None: ...
@@ -172,6 +179,56 @@ class FillModelEvidenceProvider(Protocol):
         period_agg: str,
         horizon_h: int,
     ) -> FillModelEvidence | FillModelUnavailable | None: ...
+
+
+@dataclass(slots=True)
+class _Tick:
+    """One deploy call: what every symbol and offer of the tick shares.
+
+    ``now`` moves on as offers are judged. ``cancel_budget`` is one per-tick budget: the
+    long-tenor withdrawal spends it first, E1 the rest. ``long_sent`` counts this tick's
+    long submits.
+    """
+
+    now: int
+    reconcile_id: str
+    venue_offers: tuple[ActiveFundingOffer, ...]
+    long_tenor: LongTenorState | None
+    cancel_budget: int
+    long_sent: LongTenorLoad = field(default_factory=LongTenorLoad)
+
+
+@dataclass(frozen=True, slots=True)
+class _SymbolPlan:
+    """One symbol's capital read: each active cell's view and what it may place."""
+
+    symbol: str
+    views: dict[str, CapitalAvailable]
+    held: set[int]
+    min_fill: Decimal
+    amount_evidence: FundingAmountEvidence
+    fills: dict[str, Decimal]
+
+
+@dataclass(frozen=True, slots=True)
+class _Offer:
+    """One offer being judged: its cell, final amount, audit id and book."""
+
+    cell_id: str
+    amount: Decimal
+    decision_id: str
+    cell_ctx: AccountContext
+    snapshot: MarketSnapshot | None
+
+
+@dataclass(frozen=True, slots=True)
+class _GateInputs:
+    """What the execution gate is given beyond the decision itself."""
+
+    gate_price: PriceDecision | BlockedExecution
+    fill_evidence: FillModelEvidence | FillModelUnavailable | None = None
+    optimizer_evidence: Mapping[str, object] | None = None
+    optimizer_block_reason: BlockReason | None = None
 
 
 class DeploymentReconciler:
@@ -365,34 +422,34 @@ class DeploymentReconciler:
             log.exception("deployment_uncertainty_unreadable symbol=%s", symbol)
             return True
 
-    async def deploy(  # noqa: C901, PLR0912, PLR0915
+    async def deploy(
         self, *, venue_offers: tuple[ActiveFundingOffer, ...] = (),
         long_tenor: LongTenorState | None = None,
     ) -> None:
-        ctx = self._ctx
         # long_tenor: the configured long tenor's exposure (plan 2026-11-22 seven-day
         # tenor); None when none is configured or the read failed, and then no offer
-        # goes out at the long tenor. `long_sent` counts this tick's long submits,
-        # an UNKNOWN or failed one included, before the next offer is judged.
+        # goes out at the long tenor.
         # venue_offers: threaded from PeriodicReconcile's reconcile snapshot
-        # (E1 stale-offer reprice). Consumed below by _reprice_sweep when a
+        # (E1 stale-offer reprice). Consumed by _reprice_sweep when a
         # RepricePolicy is configured (self._reprice is not None); otherwise
         # ignored — byte-identical to pre-E1 behavior.
         now = self._clock()
-        reconcile_id = f"reconcile:{now}"
-        # One per-tick cancel budget: the long-tenor withdrawal spends it first, E1 the rest.
-        cancel_budget = (
-            self._reprice.max_cancels_per_tick if self._reprice is not None
-            else DEFAULT_MAX_CANCELS_PER_TICK
+        tick = _Tick(
+            now=now, reconcile_id=f"reconcile:{now}", venue_offers=venue_offers,
+            long_tenor=long_tenor,
+            cancel_budget=(
+                self._reprice.max_cancels_per_tick if self._reprice is not None
+                else DEFAULT_MAX_CANCELS_PER_TICK
+            ),
         )
-        long_sent = LongTenorLoad()
         # Long-tenor withdrawal (plan 2026-11-22 seven-day tenor, step 3): before every
         # symbol's E1 so it spends the shared budget first, and before the stop,
         # uncertainty and capital reads, so neither a failed read, a missing quote nor
         # BFX_REPRICE_ENABLED keeps a timed-out long offer up.
         if long_tenor is not None and self._long_tenor is not None:
-            cancel_budget -= await self._withdraw_long_offers(
-                symbol=self._long_tenor.symbol, state=long_tenor, now=now, budget=cancel_budget,
+            tick.cancel_budget -= await self._withdraw_long_offers(
+                symbol=self._long_tenor.symbol, state=long_tenor, now=now,
+                budget=tick.cancel_budget,
             )
         # Phase 2: each configured currency is an INDEPENDENT gap pool. The
         # reconciler is the real-money sizing authority, so the sizing math runs
@@ -401,365 +458,444 @@ class DeploymentReconciler:
         # balance and vice versa. Single-currency cells.yaml → one iteration with
         # cap/buffer resolving to the legacy scalars (byte-identical to Phase 1).
         for symbol in configured_symbols(self._cells):
-            if await self._pull_if_stopped(symbol):
-                continue
-            # Uncertainty is a sizing-boundary invariant, not merely a
-            # per-offer safety check.  The chain's explicit pre-sizing hook is
-            # optional for compatibility with small test adapters and older
-            # paper implementations.  When present it is the durable authority;
-            # otherwise the uncertainty reader is read directly.
-            evaluate_before_sizing = getattr(
-                self._safety, "evaluate_before_sizing", None,
+            await self._deploy_symbol(symbol, tick)
+
+    async def _deploy_symbol(self, symbol: str, tick: _Tick) -> None:
+        if await self._pull_if_stopped(symbol):
+            return
+        # Uncertainty is a sizing-boundary invariant, not merely a
+        # per-offer safety check.  The chain's explicit pre-sizing hook is
+        # optional for compatibility with small test adapters and older
+        # paper implementations.  When present it is the durable authority;
+        # otherwise the uncertainty reader is read directly.
+        authoritative_uncertainty_guard = (
+            getattr(self._safety, "evaluate_before_sizing", None) is not None
+        )
+        if await self._uncertain_before_sizing(symbol):
+            return
+        symbol_cells = [c for c in self._cells if self._cell_symbol[c.cell_id] == symbol]
+        plan = await self._plan_symbol(symbol, symbol_cells, now=tick.now)
+        if plan is None:
+            return
+        # E1 reprice sweep：先於 allocation。cancel 的 release 由 WS foc /
+        # 下次 reconcile 收斂（single-writer ledger），本 tick 的 gap 不變，
+        # 釋放資金在下一個 ~90s tick 重掛 — 永不 same-tick double-commit。
+        if self._reprice is not None and tick.venue_offers:
+            tick.cancel_budget -= await self._reprice_sweep(
+                symbol=symbol,
+                symbol_cells=symbol_cells,
+                venue_offers=tick.venue_offers,
+                now=tick.now,
+                budget=tick.cancel_budget,
             )
-            authoritative_uncertainty_guard = evaluate_before_sizing is not None
-            if evaluate_before_sizing is not None:
-                pre_sizing_result = await evaluate_before_sizing(symbol, ctx)
-                if not pre_sizing_result.allowed:
-                    log.error(
-                        "deployment_symbol_blocked_uncertain_pre_sizing "
-                        "account=%s symbol=%s guard=%s reason=%s",
-                        self._ctx.account_id,
-                        symbol,
-                        pre_sizing_result.guard_name,
-                        pre_sizing_result.reason,
-                    )
-                    continue
-            # A post-transport UNKNOWN is an account/symbol-wide command gate:
-            # even if the residual cap gap is positive, submitting another
-            # offer could duplicate the request that may already exist at the
-            # venue.  Chains without the database pre-sizing hook use the
-            # uncertainty reader as their fail-closed authority.
-            if not authoritative_uncertainty_guard and await self._fallback_uncertain(symbol):
+        # No gap to fill is an empty `fills`; other symbols still deploy.
+        for cell_id, amount in plan.fills.items():
+            tick.now = self._clock()
+            # Chains without the hook re-check the reader.  DB-backed chains
+            # instead re-evaluate their uncertainty guard for each offer
+            # (in _deploy_offer), which catches an UNKNOWN opened by the prior submit.
+            if (
+                not authoritative_uncertainty_guard
+                and await self._fallback_uncertain(symbol)
+            ):
                 log.error(
-                    "deployment_symbol_blocked_uncertain account=%s symbol=%s",
-                    self._ctx.account_id, symbol,
+                    "deployment_symbol_blocked_uncertain_after_submit "
+                    "account=%s symbol=%s cell=%s",
+                    self._ctx.account_id, symbol, cell_id,
                 )
-                continue
-            symbol_cells = [c for c in self._cells
-                            if self._cell_symbol[c.cell_id] == symbol]
-            active = [c.cell_id for c in symbol_cells
-                      if self._store.get_active(c.cell_id, now_ms=now) is not None]
-            try:
-                if self._funding_rules is None:
-                    raise ValueError("funding_rule_unavailable")
-                amount_evidence = await self._funding_rules.observe(symbol)
-                # One account lock and transaction for the whole symbol's plan.
-                async with self._session_factory() as session:
-                    views: dict[str, CapitalAvailable] = {}
-                    for cell in active:
-                        read = await self._capital.read(
-                            CapitalScope(self._scope.exchange_account_id, symbol, cell),
-                            now_ms=self._clock(), session=session,
-                        )
-                        if isinstance(read, CapitalBlocked):
-                            raise _CapitalReadBlocked(read.reason)
-                        views[cell] = read
-                    # D3a: the amount fingerprints this symbol's live commitments
-                    # already hold, read in the same session as the budget.
-                    held = set(await self._offers.fingerprints_in_use(
-                        session, self._scope, symbol,
-                    ))
-                min_fill = submit_amount(amount_evidence, symbol=symbol, now_ms=self._clock())
-                fills = allocate_capital(views=views, min_fill=min_fill)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("deployment_capital_unavailable symbol=%s reason=%s", symbol, exc)
-                trigger = (capital_block_trigger(exc.reason)
-                           if isinstance(exc, _CapitalReadBlocked) else None)
-                if trigger is not None and self._protection is not None:
-                    self._protection.trip(trigger, f"planner capital read for {symbol}: {exc}")
-                continue
+                break
+            await self._deploy_offer(tick, plan, cell_id, amount)
 
-            # E1 reprice sweep：先於 allocation。cancel 的 release 由 WS foc /
-            # 下次 reconcile 收斂（single-writer ledger），本 tick 的 gap 不變，
-            # 釋放資金在下一個 ~90s tick 重掛 — 永不 same-tick double-commit。
-            if self._reprice is not None and venue_offers:
-                cancel_budget -= await self._reprice_sweep(
-                    symbol=symbol,
-                    symbol_cells=symbol_cells,
-                    venue_offers=venue_offers,
-                    now=now,
-                    budget=cancel_budget,
+    async def _uncertain_before_sizing(self, symbol: str) -> bool:
+        """Whether an open uncertainty stops this symbol before any sizing."""
+        evaluate_before_sizing = getattr(self._safety, "evaluate_before_sizing", None)
+        if evaluate_before_sizing is not None:
+            pre_sizing_result = await evaluate_before_sizing(symbol, self._ctx)
+            if not pre_sizing_result.allowed:
+                log.error(
+                    "deployment_symbol_blocked_uncertain_pre_sizing "
+                    "account=%s symbol=%s guard=%s reason=%s",
+                    self._ctx.account_id,
+                    symbol,
+                    pre_sizing_result.guard_name,
+                    pre_sizing_result.reason,
                 )
+            return not pre_sizing_result.allowed
+        # A post-transport UNKNOWN is an account/symbol-wide command gate:
+        # even if the residual cap gap is positive, submitting another
+        # offer could duplicate the request that may already exist at the
+        # venue.  Chains without the database pre-sizing hook use the
+        # uncertainty reader as their fail-closed authority.
+        if await self._fallback_uncertain(symbol):
+            log.error(
+                "deployment_symbol_blocked_uncertain account=%s symbol=%s",
+                self._ctx.account_id, symbol,
+            )
+            return True
+        return False
 
-            if not fills:
-                continue  # this symbol has no gap to fill; other symbols still deploy
-
-            for cell_id, amount in fills.items():
-                now = self._clock()
-                # Chains without the hook re-check the reader.  DB-backed chains
-                # instead re-evaluate their uncertainty guard below for each
-                # offer, which catches an UNKNOWN opened by the prior submit.
-                if (
-                    not authoritative_uncertainty_guard
-                    and await self._fallback_uncertain(symbol)
-                ):
-                    log.error(
-                        "deployment_symbol_blocked_uncertain_after_submit "
-                        "account=%s symbol=%s cell=%s",
-                        self._ctx.account_id, symbol, cell_id,
+    async def _plan_symbol(
+        self, symbol: str, symbol_cells: list[CellConfig], *, now: int,
+    ) -> _SymbolPlan | None:
+        """Read the symbol's capital and size each active cell; None when it cannot be read."""
+        active = [c.cell_id for c in symbol_cells
+                  if self._store.get_active(c.cell_id, now_ms=now) is not None]
+        try:
+            if self._funding_rules is None:
+                raise ValueError("funding_rule_unavailable")
+            amount_evidence = await self._funding_rules.observe(symbol)
+            # One account lock and transaction for the whole symbol's plan.
+            async with self._session_factory() as session:
+                views: dict[str, CapitalAvailable] = {}
+                for cell in active:
+                    read = await self._capital.read(
+                        CapitalScope(self._scope.exchange_account_id, symbol, cell),
+                        now_ms=self._clock(), session=session,
                     )
-                    break
-                quote = self._store.get_active(cell_id, now_ms=now)
-                if quote is None:  # defensive: TTL could lapse between checks
-                    continue
-                # Finalise the amount before anything durable names it: the
-                # audit row, the intent, the attempt payload and the venue
-                # request all carry this exact fingerprinted value.
-                planned = amount
-                fingerprinted = choose_fingerprinted_amount(
-                    planned,
-                    seed_key=f"{reconcile_id}:{cell_id}:{quote.signal_correlation_id}",
-                    in_use=held, minimum=min_fill,
-                    maximum=views[cell_id].applied.policy.max_offer_amount,
-                )
-                if fingerprinted is None:
-                    log.warning(
-                        "deployment_skip_no_amount_fingerprint cell=%s symbol=%s planned=%s "
-                        "held=%d", cell_id, symbol, planned, len(held),
-                    )
-                    continue
-                amount = fingerprinted
-                held.add(cast(int, fingerprint_of(amount)))
-                decision = DecisionPayload(
-                    decision_outcome=DecisionOutcome.POST,
-                    signal_correlation_id=quote.signal_correlation_id,
-                    offer_rate=quote.rate,
-                    offer_amount_usdt=amount,
-                    offer_duration_days=quote.period_days,
-                    symbol=self._cell_symbol[cell_id],
-                )
-                cell_ctx = replace(ctx, capital_cell_id=cell_id)
-                now = self._clock()
-                snapshot = self._book_provider.snapshot(symbol, now_ms=now)
-                decision_id = str(uuid5(
-                    NAMESPACE_URL,
-                    f"{reconcile_id}:{cell_id}:{decision.signal_correlation_id}:{amount}",
+                    if isinstance(read, CapitalBlocked):
+                        raise _CapitalReadBlocked(read.reason)
+                    views[cell] = read
+                # D3a: the amount fingerprints this symbol's live commitments
+                # already hold, read in the same session as the budget.
+                held = set(await self._offers.fingerprints_in_use(
+                    session, self._scope, symbol,
                 ))
-                envelope = views[cell_id].applied.policy.envelope
-                tenor = choose_tenor(self._long_tenor, decision, TenorInputs(
-                    envelope_max_period_days=(
-                        envelope.max_period_days if envelope is not None else 0),
-                    state=long_tenor, this_tick=long_sent, now_ms=now, snapshot=snapshot,
-                ), self._period_pricer)
-                tenor = await self._guard_long(tenor, cell_ctx)
-                if tenor is not None and tenor.decision is not None and tenor.price is not None:
-                    decision = tenor.decision
-                    price: PriceDecision | BlockedExecution = tenor.price
-                elif snapshot is None:
-                    unavailable = self._book_provider.unavailable_reason(symbol, now_ms=now)
-                    price = BlockedExecution(
-                        decision_id=decision_id,
-                        candidate=decision,
-                        reason=_BOOK_BLOCK_REASONS.get(unavailable, BlockReason.BOOK_STALE),
-                        failed_dependency="market_snapshot",
-                        evidence={
-                            "symbol": symbol,
-                            "book_state": unavailable.value if unavailable else "unknown",
-                        },
-                    )
-                else:
-                    price = self._period_pricer.price(candidate=decision, snapshot=snapshot)
-                gate_price = price
-                fill_evidence: FillModelEvidence | FillModelUnavailable | None = None
-                optimizer_evidence: Mapping[str, object] | None = None
-                optimizer_block_reason: BlockReason | None = None
-                period_agg = self._cell_period_agg[cell_id]
-                expected_horizon_h, expected_model_version, expected_artifact_hash = (
-                    self._optimizer_scope()
+            min_fill = submit_amount(amount_evidence, symbol=symbol, now_ms=self._clock())
+            fills = allocate_capital(views=views, min_fill=min_fill)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("deployment_capital_unavailable symbol=%s reason=%s", symbol, exc)
+            trigger = (capital_block_trigger(exc.reason)
+                       if isinstance(exc, _CapitalReadBlocked) else None)
+            if trigger is not None and self._protection is not None:
+                self._protection.trip(trigger, f"planner capital read for {symbol}: {exc}")
+            return None
+        return _SymbolPlan(
+            symbol=symbol, views=views, held=held, min_fill=min_fill,
+            amount_evidence=amount_evidence, fills=fills,
+        )
+
+    async def _deploy_offer(
+        self, tick: _Tick, plan: _SymbolPlan, cell_id: str, planned: Decimal,
+    ) -> None:
+        symbol = plan.symbol
+        quote = self._store.get_active(cell_id, now_ms=tick.now)
+        if quote is None:  # defensive: TTL could lapse between checks
+            return
+        amount = self._fingerprinted_amount(tick, plan, quote, planned)
+        if amount is None:
+            return
+        signal = DecisionPayload(
+            decision_outcome=DecisionOutcome.POST,
+            signal_correlation_id=quote.signal_correlation_id,
+            offer_rate=quote.rate,
+            offer_amount_usdt=amount,
+            offer_duration_days=quote.period_days,
+            symbol=self._cell_symbol[cell_id],
+        )
+        tick.now = self._clock()
+        offer = _Offer(
+            cell_id=cell_id, amount=amount,
+            decision_id=str(uuid5(
+                NAMESPACE_URL,
+                f"{tick.reconcile_id}:{cell_id}:{signal.signal_correlation_id}:{amount}",
+            )),
+            cell_ctx=replace(self._ctx, capital_cell_id=cell_id),
+            snapshot=self._book_provider.snapshot(symbol, now_ms=tick.now),
+        )
+        decision, price, tenor = await self._tenor_and_price(tick, plan, offer, signal)
+        optimized = self._optimized(decision, price, offer, now=tick.now)
+        gate_price = optimized.gate_price
+        expected_horizon_h, expected_model_version, expected_artifact_hash = (
+            self._optimizer_scope()
+        )
+        # The guards judge the rate that will be sent, not the signal rate: the
+        # book can price an offer well below the signal, and the envelope's
+        # rate floor has to turn that into an ordinary skip here instead of a
+        # refusal inside the command gate after the decision was audited READY.
+        guard = await self._safety.evaluate(
+            (decision.model_copy(update={"offer_rate": gate_price.rate})
+             if isinstance(gate_price, PriceDecision) else decision),
+            offer.cell_ctx,
+        )
+        outcome = await self._execution_gate.prepare(
+            decision,
+            decision_id=offer.decision_id,
+            reconcile_id=tick.reconcile_id,
+            snapshot=offer.snapshot,
+            price=gate_price,
+            fill_evidence=optimized.fill_evidence,
+            safety=guard,
+            audit_context=replace(self._audit_context_factory.build(
+                candidate=decision, cell_id=cell_id, reconcile_id=tick.reconcile_id,
+            ), strategy=self._cell_strategy[cell_id].value),
+            optimizer_evidence={**(optimized.optimizer_evidence or {}),
+                                "funding_amount": plan.amount_evidence.payload(),
+                                **({"tenor": tenor.evidence} if tenor else {})},
+            optimizer_block_reason=optimized.optimizer_block_reason,
+            expected_period_agg=self._cell_period_agg[cell_id],
+            expected_horizon_h=expected_horizon_h,
+            expected_model_version=expected_model_version,
+            expected_artifact_hash=expected_artifact_hash,
+        )
+        if not isinstance(outcome, ReadyToSubmit):
+            self._record_not_ready(symbol, offer, guard, outcome)
+            return
+        self._log_ladder(offer, price, outcome)
+        # A long submit counts for the rest of the tick whatever its result, an UNKNOWN
+        # or failed one included, before the next offer is judged.
+        if tenor is not None and tenor.decision is not None:
+            tick.long_sent = tick.long_sent.plus(amount)
+        try:
+            outcome = replace(outcome, capital_view=plan.views[cell_id],
+                              funding_amount_evidence=plan.amount_evidence)
+            result = await self._executor.submit(outcome, offer.cell_ctx)
+        except Exception as exc:
+            log.exception("deployment_submit_error cell=%s amount=%s", cell_id, amount)
+            if self._attempts is not None:
+                self._attempts.record_error(
+                    cell=cell_id, symbol=symbol, amount=amount, reason=repr(exc),
                 )
-                if (
-                    isinstance(price, PriceDecision)
-                    and self._execution_policy is ExecutionPolicy.OPTIMIZER_LIVE
-                ):
-                    # Evidence is estimated per candidate price: the exact-period
-                    # book price gates the submit, the signal price competes in the
-                    # optimizer on its own estimate.
-                    fill_evidence = self._fill_evidence_for(
-                        candidate=decision,
-                        snapshot=snapshot,
-                        price=price,
-                        offer_rate=price.rate,
-                        now_ms=now,
-                        period_agg=period_agg,
-                    )
-                    signal_evidence = self._fill_evidence_for(
-                        candidate=decision,
-                        snapshot=snapshot,
-                        price=price,
-                        offer_rate=_offer_rate(decision),
-                        now_ms=now,
-                        period_agg=period_agg,
-                    )
-                    try:
-                        optimization = self._optimize(
-                            candidate=decision,
-                            price=price,
-                            signal_evidence=signal_evidence,
-                            price_evidence=fill_evidence,
-                        )
-                    except Exception:
-                        log.exception(
-                            "optimizer_failed symbol=%s cell=%s", decision.symbol, cell_id,
-                        )
-                        optimization = OptimizerNoRecommendation(
-                            reason="optimizer_error", candidates=(),
-                        )
-                    optimizer_evidence = _optimizer_evidence(
-                        optimization, price, fill_evidence,
-                    )
-                    if isinstance(optimization, OptimizationResult):
-                        gate_price = PriceDecision(
-                            rate=optimization.selected.rate,
-                            branch=price.branch,
-                            evidence=price.evidence,
-                        )
-                        # The submit gate must see the evidence of the price it
-                        # is about to send, not the book price's.
-                        if optimization.selected.fill_evidence is not None:
-                            fill_evidence = optimization.selected.fill_evidence
-                    elif not isinstance(fill_evidence, FillModelUnavailable):
-                        # Never reinterpret a failed optimizer as an implicit signal
-                        # fallback.  Valid fill evidence remains visible in audit.
-                        optimizer_block_reason = BlockReason.OPTIMIZER_UNAVAILABLE
-                # The guards judge the rate that will be sent, not the signal rate: the
-                # book can price an offer well below the signal, and the envelope's
-                # rate floor has to turn that into an ordinary skip here instead of a
-                # refusal inside the command gate after the decision was audited READY.
-                guard = await self._safety.evaluate(
-                    (decision.model_copy(update={"offer_rate": gate_price.rate})
-                     if isinstance(gate_price, PriceDecision) else decision),
-                    cell_ctx,
+            return
+        await self._record_result(tick, symbol, offer, outcome, result)
+
+    def _fingerprinted_amount(
+        self, tick: _Tick, plan: _SymbolPlan, quote: StandingQuote, planned: Decimal,
+    ) -> Decimal | None:
+        """Finalise the amount before anything durable names it.
+
+        The audit row, the intent, the attempt payload and the venue request all carry
+        this exact fingerprinted value.
+        """
+        cell_id = quote.cell_id
+        amount = choose_fingerprinted_amount(
+            planned,
+            seed_key=f"{tick.reconcile_id}:{cell_id}:{quote.signal_correlation_id}",
+            in_use=plan.held, minimum=plan.min_fill,
+            maximum=plan.views[cell_id].applied.policy.max_offer_amount,
+        )
+        if amount is None:
+            log.warning(
+                "deployment_skip_no_amount_fingerprint cell=%s symbol=%s planned=%s "
+                "held=%d", cell_id, plan.symbol, planned, len(plan.held),
+            )
+            return None
+        plan.held.add(cast(int, fingerprint_of(amount)))
+        return amount
+
+    async def _tenor_and_price(
+        self, tick: _Tick, plan: _SymbolPlan, offer: _Offer, signal: DecisionPayload,
+    ) -> tuple[DecisionPayload, PriceDecision | BlockedExecution, TenorChoice | None]:
+        """The decision to send and its book price: the long tenor's when it is chosen."""
+        symbol, snapshot = plan.symbol, offer.snapshot
+        envelope = plan.views[offer.cell_id].applied.policy.envelope
+        tenor = choose_tenor(self._long_tenor, signal, TenorInputs(
+            envelope_max_period_days=(
+                envelope.max_period_days if envelope is not None else 0),
+            state=tick.long_tenor, this_tick=tick.long_sent, now_ms=tick.now,
+            snapshot=snapshot,
+        ), self._period_pricer)
+        tenor = await self._guard_long(tenor, offer.cell_ctx)
+        if tenor is not None and tenor.decision is not None and tenor.price is not None:
+            return tenor.decision, tenor.price, tenor
+        if snapshot is None:
+            unavailable = self._book_provider.unavailable_reason(symbol, now_ms=tick.now)
+            return signal, BlockedExecution(
+                decision_id=offer.decision_id,
+                candidate=signal,
+                reason=_BOOK_BLOCK_REASONS.get(unavailable, BlockReason.BOOK_STALE),
+                failed_dependency="market_snapshot",
+                evidence={
+                    "symbol": symbol,
+                    "book_state": unavailable.value if unavailable else "unknown",
+                },
+            ), tenor
+        return signal, self._period_pricer.price(candidate=signal, snapshot=snapshot), tenor
+
+    def _optimized(
+        self, decision: DecisionPayload, price: PriceDecision | BlockedExecution,
+        offer: _Offer, *, now: int,
+    ) -> _GateInputs:
+        """Under optimizer_live, let the optimizer pick the rate the gate will see."""
+        if not (
+            isinstance(price, PriceDecision)
+            and self._execution_policy is ExecutionPolicy.OPTIMIZER_LIVE
+        ):
+            return _GateInputs(gate_price=price)
+        period_agg = self._cell_period_agg[offer.cell_id]
+        # Evidence is estimated per candidate price: the exact-period
+        # book price gates the submit, the signal price competes in the
+        # optimizer on its own estimate.
+        fill_evidence = self._fill_evidence_for(
+            candidate=decision,
+            snapshot=offer.snapshot,
+            price=price,
+            offer_rate=price.rate,
+            now_ms=now,
+            period_agg=period_agg,
+        )
+        signal_evidence = self._fill_evidence_for(
+            candidate=decision,
+            snapshot=offer.snapshot,
+            price=price,
+            offer_rate=_offer_rate(decision),
+            now_ms=now,
+            period_agg=period_agg,
+        )
+        try:
+            optimization = self._optimize(
+                candidate=decision,
+                price=price,
+                signal_evidence=signal_evidence,
+                price_evidence=fill_evidence,
+            )
+        except Exception:
+            log.exception(
+                "optimizer_failed symbol=%s cell=%s", decision.symbol, offer.cell_id,
+            )
+            optimization = OptimizerNoRecommendation(
+                reason="optimizer_error", candidates=(),
+            )
+        optimizer_evidence = _optimizer_evidence(optimization, price, fill_evidence)
+        if isinstance(optimization, OptimizationResult):
+            # The submit gate must see the evidence of the price it
+            # is about to send, not the book price's.
+            selected_evidence = optimization.selected.fill_evidence
+            return _GateInputs(
+                gate_price=PriceDecision(
+                    rate=optimization.selected.rate,
+                    branch=price.branch,
+                    evidence=price.evidence,
+                ),
+                fill_evidence=(
+                    selected_evidence if selected_evidence is not None else fill_evidence),
+                optimizer_evidence=optimizer_evidence,
+            )
+        return _GateInputs(
+            gate_price=price, fill_evidence=fill_evidence,
+            optimizer_evidence=optimizer_evidence,
+            # Never reinterpret a failed optimizer as an implicit signal
+            # fallback.  Valid fill evidence remains visible in audit.
+            optimizer_block_reason=(
+                None if isinstance(fill_evidence, FillModelUnavailable)
+                else BlockReason.OPTIMIZER_UNAVAILABLE),
+        )
+
+    def _record_not_ready(
+        self, symbol: str, offer: _Offer, guard: GuardResult,
+        outcome: BlockedExecution | NoRecommendation,
+    ) -> None:
+        if not isinstance(outcome, BlockedExecution):
+            log.info(
+                "deployment_no_recommendation cell=%s amount=%s reason=%s",
+                offer.cell_id, offer.amount, outcome.reason.value,
+            )
+            return
+        log.info(
+            "deployment_skip cell=%s amount=%s dependency=%s reason=%s",
+            offer.cell_id, offer.amount, outcome.failed_dependency, outcome.reason.value,
+        )
+        if self._attempts is not None:
+            self._attempts.record_blocked(
+                cell=offer.cell_id, symbol=symbol, amount=offer.amount,
+                guard_name=(
+                    guard.guard_name
+                    if not guard.allowed
+                    else outcome.failed_dependency
+                ),
+                reason=(guard.reason if not guard.allowed else outcome.reason.value),
+            )
+
+    def _log_ladder(
+        self, offer: _Offer, price: PriceDecision | BlockedExecution, outcome: ReadyToSubmit,
+    ) -> None:
+        if self._ladder is None or not isinstance(price, PriceDecision):
+            return
+        ask_rate = price.evidence.get("ask_rate")
+        if not isinstance(ask_rate, str):
+            return
+        rungs = spike_rungs(
+            amount=float(offer.amount), ask=float(ask_rate), policy=self._ladder,
+        )
+        if rungs:
+            log.info(
+                "ladder_would_post cell=%s base_rate=%s rungs=%s ask=%s",
+                offer.cell_id, outcome.decision.offer_rate,
+                [(round(a, 2), r) for a, r in rungs], ask_rate,
+            )
+
+    async def _record_result(
+        self, tick: _Tick, symbol: str, offer: _Offer, outcome: ReadyToSubmit,
+        result: SubmittedOrder,
+    ) -> None:
+        cell_id, amount, reconcile_id = offer.cell_id, offer.amount, tick.reconcile_id
+        # Only an explicit ACK is recorded as submitted.  REJECTED/NOT_SENT
+        # are capital-neutral; UNKNOWN is pessimistic and must remain
+        # blocked until reconcile evidence resolves it.  In particular,
+        # UNKNOWN must never fall through the old string-status success
+        # branch.
+        if result.outcome_kind is SubmitOutcomeKind.UNKNOWN:
+            log.error(
+                "deployment_submit_unknown cell=%s amount=%s reason=%s",
+                cell_id, amount, getattr(result.outcome, "reason", "unknown"),
+            )
+            if self._attempts is not None:
+                self._attempts.record_error(
+                    cell=cell_id, symbol=symbol, amount=amount,
+                    reason=getattr(result.outcome, "reason", "submit_outcome_unknown"),
                 )
-                outcome = await self._execution_gate.prepare(
-                    decision,
-                    decision_id=decision_id,
-                    reconcile_id=reconcile_id,
-                    snapshot=snapshot,
-                    price=gate_price,
-                    fill_evidence=fill_evidence,
-                    safety=guard,
-                    audit_context=replace(self._audit_context_factory.build(
-                        candidate=decision, cell_id=cell_id, reconcile_id=reconcile_id,
-                    ), strategy=self._cell_strategy[cell_id].value),
-                    optimizer_evidence={**(optimizer_evidence or {}),
-                                        "funding_amount": amount_evidence.payload(),
-                                        **({"tenor": tenor.evidence} if tenor else {})},
-                    optimizer_block_reason=optimizer_block_reason,
-                    expected_period_agg=period_agg,
-                    expected_horizon_h=expected_horizon_h,
-                    expected_model_version=expected_model_version,
-                    expected_artifact_hash=expected_artifact_hash,
-                )
-                if not isinstance(outcome, ReadyToSubmit):
-                    if isinstance(outcome, BlockedExecution):
-                        log.info(
-                            "deployment_skip cell=%s amount=%s dependency=%s reason=%s",
-                            cell_id, amount, outcome.failed_dependency, outcome.reason.value,
-                        )
-                        if self._attempts is not None:
-                            self._attempts.record_blocked(
-                                cell=cell_id, symbol=symbol, amount=amount,
-                                guard_name=(
-                                    guard.guard_name
-                                    if not guard.allowed
-                                    else outcome.failed_dependency
-                                ),
-                                reason=(guard.reason if not guard.allowed else outcome.reason.value),
-                            )
-                    else:
-                        log.info(
-                            "deployment_no_recommendation cell=%s amount=%s reason=%s",
-                            cell_id, amount, outcome.reason.value,
-                        )
-                    continue
-                if self._ladder is not None and isinstance(price, PriceDecision):
-                    ask_rate = price.evidence.get("ask_rate")
-                    if isinstance(ask_rate, str):
-                        rungs = spike_rungs(
-                            amount=float(amount), ask=float(ask_rate), policy=self._ladder,
-                        )
-                        if rungs:
-                            log.info(
-                                "ladder_would_post cell=%s base_rate=%s rungs=%s ask=%s",
-                                cell_id, outcome.decision.offer_rate,
-                                [(round(a, 2), r) for a, r in rungs], ask_rate,
-                            )
-                if tenor is not None and tenor.decision is not None:
-                    long_sent = long_sent.plus(amount)
-                try:
-                    outcome = replace(outcome, capital_view=views[cell_id],
-                                      funding_amount_evidence=amount_evidence)
-                    result = await self._executor.submit(outcome, cell_ctx)
-                except Exception as exc:
-                    log.exception("deployment_submit_error cell=%s amount=%s", cell_id, amount)
-                    if self._attempts is not None:
-                        self._attempts.record_error(
-                            cell=cell_id, symbol=symbol, amount=amount, reason=repr(exc),
-                        )
-                    continue
-                # Only an explicit ACK is recorded as submitted.  REJECTED/NOT_SENT
-                # are capital-neutral; UNKNOWN is pessimistic and must remain
-                # blocked until reconcile evidence resolves it.  In particular,
-                # UNKNOWN must never fall through the old string-status success
-                # branch.
-                if result.outcome_kind is SubmitOutcomeKind.UNKNOWN:
-                    log.error(
-                        "deployment_submit_unknown cell=%s amount=%s reason=%s",
-                        cell_id, amount, getattr(result.outcome, "reason", "unknown"),
-                    )
-                    if self._attempts is not None:
-                        self._attempts.record_error(
-                            cell=cell_id, symbol=symbol, amount=amount,
-                            reason=getattr(result.outcome, "reason", "submit_outcome_unknown"),
-                        )
-                    await self._emit_submit(cell_id, outcome, result, reconcile_id)
-                    # The venue refused the key itself (10100): every further submit on it
-                    # would add another UNKNOWN. Stop now, as a refused read does: the daemon
-                    # exits 78 and boots into credential recovery mode. The attempt is
-                    # already durable as UNKNOWN (the command gate wrote it).
-                    refused = key_refused_on_submit(result.outcome)
-                    if refused is not None:
-                        log.critical("deployment_submit_key_refused cell=%s amount=%s",
-                                     cell_id, amount)
-                        raise refused
-                    continue
-                if result.outcome_kind in {
-                    SubmitOutcomeKind.REJECTED,
-                    SubmitOutcomeKind.NOT_SENT,
-                }:
-                    log.warning(
-                        "deployment_submit_rejected cell=%s amount=%s outcome=%s",
-                        cell_id, amount, result.outcome_kind.value,
-                    )
-                    if self._attempts is not None:
-                        if result.outcome_kind is SubmitOutcomeKind.REJECTED:
-                            # Guards passed and the venue supplied explicit
-                            # rejection evidence; keep this distinct from a
-                            # pre-transport validation failure.
-                            self._attempts.record_rejected(
-                                cell=cell_id, symbol=symbol, amount=amount,
-                                reason=getattr(result.outcome, "reason", "venue_rejected"),
-                            )
-                        else:
-                            self._attempts.record_error(
-                                cell=cell_id, symbol=symbol, amount=amount,
-                                reason="local_pre_transport",
-                            )
-                    if result.outcome_kind is SubmitOutcomeKind.REJECTED:
-                        # A rejection does not halt the symbol, so a venue that
-                        # keeps refusing would repeat every tick unseen.
-                        alerts.emit(
-                            alerts.VENUE_SUBMIT_REJECTED, symbol=symbol, cell=cell_id,
-                            reason=getattr(result.outcome, "reason", "venue_rejected"),
-                        )
-                    await self._emit_submit(cell_id, outcome, result, reconcile_id)
-                    continue
-                log.info("deployment_submitted cell=%s amount=%s", cell_id, amount)
-                if self._attempts is not None:
-                    self._attempts.record_submitted(
-                        cell=cell_id, symbol=symbol, amount=amount,
-                    )
-                await self._emit_submit(cell_id, outcome, result, reconcile_id)
+            await self._emit_submit(cell_id, outcome, result, reconcile_id)
+            # The venue refused the key itself (10100): every further submit on it
+            # would add another UNKNOWN. Stop now, as a refused read does: the daemon
+            # exits 78 and boots into credential recovery mode. The attempt is
+            # already durable as UNKNOWN (the command gate wrote it).
+            refused = key_refused_on_submit(result.outcome)
+            if refused is not None:
+                log.critical("deployment_submit_key_refused cell=%s amount=%s",
+                             cell_id, amount)
+                raise refused
+            return
+        if result.outcome_kind in {
+            SubmitOutcomeKind.REJECTED,
+            SubmitOutcomeKind.NOT_SENT,
+        }:
+            self._record_refused(symbol, offer, result)
+            await self._emit_submit(cell_id, outcome, result, reconcile_id)
+            return
+        log.info("deployment_submitted cell=%s amount=%s", cell_id, amount)
+        if self._attempts is not None:
+            self._attempts.record_submitted(
+                cell=cell_id, symbol=symbol, amount=amount,
+            )
+        await self._emit_submit(cell_id, outcome, result, reconcile_id)
+
+    def _record_refused(self, symbol: str, offer: _Offer, result: SubmittedOrder) -> None:
+        """A submit the venue rejected or that never left: capital-neutral, but visible."""
+        cell_id, amount = offer.cell_id, offer.amount
+        rejected = result.outcome_kind is SubmitOutcomeKind.REJECTED
+        log.warning(
+            "deployment_submit_rejected cell=%s amount=%s outcome=%s",
+            cell_id, amount, result.outcome_kind.value,
+        )
+        if self._attempts is not None and rejected:
+            # Guards passed and the venue supplied explicit
+            # rejection evidence; keep this distinct from a
+            # pre-transport validation failure.
+            self._attempts.record_rejected(
+                cell=cell_id, symbol=symbol, amount=amount,
+                reason=getattr(result.outcome, "reason", "venue_rejected"),
+            )
+        elif self._attempts is not None:
+            self._attempts.record_error(
+                cell=cell_id, symbol=symbol, amount=amount,
+                reason="local_pre_transport",
+            )
+        if rejected:
+            # A rejection does not halt the symbol, so a venue that
+            # keeps refusing would repeat every tick unseen.
+            alerts.emit(
+                alerts.VENUE_SUBMIT_REJECTED, symbol=symbol, cell=cell_id,
+                reason=getattr(result.outcome, "reason", "venue_rejected"),
+            )
 
     async def _guard_long(
         self, tenor: TenorChoice | None, cell_ctx: AccountContext,
@@ -771,14 +907,17 @@ class DeploymentReconciler:
         """
         if tenor is None or tenor.decision is None or tenor.price is None:
             return tenor
-        guard = await self._safety.evaluate(
+        # A trial, not a blocked offer: `evaluate` would emit a safety_trigger for every
+        # refused trial (each tick while the envelope's floor differs by tenor) and bury
+        # the real blocks. The offer that is sent is judged by `evaluate` below as before.
+        trial = await self._safety.dry_evaluate(
             tenor.decision.model_copy(update={"offer_rate": tenor.price.rate}), cell_ctx,
         )
-        if guard.allowed:
+        if trial.would_submit:
             return tenor
         return TenorChoice(evidence={
             **tenor.evidence, "selected_days": None, "failed_condition": 7, "why": "guard",
-            "guard": guard.guard_name,
+            "guard": trial.blocked_by,
         })
 
     def _fill_evidence_for(  # noqa: PLR0913
