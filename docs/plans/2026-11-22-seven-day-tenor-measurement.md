@@ -175,7 +175,7 @@
   - 結論：A。正式階段 `BFX_LONG_TENOR_MAX_OFFERS_TOTAL=30`、`BFX_LONG_TENOR_MAX_ENDED_CREDITS=20`、`BFX_LONG_TENOR_MAX_AMOUNT=600`。
 - **D6 指標 3、4 的操作定義**（狀態：已決 2026-11-22，Will）：照步驟 7 寫的定義。指標 4 比的是利率差、不含 2 天期資金的閒置；樣本門檻以已結束的 7 天期 credit 計；最後一筆結束滿 2 天後才跑報告。定義抄回 registry，開跑後不改。
 
-- **D7 長天期讀取的查詢沒有可用的索引**（狀態：未決，2026-11-22 1b 審查提出；擋住步驟 4（啟用）；不擋步驟 2、3；需要的事實：正式 DB 四張表的列數）。步驟 1 要求「不掃全部歷史」，前提段又寫「本計畫沒有 migration」。實際上 `ledger_observation_offer_history`（只有 `observation_id` 索引）、`ledger_observation_trade`（PK 是 `observation_id, trade_id`）以 `venue_offer_id` 查、`submission_attempt_journal` 以 `(帳戶, symbol, started_at_ms)` 查、`venue_credit_mirror` 讀已結束的列，都沒有對應的索引，每個 tick（約 90 秒）會全表掃。讀取只在設定了長天期時執行，所以在步驟 4 啟用之前正式環境不受影響；讀取失敗時 `deploy` 照跑、拿到 `None`。
+- **D7 長天期讀取的查詢沒有可用的索引**（狀態：已決 2026-11-22，Will：B，不加索引。依據是當天對正式 DB 的唯讀查詢：`ledger_observation_offer_history` 65 列、`ledger_observation_trade` 60 列、`submission_attempt_journal` 48 列、`venue_credit_mirror` 36 列，最大的表 128 kB，遠低於「數十萬列」的門檻。任何一張表長到數十萬列時重開這題。2026-11-22 1b 審查提出；原本擋住步驟 4）。步驟 1 要求「不掃全部歷史」，前提段又寫「本計畫沒有 migration」。實際上 `ledger_observation_offer_history`（只有 `observation_id` 索引）、`ledger_observation_trade`（PK 是 `observation_id, trade_id`）以 `venue_offer_id` 查、`submission_attempt_journal` 以 `(帳戶, symbol, started_at_ms)` 查、`venue_credit_mirror` 讀已結束的列，都沒有對應的索引，每個 tick（約 90 秒）會全表掃。讀取只在設定了長天期時執行，所以在步驟 4 啟用之前正式環境不受影響；讀取失敗時 `deploy` 照跑、拿到 `None`。
   - A：開一個只加索引的 migration（`venue_offer_id` 兩張、attempt 一張）。加索引是增量變更，舊版程式不受影響，回滾仍是部署上一版 digest；但發版要走 migration 的流程（停 webapi 與 bot、備份）。
   - B：不加索引，接受全表掃。只在表小的時候成立。
   - 建議：先對正式 DB 跑一次唯讀的列數查詢（需 owner 核准），四張表都在數十萬列以內選 B，否則選 A。
@@ -183,9 +183,9 @@
 - **D8 `period_days` 為 NULL 的借款要不要算進長天期的借出中**（狀態：未決，2026-11-22 步驟 3b `/code-review` 提出；擋住步驟 8（金額上限 600 生效）；不擋步驟 4–6：第零步只掛 1 張，由累計張數擋住，不靠金額上限）。步驟 1 的驗收寫「`period_days` 為 NULL 的列不算」；但觀測驗證允許借款沒有天期（`ledger/_internal/observation.py` 只拒絕 ≤ 0），而掛單中的長天期單是「天期不明也算」（fail closed）。兩邊不一致：venue 某次沒回天期時，一筆 7 天期借款不會被算進金額上限。
   - A（建議）：仍在借出中、天期不明的借款算進長天期的借出中（與掛單的算法一致）。代價：任何一筆天期不明的借款（包含 2 天期的）在它結束前都會佔金額上限，可能讓長天期暫時掛不出去。
   - B：維持不算，接受 venue 沒回天期時金額上限可能被超過一筆（上限 600、單筆 200）。
-  - 需要的事實：正式 DB 的 `venue_credit_mirror` 有沒有出現過 `period_days` 為 NULL 的列（唯讀查詢，需 owner 核准）；從未出現的話兩案在實務上沒有差別。
+  - 需要的事實：正式 DB 的 `venue_credit_mirror` 有沒有出現過 `period_days` 為 NULL 的列（唯讀查詢，需 owner 核准）；從未出現的話兩案在實務上沒有差別。2026-11-22 查到的現況：36 列裡 `period_days` 為 NULL 的 0 列、`mts_opening` 為 NULL 的 0 列（只代表目前表裡的列，不代表 venue 永遠會回天期）。
 
-拍板順序：D1、D5、D6 已拍；D2 是預設；D3 等步驟 6；D4 等步驟 9；D7 等列數；D8 在步驟 8 之前。
+拍板順序：D1、D5、D6 已拍；D2 是預設；D3 等步驟 6；D4 等步驟 9；D7 已拍（B）；D8 在步驟 8 之前。
 
 ## 進度
 
