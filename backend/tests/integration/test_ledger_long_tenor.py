@@ -197,6 +197,22 @@ async def test_a_lent_credit_with_no_opening_time_is_still_read(ledger: Book) ->
 
 
 @pytest.mark.asyncio
+async def test_a_lent_credit_with_no_reported_tenor_is_read(ledger: Book) -> None:
+    """The tenor bound must not drop money out at a tenor the venue did not report."""
+    await ledger.accept(_observation(credits=(
+        _credit("no-tenor", "150", opening=SINCE, period=None),
+        _credit("long", "40", opening=SINCE, period=7),
+        _credit("short", "999", opening=SINCE, period=2),
+    )))
+
+    state = await _input(ledger).long_tenor()
+
+    assert state is not None
+    assert state.exposure is not None
+    assert state.exposure.lent_amount == Decimal("190")
+
+
+@pytest.mark.asyncio
 async def test_no_configured_tenor_reads_nothing(ledger: Book) -> None:
     assert await _input(ledger, None).long_tenor() is None
 

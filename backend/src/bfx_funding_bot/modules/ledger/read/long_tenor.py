@@ -59,8 +59,8 @@ def long_tenor_exposure(
 ) -> LongTenorExposure:
     """Count the tenor's exposure from rows already read.
 
-    Nothing dated before `since_ms` counts. A credit with no opening time counts as
-    lent while it is out and never as an ended sample.
+    Nothing dated before `since_ms` counts. A credit with no opening time, or with
+    no reported tenor, counts as lent while it is out and never as an ended sample.
     """
     offers_filled = sum(
         1 for submission in submissions
@@ -68,18 +68,22 @@ def long_tenor_exposure(
         and submission.started_at_ms >= since_ms
         and not _ended_unfilled(submission)
     )
+    credits = list(credits)
     at_tenor = [credit for credit in credits if credit.period_days == period_days]
     return LongTenorExposure(
         offers_filled=offers_filled,
-        # A credit the venue did not date cannot be shown to predate the start: it is
-        # money out at the tenor, so the amount limit counts it.
+        # A credit the venue did not date cannot be shown to predate the start, and one
+        # with no reported tenor cannot be shown to be of another: both may be money out
+        # at the tenor, so the amount limit counts them (as it does a resting offer of
+        # unknown period).
         lent_amount=sum(
-            (credit.amount for credit in at_tenor
+            (credit.amount for credit in credits
              if credit.present
+             and credit.period_days in (None, period_days)
              and (credit.mts_opening is None or credit.mts_opening >= since_ms)),
             Decimal(0),
         ),
-        # A sample of the experiment must be dated inside it.
+        # A sample of the experiment must be of the tenor and dated inside it.
         ended_credits=sum(
             1 for credit in at_tenor
             if not credit.present and credit.source_kind == "credit"

@@ -661,8 +661,9 @@ async def _long_tenor_credits(
     rows = await session.scalars(select(credit).where(
         credit.exchange_account_id == scope.exchange_account_id,
         credit.symbol == query.symbol,
-        credit.period_days == query.period_days,
-        # An undated row is kept: the counting treats it as lent (it fails closed).
+        # A row with no tenor or no date is kept: the counting treats it as lent
+        # (it fails closed).
+        or_(credit.period_days == query.period_days, credit.period_days.is_(None)),
         or_(credit.mts_opening >= query.since_ms, credit.mts_opening.is_(None)),
     ))
     return [
@@ -683,6 +684,7 @@ async def long_tenor_exposure(
     """Read the rows ``read.long_tenor`` counts; bounded by symbol, tenor and start time.
 
     A credit with no opening time is read too: it cannot be shown to predate the start.
+    So is one with no reported tenor: it cannot be shown to be of another tenor.
     """
     return _count_long_tenor(
         await _long_tenor_submissions(session, scope, query),

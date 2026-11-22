@@ -76,7 +76,6 @@ def test_lent_amount_is_what_is_out_now_at_the_tenor() -> None:
         _credit(kind="loan", amount="150"),          # taken but unused: still our money out
         _credit(amount="999", present=False),         # ended
         _credit(amount="999", period=2),              # another tenor
-        _credit(amount="999", period=None),           # tenor not reported
         _credit(amount="999", opening=SINCE - 1),     # before the experiment
     ], period_days=7, since_ms=SINCE)
     assert exposure.lent_amount == D("350")
@@ -90,6 +89,21 @@ def test_a_credit_out_now_with_no_opening_time_counts_as_lent() -> None:
         _credit(amount="999", opening=None, present=False),
     ], period_days=7, since_ms=SINCE)
     assert exposure.lent_amount == D("200")
+    assert exposure.ended_credits == 0
+
+
+def test_a_credit_out_now_with_no_reported_tenor_counts_as_lent() -> None:
+    # The venue did not say which tenor this money is out at, so it may be the long one:
+    # the amount limit counts it, the same way a resting offer of unknown period counts.
+    # An ended sample must be known to be of the tenor.
+    exposure = long_tenor_exposure((), [
+        _credit(amount="200", period=None),
+        _credit(kind="loan", amount="50", period=None),
+        _credit(amount="30", period=None, opening=None),      # neither tenor nor date
+        _credit(amount="999", period=None, opening=SINCE - 1),  # dated before the start
+        _credit(amount="999", period=None, present=False),
+    ], period_days=7, since_ms=SINCE)
+    assert exposure.lent_amount == D("280")
     assert exposure.ended_credits == 0
 
 
