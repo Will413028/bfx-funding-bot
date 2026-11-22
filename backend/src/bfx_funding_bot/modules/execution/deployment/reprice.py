@@ -25,6 +25,9 @@ from dataclasses import dataclass
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 
 REFERENCE_MODES = ("quote", "book")
+# The per-tick cancel budget when none is configured; the long-tenor withdrawal
+# (plan 2026-11-22 seven-day tenor, step 3) shares it with E1 and spends it first.
+DEFAULT_MAX_CANCELS_PER_TICK = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +49,7 @@ def policy_from_env(environ: Mapping[str, str]) -> RepricePolicy:
         enabled=environ.get("BFX_REPRICE_ENABLED", "false").lower() in ("1", "true", "yes"),
         tolerance_pct=float(environ.get("BFX_REPRICE_TOLERANCE_PCT", "0.10")),
         min_age_ms=int(float(environ.get("BFX_REPRICE_MIN_AGE_S", "1800")) * 1000),
-        max_cancels_per_tick=int(environ.get("BFX_REPRICE_MAX_CANCELS_PER_TICK", "3")),
+        max_cancels_per_tick=int(environ.get("BFX_REPRICE_MAX_CANCELS_PER_TICK", str(DEFAULT_MAX_CANCELS_PER_TICK))),
         reference=environ.get("BFX_REPRICE_REFERENCE", "quote").strip().lower(),
     )
 

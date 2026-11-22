@@ -789,6 +789,57 @@ class CancelProvenance:
     signal_correlation_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class OfferTerminal:
+    """The venue's terminal report of one offer (a row of the observed offer history)."""
+
+    terminal_kind: str  # "executed" | "canceled"
+    status: str  # "active" | "partially_filled" (what it was when it ended)
+    amount_original: Decimal | None
+    amount_remaining: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class LongTenorSubmission:
+    """One offer of ours that reached the venue."""
+
+    period_days: int
+    started_at_ms: int
+    terminal: OfferTerminal | None  # None: resting, or ended with no terminal row observed yet
+    has_trade: bool  # an observed funding trade names this offer
+
+
+@dataclass(frozen=True, slots=True)
+class LongTenorCredit:
+    """One row of the venue credit mirror."""
+
+    source_kind: str  # "credit" (in use) | "loan" (taken, unused)
+    period_days: int | None
+    amount: Decimal
+    present: bool  # in the latest accepted snapshot: the money is out now
+    mts_opening: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class LongTenorExposure:
+    offers_filled: int  # our offers of the tenor not known to have ended unfilled
+    lent_amount: Decimal  # out now at the tenor, credits and loans
+    ended_credits: int  # credit rows of the tenor no longer out
+
+    @classmethod
+    def none(cls) -> LongTenorExposure:
+        return cls(offers_filled=0, lent_amount=Decimal(0), ended_credits=0)
+
+
+@dataclass(frozen=True, slots=True)
+class LongTenorQuery:
+    """Which tenor's exposure to read: one symbol, one tenor, nothing created before ``since_ms``."""
+
+    symbol: str
+    period_days: int
+    since_ms: int
+
+
 class LedgerUncertainties(Protocol):
     async def open_uncertainties(
         self, session: AsyncSession, scope: Scope, symbol: str | None = None
@@ -820,6 +871,15 @@ class LedgerManagedOffers(Protocol):
         self, session: AsyncSession, scope: Scope, symbol: str
     ) -> frozenset[Decimal]:
         """Submitted amounts that still hold their fingerprint for ``symbol``."""
+        ...
+
+    async def long_tenor_exposure(
+        self, session: AsyncSession, scope: Scope, query: LongTenorQuery
+    ) -> LongTenorExposure:
+        """Our offers, lent amount and ended credits of one tenor since ``query.since_ms``.
+
+        Bounded by the symbol, the tenor and the start time, not by the live mirror.
+        """
         ...
 
 
@@ -1327,6 +1387,10 @@ __all__ = [
     "LiveOffer",
     "LockedCancelGuard",
     "LockedCommandGuard",
+    "LongTenorCredit",
+    "LongTenorExposure",
+    "LongTenorQuery",
+    "LongTenorSubmission",
     "ManagedOffer",
     "ManagedOfferReader",
     "ManagedOffers",
@@ -1340,6 +1404,7 @@ __all__ = [
     "OfferHistory",
     "OfferState",
     "OfferStatus",
+    "OfferTerminal",
     "OfferTerminalKind",
     "OfferView",
     "OpenUncertainty",

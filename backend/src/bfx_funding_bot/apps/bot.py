@@ -100,6 +100,7 @@ from bfx_funding_bot.modules.execution.deployment.standing_quote import Standing
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
 )
+from bfx_funding_bot.modules.execution.deployment.tenor import long_tenor_policy_from_env
 from bfx_funding_bot.modules.execution.diagnostics.sink import DiagnosticsSink
 from bfx_funding_bot.modules.execution.events import (
     CancelAcknowledged,
@@ -335,10 +336,16 @@ async def build_daemon(  # noqa: C901, PLR0912, PLR0915
     account_id = account_bootstrap.account_id
     bus = DomainEventBus()
     resync = ResyncChannel()
+    # Off unless every BFX_LONG_TENOR_* is set; an invalid value fails the boot here.
+    long_tenor_policy = long_tenor_policy_from_env(os.environ)
+    if (long_tenor_policy is not None
+            and long_tenor_policy.symbol not in configured_symbols(config.cells)):
+        raise ValueError(f"BFX_LONG_TENOR_SYMBOL {long_tenor_policy.symbol!r} is not a cell symbol")
     capital = build_capital_ports(
         session_factory=session_factory, scope=capital_scope, account_id=account_id,
         bus=bus, resync=resync, clock=now_ms_utc,
         max_snapshot_age_ms=CAPITAL_MAX_SNAPSHOT_AGE_MS,
+        long_tenor=long_tenor_policy.query() if long_tenor_policy is not None else None,
     )
     uncertainty_reader = capital.uncertainty_reader
     managed_offers = capital.managed_offers
@@ -775,6 +782,7 @@ async def build_daemon(  # noqa: C901, PLR0912, PLR0915
         canceller=reservation_middleware,
         reprice=reprice_policy,
         ladder=ladder_policy,
+        long_tenor=long_tenor_policy,
         attempt_recorder=attempt_recorder,
         book_provider=funding_book_service,
         execution_gate=execution_gate,
