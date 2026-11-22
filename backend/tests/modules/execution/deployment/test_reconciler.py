@@ -2138,6 +2138,23 @@ async def test_long_tenor_refused_by_the_guards_falls_back_to_the_signal_tenor()
     assert _triggers(diagnostics) == []
 
 
+async def test_long_tenor_trial_that_a_guard_could_not_judge_is_told_apart() -> None:
+    """A guard that raised on the trial is not a refusal on the offer's terms."""
+    class _BrokenOnLong(_TenorGuard):
+        async def evaluate(self, decision, ctx) -> GuardResult:
+            if decision.offer_duration_days == 7:
+                raise RuntimeError("boom")
+            return await super().evaluate(decision, ctx)
+
+    chain, _ = _real_chain(_BrokenOnLong())
+    rec, ex, audit = _build_long(safety=chain)
+    await rec.deploy(long_tenor=_zero_exposure())
+    assert [d.offer_duration_days for d in ex.submitted] == [2, 2]
+    tenor = audit.all[0].model_evidence["optimizer"]["tenor"]
+    assert (tenor["failed_condition"], tenor["why"], tenor["guard"]) == (
+        7, "guard_error", "offer_envelope")
+
+
 async def test_long_tenor_fallback_still_reports_a_block_of_the_offer_it_sends() -> None:
     chain, diagnostics = _real_chain(_TenorGuard(2, 7))
     rec, ex, _ = _build_long(safety=chain)

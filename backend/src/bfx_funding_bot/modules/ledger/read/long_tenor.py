@@ -57,7 +57,11 @@ def long_tenor_exposure(
     period_days: int,
     since_ms: int,
 ) -> LongTenorExposure:
-    """Count the tenor's exposure from rows already read; nothing older than `since_ms`."""
+    """Count the tenor's exposure from rows already read.
+
+    Nothing dated before `since_ms` counts. A credit with no opening time counts as
+    lent while it is out and never as an ended sample.
+    """
     offers_filled = sum(
         1 for submission in submissions
         if submission.period_days == period_days

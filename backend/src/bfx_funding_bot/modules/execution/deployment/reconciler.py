@@ -915,8 +915,17 @@ class DeploymentReconciler:
         )
         if trial.would_submit:
             return tenor
+        # A guard that timed out or raised did not judge the offer's terms; the evidence
+        # says so, or a guard failing only on the long tenor would look like a refusal.
+        could_not_judge = any(
+            outcome.internal_error for outcome in trial.guards
+            if outcome.name == trial.blocked_by
+        )
+        if could_not_judge:
+            log.error("long_tenor_trial_guard_error guard=%s", trial.blocked_by)
         return TenorChoice(evidence={
-            **tenor.evidence, "selected_days": None, "failed_condition": 7, "why": "guard",
+            **tenor.evidence, "selected_days": None, "failed_condition": 7,
+            "why": "guard_error" if could_not_judge else "guard",
             "guard": trial.blocked_by,
         })
 

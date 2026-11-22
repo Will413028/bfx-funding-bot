@@ -680,7 +680,10 @@ async def _long_tenor_credits(
 async def long_tenor_exposure(
     session: AsyncSession, scope: Scope, query: LongTenorQuery
 ) -> LongTenorExposure:
-    """Read the rows ``read.long_tenor`` counts; bounded by symbol, tenor and start time."""
+    """Read the rows ``read.long_tenor`` counts; bounded by symbol, tenor and start time.
+
+    A credit with no opening time is read too: it cannot be shown to predate the start.
+    """
     return _count_long_tenor(
         await _long_tenor_submissions(session, scope, query),
         await _long_tenor_credits(session, scope, query),

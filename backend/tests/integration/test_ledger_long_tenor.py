@@ -12,8 +12,10 @@ Mutations (apply one at a time, run this file, revert):
 4. trades are not looked up: the canceled-but-traded offer drops out.
 5. terminal rows of unaccepted observations are used: the rejected-only offer drops out.
 6. a tie on ``occurred_at_ms`` picks the unfilled-looking row: the tied offer drops out.
+7. drop the ``mts_opening IS NULL`` arm in ``reads._long_tenor_credits``: the undated lent
+   credit drops out.
 
-The SQL bounds on tenor and start time are not separately killable: the counting in
+The other SQL bounds on tenor and start time are not separately killable: the counting in
 ``read.long_tenor`` filters both again, and its unit mutations cover them.
 """
 from __future__ import annotations
