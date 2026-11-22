@@ -34,7 +34,7 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Integer, Select, Text, column, select, table
+from sqlalchemy import Integer, Select, Text, column, or_, select, table
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
@@ -662,7 +662,8 @@ async def _long_tenor_credits(
         credit.exchange_account_id == scope.exchange_account_id,
         credit.symbol == query.symbol,
         credit.period_days == query.period_days,
-        credit.mts_opening >= query.since_ms,
+        # An undated row is kept: the counting treats it as lent (it fails closed).
+        or_(credit.mts_opening >= query.since_ms, credit.mts_opening.is_(None)),
     ))
     return [
         LongTenorCredit(

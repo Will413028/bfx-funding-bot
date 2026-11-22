@@ -64,17 +64,22 @@ def long_tenor_exposure(
         and submission.started_at_ms >= since_ms
         and not _ended_unfilled(submission)
     )
-    ours = [
-        credit for credit in credits
-        if credit.period_days == period_days
-        and credit.mts_opening is not None
-        and credit.mts_opening >= since_ms
-    ]
+    at_tenor = [credit for credit in credits if credit.period_days == period_days]
     return LongTenorExposure(
         offers_filled=offers_filled,
-        lent_amount=sum((credit.amount for credit in ours if credit.present), Decimal(0)),
+        # A credit the venue did not date cannot be shown to predate the start: it is
+        # money out at the tenor, so the amount limit counts it.
+        lent_amount=sum(
+            (credit.amount for credit in at_tenor
+             if credit.present
+             and (credit.mts_opening is None or credit.mts_opening >= since_ms)),
+            Decimal(0),
+        ),
+        # A sample of the experiment must be dated inside it.
         ended_credits=sum(
-            1 for credit in ours if not credit.present and credit.source_kind == "credit"
+            1 for credit in at_tenor
+            if not credit.present and credit.source_kind == "credit"
+            and credit.mts_opening is not None and credit.mts_opening >= since_ms
         ),
     )
 

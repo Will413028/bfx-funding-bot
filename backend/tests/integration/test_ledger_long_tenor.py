@@ -169,6 +169,32 @@ async def test_lent_and_ended_come_from_the_credit_mirror_since_the_start(ledger
 
 
 @pytest.mark.asyncio
+async def test_a_lent_credit_with_no_opening_time_is_still_read(ledger: Book) -> None:
+    """The start-time bound must not drop a row it cannot date (the amount limit fails closed).
+
+    An observation without ``mts_opening`` is refused today, so the row is made directly.
+    """
+    from sqlalchemy import text
+
+    await ledger.accept(_observation(credits=(
+        _credit("undated", "150", opening=SINCE, period=7),
+        _credit("dated", "40", opening=SINCE, period=7),
+    )))
+    async with ledger.factory.begin() as session:
+        updated = (await session.scalars(text(
+            "UPDATE venue_credit_mirror SET mts_opening = NULL "
+            "WHERE venue_credit_id = 'undated' RETURNING venue_credit_id"
+        ))).all()
+    assert updated == ["undated"]
+
+    state = await _input(ledger).long_tenor()
+
+    assert state is not None
+    assert state.exposure is not None
+    assert state.exposure.lent_amount == Decimal("190")
+
+
+@pytest.mark.asyncio
 async def test_no_configured_tenor_reads_nothing(ledger: Book) -> None:
     assert await _input(ledger, None).long_tenor() is None
 

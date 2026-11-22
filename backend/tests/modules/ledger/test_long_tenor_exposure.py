@@ -30,7 +30,7 @@ def _submission(*, period: int = 7, started: int = SINCE + 1, terminal: OfferTer
 
 
 def _credit(*, kind: str = "credit", period: int | None = 7, amount: str = "200",
-            present: bool = True, opening: int = SINCE + 1) -> LongTenorCredit:
+            present: bool = True, opening: int | None = SINCE + 1) -> LongTenorCredit:
     return LongTenorCredit(source_kind=kind, period_days=period, amount=D(amount),
                            present=present, mts_opening=opening)
 
@@ -80,6 +80,17 @@ def test_lent_amount_is_what_is_out_now_at_the_tenor() -> None:
         _credit(amount="999", opening=SINCE - 1),     # before the experiment
     ], period_days=7, since_ms=SINCE)
     assert exposure.lent_amount == D("350")
+
+
+def test_a_credit_out_now_with_no_opening_time_counts_as_lent() -> None:
+    # Money out at the tenor that cannot be dated is still money out: the amount limit
+    # must see it. It is not a sample of the experiment, so it never counts as ended.
+    exposure = long_tenor_exposure((), [
+        _credit(amount="200", opening=None),
+        _credit(amount="999", opening=None, present=False),
+    ], period_days=7, since_ms=SINCE)
+    assert exposure.lent_amount == D("200")
+    assert exposure.ended_credits == 0
 
 
 def test_ended_credits_count_credit_rows_only() -> None:
