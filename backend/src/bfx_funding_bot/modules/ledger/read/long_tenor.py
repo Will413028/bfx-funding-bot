@@ -75,7 +75,9 @@ def long_tenor_exposure(
         # A credit the venue did not date cannot be shown to predate the start, and one
         # with no reported tenor cannot be shown to be of another: both may be money out
         # at the tenor, so the amount limit counts them (as it does a resting offer of
-        # unknown period).
+        # unknown period). The bound on `since_ms` carries no clock tolerance: the
+        # deployment layer sends no long offer before `since_ms` plus the tolerance
+        # (`tenor._schedule_refusal`), so no credit of ours opens inside it.
         lent_amount=sum(
             (credit.amount for credit in credits
              if credit.present

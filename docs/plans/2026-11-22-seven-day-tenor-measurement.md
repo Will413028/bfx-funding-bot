@@ -68,7 +68,7 @@
   - 範圍：部署層每個 tick 拿到一份「指定幣別、指定天期」的曝險，四個數字，各自的來源寫死：
     1. **累計成交過的長天期掛單數**：以送單紀錄為底——本帳戶的 attempt（`submission_attempt_journal`），被 venue 確認（`transport_outcome_journal.kind='ack'`）或綁定到 venue 掛單（`execution_resolution_journal.action='bound_to_venue'`），幣別相符、天期（對應 execution decision 的 `duration_days`）等於該天期、`started_at_ms` 不早於 `BFX_LONG_TENOR_SINCE`。從中扣掉「確定沒成交就結束」的，四個條件要全部成立：(i) 該掛單在 `ledger_observation_offer_history` 有列（venue 回報的終態）；(ii) 那一列的 `terminal_kind` 是 `canceled`、`status` 不是部分成交、`amount_original` 與 `amount_remaining` 都有值並相等；(iii) `ledger_observation_trade` 裡沒有這張掛單的成交列；(iv) 金額一律讀歷史列，不讀 `venue_offer_mirror`。其餘一律算一張：還在掛、全部成交、部分成交、金額欄是 NULL、還沒有歷史列。還沒有送出結果（沒有 transport outcome 列：送出後、寫 outcome 前中斷）的 attempt 也算一張（單可能已在 venue 上；2026-11-22 1b 契約審查後補登）。送出結果不明（UNKNOWN）的 attempt 在未解期間算一張，解成 `bound_to_venue` 後照上面計，解成沒掛出（`not_accepted`）的不計。這個數字不看借款，也不依賴掛單有沒有被觀測到。
     2. **掛單中的長天期金額與張數**：既有 `venue_offers` 裡該天期的受管掛單（不新增查詢）。
-    3. **借出中的長天期金額**：`venue_credit_mirror` 裡 `present_in_latest_accepted_snapshot` 為真、`period_days` 等於該天期、`mts_opening` 不早於 `BFX_LONG_TENOR_SINCE` 的列的金額合計（loan 與 credit 兩種都算：同一時刻一筆放貸只會是其中一種）。這個數字在 D3＝A（借款記 7 天）成立時才有意義。
+    3. **借出中的長天期金額**：`venue_credit_mirror` 裡 `present_in_latest_accepted_snapshot` 為真、`period_days` 等於該天期或為 NULL（D8）、`mts_opening` 不早於 `BFX_LONG_TENOR_SINCE` 或為 NULL（步驟 3b）的列的金額合計（loan 與 credit 兩種都算：同一時刻一筆放貸只會是其中一種）。這個數字在 D3＝A（借款記 7 天）成立時才有意義。
     4. **已結束的長天期借款筆數**：`venue_credit_mirror` 裡 `source_kind='credit'`、`period_days` 等於該天期、`mts_opening` 不早於 `BFX_LONG_TENOR_SINCE`、已不在最新快照的列數（只數 credit，與報告判讀用的是同一個定義、不同的表（報告讀 `funding_credit_history`），步驟 9 判讀時核對兩邊筆數；loan 列不數，避免同一筆放貸先 loan 後 credit 被數兩次）。
     只讀，不寫任何表。四個數字的查詢都以幣別、天期與建立時間不早於 `BFX_LONG_TENOR_SINCE` 限定範圍，不掃全部歷史。過濾與計數寫成不碰 DB 的純函式（輸入是列的清單），DB 查詢只負責把列取出來。這是盤點 9 那個延後項（以 credit 自己的 `period` 計的天期上限）的讀取面。
   - 消費端：`rg -n "deployment_input|\.deploy\(|venue_offers=" backend/src backend/tests`。
@@ -181,7 +181,7 @@
   - B：不加索引，接受全表掃。只在表小的時候成立。
   - 建議：先對正式 DB 跑一次唯讀的列數查詢（需 owner 核准），四張表都在數十萬列以內選 B，否則選 A。
 
-- **D8 `period_days` 為 NULL 的借款要不要算進長天期的借出中**（狀態：已決 2026-11-22，Will：A，算進借出中、不算進已結束筆數；純計數與 SQL 讀取都已改。2026-11-22 步驟 3b `/code-review` 提出；原本擋住步驟 8（金額上限 600 生效）；不擋步驟 4–6：第零步只掛 1 張，由累計張數擋住，不靠金額上限）。步驟 1 的驗收寫「`period_days` 為 NULL 的列不算」；但觀測驗證允許借款沒有天期（`ledger/_internal/observation.py` 只拒絕 ≤ 0），而掛單中的長天期單是「天期不明也算」（fail closed）。兩邊不一致：venue 某次沒回天期時，一筆 7 天期借款不會被算進金額上限。
+- **D8 `period_days` 為 NULL 的借款要不要算進長天期的借出中**（狀態：已決 2026-11-22，Will：A，算進借出中、不算進已結束筆數；純計數與 SQL 讀取都已改。這是防線，不是補洞：`/code-review` 查到 `external/bitfinex/observations.py` 的 `parse_credit_observations` 把天期欄列為必填，venue 沒回天期時整次觀測被拒、那個 tick 不部署，所以現行路徑寫不出 `period_days` 為 NULL 的借款；下面「一筆 7 天期借款不會被算進金額上限」的情境在這次修改之前也不會發生。2026-11-22 步驟 3b `/code-review` 提出；原本擋住步驟 8（金額上限 600 生效）；不擋步驟 4–6：第零步只掛 1 張，由累計張數擋住，不靠金額上限）。步驟 1 的驗收寫「`period_days` 為 NULL 的列不算」；但觀測驗證允許借款沒有天期（`ledger/_internal/observation.py` 只拒絕 ≤ 0），而掛單中的長天期單是「天期不明也算」（fail closed）。兩邊不一致：venue 某次沒回天期時，一筆 7 天期借款不會被算進金額上限。
   - A（建議）：仍在借出中、天期不明的借款算進長天期的借出中（與掛單的算法一致）。代價：任何一筆天期不明的借款（包含 2 天期的）在它結束前都會佔金額上限，可能讓長天期暫時掛不出去。
   - B：維持不算，接受 venue 沒回天期時金額上限可能被超過一筆（上限 600、單筆 200）。
   - 需要的事實：正式 DB 的 `venue_credit_mirror` 有沒有出現過 `period_days` 為 NULL 的列（唯讀查詢，需 owner 核准）；從未出現的話兩案在實務上沒有差別。2026-11-22 查到的現況：36 列裡 `period_days` 為 NULL 的 0 列、`mts_opening` 為 NULL 的 0 列（只代表目前表裡的列，不代表 venue 永遠會回天期）。
