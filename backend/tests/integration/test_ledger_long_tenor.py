@@ -203,6 +203,42 @@ async def test_resting_counts_every_managed_offer_of_the_tenor_priced_or_not(
 
     assert state is not None
     assert state.resting == LongTenorLoad(2, Decimal("210"))
+    # Step 3 withdraws from the same read: both long offers, never the two-day one.
+    assert {o.venue_offer_id for o in state.withdrawable} == {"unpriced", "priced"}
     # The reprice input leaves the unpriced one out, which is why resting is read here.
     priced_ids = {o.venue_offer_id for o in await _input(ledger).offers(CycleResult("accepted"))}
     assert priced_ids == {"priced", "two-day"}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_exposure_read_still_returns_the_offers_to_withdraw(ledger: Book) -> None:
+    """A SQL error in the exposure read rolls back its savepoint only (step 3 still withdraws)."""
+    from typing import cast
+
+    from sqlalchemy import text
+
+    from bfx_funding_bot.modules.ledger import LedgerManagedOffers
+
+    await _long(ledger, "150", venue_offer_id="long")
+    long_offer = replace(_offer("long", "150"), period_days=7)
+    assert await ledger.accept(_observation(offers=(long_offer,))) == "accepted"
+
+    class _BrokenExposure:
+        def __init__(self) -> None:
+            self._real = build_ledger_managed_offers()
+
+        async def managed_live_offers(self, *args, **kwargs):
+            return await self._real.managed_live_offers(*args, **kwargs)
+
+        async def long_tenor_exposure(self, session, scope, query):
+            await session.execute(text("SELECT * FROM no_such_table"))
+
+    reader = LedgerDeploymentInput(
+        session_factory=ledger.factory, account_id=ledger.scope.exchange_account_id,
+        offers=cast(LedgerManagedOffers, _BrokenExposure()), long_tenor=QUERY,
+    )
+    state = await reader.long_tenor()
+
+    assert state is not None
+    assert state.exposure is None
+    assert [o.venue_offer_id for o in state.withdrawable] == ["long"]

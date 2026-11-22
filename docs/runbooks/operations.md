@@ -81,6 +81,24 @@ python -m scripts.amend_capital_policy --exchange-account-id UUID \
   這是日常的停止方式，不需要 HALTED。
 - 沒有包絡的幣別（舊 schema 的 policy）一律不送單（`envelope_unset`）。
 
+### 7 天期量測實驗：啟用、停止、回滾的順序
+
+計畫 `docs/plans/2026-11-22-seven-day-tenor-measurement.md`。程式（`BFX_LONG_TENOR_*` 九個變數，計畫步驟 4 寫進 `deploy/vm/live.env`）只決定「可以掛 7 天期」；實際的開關是 fUST 包絡的 `max_period_days`：
+
+- **啟用**：發版後，用上面的 `amend_capital_policy` 把 fUST 的 `--max-period-days` 改成 7（其他欄位照 `sudo bfx-op status` 現值）。改完下一個 tick 起，符合條件時才會掛 7 天期。
+- **停止**：同一支 script 把 `--max-period-days` 改回 2。下一個 tick，bot 會撤掉所有掛單中的 7 天期單（log `long_tenor_withdraw ... why=envelope`），也不再掛新的；已成交的 7 天期借款收不回來，等到期或借方還款。
+- **確認已經沒有 7 天期掛單**（停止之後、回滾之前必做）：
+
+  ```bash
+  docker logs bfx-bot --since 30m 2>&1 | grep -E "long_tenor_withdraw"
+  docker exec bfx-postgres psql -U bfx -d bfx -c "SELECT venue_offer_id, amount_remaining, mts_created FROM venue_offer_mirror WHERE symbol = 'fUST' AND period_days = 7 AND present_in_latest_accepted_snapshot"
+  ```
+
+  查詢回 0 列才算撤光（查詢是對正式 DB 的唯讀查詢，照計畫需要 owner 核准）。log 的 `outcome=` 不是 `success`／`already_terminal`（單在撤之前已結束）或有 `long_tenor_withdraw_error` 時，下一個 tick 會自動重試；連續數個 tick 都撤不掉就照 §3 kill。
+- **回滾程式或拿掉 `BFX_LONG_TENOR_*`**：一定在「停止」並確認撤光之後。順序反了，沒有政策的 bot 不會再撤 7 天期單（E1 的 book 參考也不會撤它），掛單會一直留著。
+- 沒成交的 7 天期單掛滿 `BFX_LONG_TENOR_OFFER_TIMEOUT_S`（1800 秒）會自動撤回、下一個 tick 再判斷要不要重掛，每 30 分鐘撤一次再掛是預期行為。
+- 自動停機（`HALTED/auto`）時，看告警決定要不要先把包絡改回 2（計畫前提）；HALTED 本身會撤掉所有受管掛單。
+
 ## 3. 帳戶停止與恢復
 
 ### 主要：CLI（`sudo bfx-op`）；UI 只能 kill

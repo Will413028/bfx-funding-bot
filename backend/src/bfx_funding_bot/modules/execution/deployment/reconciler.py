@@ -13,7 +13,7 @@ from dataclasses import replace
 from decimal import Decimal
 from math import isfinite
 from typing import Any, Protocol, cast
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy.exc import DisconnectionError, InterfaceError, OperationalError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
@@ -54,6 +54,7 @@ from bfx_funding_bot.modules.execution.deployment.rate_optimizer import (
     RateOptimizer,
 )
 from bfx_funding_bot.modules.execution.deployment.reprice import (
+    DEFAULT_MAX_CANCELS_PER_TICK,
     RepricePolicy,
     stale_offers,
     stale_offers_with_refs,
@@ -75,6 +76,7 @@ from bfx_funding_bot.modules.execution.deployment.tenor import (
     TenorChoice,
     TenorInputs,
     choose_tenor,
+    long_offers_to_withdraw,
 )
 from bfx_funding_bot.modules.execution.emit import emit_order_submit
 from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
@@ -378,10 +380,20 @@ class DeploymentReconciler:
         # ignored — byte-identical to pre-E1 behavior.
         now = self._clock()
         reconcile_id = f"reconcile:{now}"
+        # One per-tick cancel budget: the long-tenor withdrawal spends it first, E1 the rest.
         cancel_budget = (
-            self._reprice.max_cancels_per_tick if self._reprice is not None else 0
+            self._reprice.max_cancels_per_tick if self._reprice is not None
+            else DEFAULT_MAX_CANCELS_PER_TICK
         )
         long_sent = LongTenorLoad()
+        # Long-tenor withdrawal (plan 2026-11-22 seven-day tenor, step 3): before every
+        # symbol's E1 so it spends the shared budget first, and before the stop,
+        # uncertainty and capital reads, so neither a failed read, a missing quote nor
+        # BFX_REPRICE_ENABLED keeps a timed-out long offer up.
+        if long_tenor is not None and self._long_tenor is not None:
+            cancel_budget -= await self._withdraw_long_offers(
+                symbol=self._long_tenor.symbol, state=long_tenor, now=now, budget=cancel_budget,
+            )
         # Phase 2: each configured currency is an INDEPENDENT gap pool. The
         # reconciler is the real-money sizing authority, so the sizing math runs
         # once per symbol against THAT symbol's cap[symbol] / buffer[symbol] /
@@ -930,6 +942,71 @@ class DeploymentReconciler:
             if ref_rate is not None:
                 refs[offer.venue_offer_id] = ref_rate
         return refs
+
+    async def _envelope_max_period_days(self, symbol: str) -> int | None:
+        """The applied envelope's longest period; None when the policy cannot be read.
+
+        A policy without an envelope allows no long tenor (0), as in the tenor choice.
+        """
+        try:
+            async with self._session_factory() as session:
+                applied = await self._capital.read_policy(session, self._scope, symbol)
+        except Exception:  # a failed read only narrows the withdrawal to the timeout
+            log.warning("long_tenor_envelope_unreadable symbol=%s", symbol, exc_info=True)
+            return None
+        if isinstance(applied, CapitalBlocked):
+            log.warning("long_tenor_envelope_blocked symbol=%s reason=%s",
+                        symbol, applied.reason)
+            return None
+        envelope = applied.policy.envelope
+        return envelope.max_period_days if envelope is not None else 0
+
+    async def _withdraw_long_offers(
+        self, *, symbol: str, state: LongTenorState, now: int, budget: int,
+    ) -> int:
+        """Cancel the long offers that timed out or the envelope no longer allows.
+
+        Returns the cancels sent to the venue, an unacknowledged one included (the
+        budget bounds venue calls). Any error but auth is logged and the tick goes on.
+        """
+        assert self._long_tenor is not None
+        if not state.withdrawable or self._canceller is None:
+            return 0
+        envelope_days = await self._envelope_max_period_days(symbol)
+        due = long_offers_to_withdraw(
+            self._long_tenor, state.withdrawable, now_ms=now,
+            envelope_max_period_days=envelope_days,
+        )
+        issued = 0
+        for offer, why in due:
+            if issued >= budget:
+                log.info("long_tenor_withdraw_budget_exhausted symbol=%s deferred=%d",
+                         symbol, len(due) - issued)
+                break
+            try:
+                correlation = UUID(offer.signal_correlation_id)
+            except (TypeError, ValueError):
+                log.error("long_tenor_withdraw_no_correlation voi=%s", offer.venue_offer_id)
+                continue
+            try:
+                result = await self._canceller.cancel(
+                    venue_offer_id=offer.venue_offer_id,
+                    signal_correlation_id=correlation,
+                    account_id=self._ctx.account_id,
+                    ctx=self._ctx,
+                )
+            except ExecutorAuthError:
+                raise
+            except Exception:
+                # It may have reached the venue: counts against the budget all the same.
+                log.exception("long_tenor_withdraw_error voi=%s", offer.venue_offer_id)
+                issued += 1
+                continue
+            issued += 1
+            log.info("long_tenor_withdraw voi=%s symbol=%s why=%s age_s=%d outcome=%s",
+                     offer.venue_offer_id, symbol, why, (now - offer.mts_created) // 1000,
+                     result.outcome.value)
+        return issued
 
     async def _reprice_sweep(
         self,

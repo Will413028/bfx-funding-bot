@@ -137,7 +137,8 @@ def _simulated_capital(ledger, *, cell_exposure=None, totals=None, reserves=None
         async def read_policy(self, session, scope, symbol):
             total = totals[symbol]
             policy = CapitalPolicy(enabled=total > 0, reserve_amount=reserves.get(symbol, D("0")),
-                                   max_cell_fraction=D("0.70"))
+                                   max_cell_fraction=D("0.70"), envelope=envelope,
+                                   max_offer_amount=D("200") if envelope else None)
             return AppliedPolicy(scope.exchange_account_id, symbol, 1,
                                  "explicit-test-policy", UUID(int=1), policy)
 
@@ -1330,7 +1331,8 @@ async def test_decision_carries_cell_symbol():
 
 
 def _build_multi(*, cells, exposures, available_by_symbol, caps, buffers,
-                 quotes=None, executor=None, safety=None, event_sink=None):
+                 quotes=None, executor=None, safety=None, event_sink=None,
+                 envelope=None, **extra):
     store = StandingQuoteStore(ttl_ms=3_900_000)
     if quotes is None:
         quotes = [_post_quote(c.cell_id) for c in cells]
@@ -1347,11 +1349,13 @@ def _build_multi(*, cells, exposures, available_by_symbol, caps, buffers,
         store=store,
         safety_chain=safety, executor=ex, account_ctx=_ctx(), cells=cells,
         funding_rules=FixedRules(),
-        **_capital_ports(_simulated_capital(ledger, totals=caps, reserves=buffers)),
+        **_capital_ports(_simulated_capital(ledger, totals=caps, reserves=buffers,
+                                            envelope=envelope)),
         clock=lambda: 1_000,
         event_sink=event_sink if event_sink is not None else _CapturingSink(),
         phase=Phase.LIVE,
         **_eligibility_kwargs(),
+        **extra,
     )
     return rec, ex, safety
 
@@ -2004,7 +2008,7 @@ def _long_policy(**overrides):
     fields = {
         "symbol": "fUST", "period_days": 7, "min_daily_rate": D("0.0002"),
         "max_amount": D("10000"), "max_offers_total": 30, "max_ended_credits": 20,
-        "since_ms": 0, "until_ms": 10_000, "offer_timeout_s": 1800,
+        "since_ms": -10_000, "until_ms": 10_000, "offer_timeout_s": 1800,
     }
     return LongTenorPolicy(**{**fields, **overrides})
 
@@ -2134,3 +2138,221 @@ def test_long_tenor_refuses_the_optimizer_policy() -> None:
         _build_long(gate_policy=ExecutionPolicy.OPTIMIZER_LIVE,
                     execution_policy=ExecutionPolicy.OPTIMIZER_LIVE,
                     optimizer_fee_rate=D("0.15"))
+
+
+# --- Long-tenor withdrawal (plan 2026-11-22 seven-day tenor, step 3) -------------------
+# _build's clock is 1_000 ms; the policy's timeout is 1800 s.
+
+_TIMED_OUT = 1_000 - 1_805_000  # timeout plus the venue clock tolerance
+_YOUNG = 1_000 - 60_000
+
+
+def _managed_long(voi: str, *, created: int = _TIMED_OUT, period: int | None = 7,
+                  correlation: str | None = None):
+    from bfx_funding_bot.modules.ledger import ManagedOffer
+    return ManagedOffer(
+        venue_offer_id=voi, symbol="fUST", amount_remaining=D("150"), attempt_id=uuid4(),
+        decision_id="d", cell_id="fUST_a30",
+        signal_correlation_id=correlation if correlation is not None else str(uuid4()),
+        rate=D("0.0003"), rate_observed=True, period_days=period, mts_created=created,
+        amount_original=D("150"), status="ACTIVE",
+    )
+
+
+def _resting_long(*offers):
+    from bfx_funding_bot.modules.execution.deployment.tenor import LongTenorLoad, LongTenorState
+    from bfx_funding_bot.modules.ledger import LongTenorExposure
+    return LongTenorState(LongTenorExposure.none(),
+                          LongTenorLoad(len(offers), D(150) * len(offers)), offers)
+
+
+async def test_long_withdraw_leaves_a_young_offer() -> None:
+    canc = _FakeCanceller()
+    rec, _, _ = _build_long(canceller=canc)
+    await rec.deploy(long_tenor=_resting_long(_managed_long("y", created=_YOUNG)))
+    assert canc.cancelled == []
+
+
+async def test_long_withdraw_cancels_a_timed_out_offer() -> None:
+    canc = _FakeCanceller()
+    rec, _, _ = _build_long(canceller=canc)
+    await rec.deploy(long_tenor=_resting_long(_managed_long("old")))
+    assert canc.cancelled == ["old"]
+
+
+async def test_long_withdraw_never_cancels_a_signal_tenor_offer() -> None:
+    canc = _FakeCanceller()
+    rec, _, _ = _build_long(canceller=canc, envelope=_envelope(max_period_days=2))
+    await rec.deploy(long_tenor=_resting_long(_managed_long("two", period=2),
+                                              _managed_long("unknown", period=None)))
+    assert canc.cancelled == []
+
+
+async def test_long_withdraw_cancels_a_young_offer_once_the_envelope_is_back_at_two() -> None:
+    canc = _FakeCanceller()
+    rec, _, _ = _build_long(canceller=canc, envelope=_envelope(max_period_days=2))
+    await rec.deploy(long_tenor=_resting_long(_managed_long("y", created=_YOUNG)))
+    assert canc.cancelled == ["y"]
+
+
+async def test_long_withdraw_spends_the_budget_first_and_e1_gets_the_rest() -> None:
+    canc = _FakeCanceller()
+    reprice = RepricePolicy(True, 0.10, 1_800_000, 3, reference="book")
+    rec, _, _ = _build_long(canceller=canc, reprice=reprice)
+    stale = tuple(_venue_offer(f"s{i}", 0.01 + i * 0.001) for i in range(3))
+    await rec.deploy(venue_offers=stale, long_tenor=_resting_long(_managed_long("old")))
+    assert canc.cancelled == ["old", "s2", "s1"]
+
+
+async def test_long_withdraw_stops_when_the_budget_is_spent() -> None:
+    canc = _FakeCanceller()
+    reprice = RepricePolicy(True, 0.10, 1_800_000, 2, reference="book")
+    rec, _, _ = _build_long(canceller=canc, reprice=reprice)
+    stale = (_venue_offer("s0", 0.01),)
+    offers = tuple(_managed_long(f"l{i}", created=_TIMED_OUT - i) for i in range(3))
+    await rec.deploy(venue_offers=stale, long_tenor=_resting_long(*offers))
+    assert canc.cancelled == ["l2", "l1"]  # oldest first; E1 got nothing
+
+
+async def test_long_withdraw_budget_is_three_without_reprice() -> None:
+    canc = _FakeCanceller()
+    rec, _, _ = _build_long(canceller=canc)
+    offers = tuple(_managed_long(f"l{i}") for i in range(4))
+    await rec.deploy(long_tenor=_resting_long(*offers))
+    assert len(canc.cancelled) == 3
+
+
+async def test_long_withdraw_runs_with_reprice_disabled() -> None:
+    canc = _FakeCanceller()
+    reprice = RepricePolicy(False, 0.10, 1_800_000, 3, reference="book")
+    rec, _, _ = _build_long(canceller=canc, reprice=reprice)
+    await rec.deploy(long_tenor=_resting_long(_managed_long("old")))
+    assert canc.cancelled == ["old"]
+
+
+async def test_long_withdraw_runs_without_an_active_quote() -> None:
+    canc = _FakeCanceller()
+    rec, _, _ = _build_long(canceller=canc, quotes=[])
+    await rec.deploy(long_tenor=_resting_long(_managed_long("old")))
+    assert canc.cancelled == ["old"]
+
+
+async def test_long_withdraw_runs_when_the_capital_read_fails() -> None:
+    canc = _FakeCanceller()
+    rec, ex, _ = _build_long(canceller=canc)
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("capital down")
+
+    rec._capital.read = broken
+    await rec.deploy(long_tenor=_resting_long(_managed_long("old")))
+    assert canc.cancelled == ["old"]
+    assert ex.submitted == []
+
+
+async def test_long_withdraw_runs_while_the_symbol_is_uncertain() -> None:
+    canc = _FakeCanceller()
+    rec, ex, _ = _build_long(canceller=canc, uncertain_symbols={"fUST"})
+    await rec.deploy(long_tenor=_resting_long(_managed_long("old")))
+    assert canc.cancelled == ["old"]
+    assert ex.submitted == []
+
+
+async def test_long_withdraw_unreadable_envelope_only_times_out() -> None:
+    canc = _FakeCanceller()
+    rec, _, _ = _build_long(canceller=canc, envelope=_envelope(max_period_days=2))
+    calls = 0
+    real = rec._capital.read_policy
+
+    async def flaky(session, scope, symbol):
+        nonlocal calls
+        calls += 1
+        if calls == 1:  # the withdrawal reads the envelope before the stop check
+            raise RuntimeError("policy down")
+        return await real(session, scope, symbol)
+
+    rec._capital.read_policy = flaky
+    await rec.deploy(long_tenor=_resting_long(_managed_long("y", created=_YOUNG),
+                                              _managed_long("old")))
+    assert canc.cancelled == ["old"]
+
+
+async def test_long_withdraw_skips_an_offer_without_a_usable_correlation() -> None:
+    canc = _FakeCanceller()
+    rec, _, _ = _build_long(canceller=canc)
+    await rec.deploy(long_tenor=_resting_long(
+        _managed_long("bad", correlation="not-a-uuid", created=_TIMED_OUT - 1),
+        _managed_long("good")))
+    assert canc.cancelled == ["good"]
+
+
+async def test_long_withdraw_failure_does_not_stop_the_tick() -> None:
+    class _Boom(_FakeCanceller):
+        async def cancel(self, **kwargs):
+            raise RuntimeError("venue 500")
+
+    rec, ex, _ = _build_long(canceller=_Boom())
+    await rec.deploy(long_tenor=_resting_long(_managed_long("old")))
+    assert len(ex.submitted) == 2
+
+
+async def test_long_withdraw_auth_error_propagates() -> None:
+    class _Auth(_FakeCanceller):
+        async def cancel(self, **kwargs):
+            raise ExecutorAuthError("digest invalid")
+
+    rec, _, _ = _build_long(canceller=_Auth())
+    with pytest.raises(ExecutorAuthError):
+        await rec.deploy(long_tenor=_resting_long(_managed_long("old")))
+
+
+async def test_long_withdraw_needs_the_policy() -> None:
+    canc = _FakeCanceller()
+    rec, _, _ = _build_long(canceller=canc, long_tenor=None)
+    await rec.deploy(long_tenor=_resting_long(_managed_long("old")))
+    assert canc.cancelled == []
+
+
+async def test_long_withdraw_spends_the_budget_before_another_symbols_e1() -> None:
+    canc = _FakeCanceller()
+    rec, _, _ = _build_multi(
+        cells=[_cell("fUSD", "a30"), _cell("fUST", "a30")],
+        exposures={"fUST": D("0"), "fUSD": D("0")},
+        available_by_symbol={"fUST": D("0"), "fUSD": D("0")},
+        caps={"fUST": D("570"), "fUSD": D("570")}, buffers={"fUST": D("3"), "fUSD": D("3")},
+        envelope=_envelope(), canceller=canc, long_tenor=_long_policy(),
+        reprice=RepricePolicy(True, 0.10, 1_800_000, 1, reference="book"),
+    )
+    budgets: list[int] = []
+
+    async def greedy_e1(*, symbol, symbol_cells, venue_offers, now, budget):
+        budgets.append(budget)
+        return budget
+
+    rec._reprice_sweep = greedy_e1
+    await rec.deploy(venue_offers=(_venue_offer("usd", 0.01, symbol="fUSD"),),
+                     long_tenor=_resting_long(_managed_long("old")))
+    assert canc.cancelled == ["old"]
+    assert budgets[0] == 0  # fUSD's E1 came after the withdrawal and got what was left
+
+
+async def test_long_withdraw_counts_a_cancel_that_raised() -> None:
+    class _Boom(_FakeCanceller):
+        async def cancel(self, *, venue_offer_id, **kwargs):
+            self.cancelled.append(venue_offer_id)
+            raise RuntimeError("timeout after send")
+
+    canc = _Boom()
+    rec, _, _ = _build_long(canceller=canc)
+    await rec.deploy(long_tenor=_resting_long(*(_managed_long(f"l{i}") for i in range(4))))
+    assert len(canc.cancelled) == 3
+
+
+async def test_long_withdraw_runs_when_only_the_exposure_is_unreadable() -> None:
+    from bfx_funding_bot.modules.execution.deployment.tenor import LongTenorLoad, LongTenorState
+    canc = _FakeCanceller()
+    rec, ex, _ = _build_long(canceller=canc)
+    offer = _managed_long("old")
+    await rec.deploy(long_tenor=LongTenorState(None, LongTenorLoad(1, D(150)), (offer,)))
+    assert canc.cancelled == ["old"]
+    assert [d.offer_duration_days for d in ex.submitted] == [2, 2]

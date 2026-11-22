@@ -8,6 +8,7 @@ contradicts itself is neither.
 """
 from __future__ import annotations
 
+import logging
 from typing import Protocol
 from uuid import UUID
 
@@ -17,14 +18,18 @@ from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.modules.execution.deployment.tenor import (
     LongTenorState,
     resting_long_offers,
+    withdrawable_long_offers,
 )
 from bfx_funding_bot.modules.ledger import (
     CycleResult,
     LedgerManagedOffers,
+    LongTenorExposure,
     LongTenorQuery,
     ManagedOffer,
     Scope,
 )
+
+log = logging.getLogger(__name__)
 
 
 class DeploymentInput(Protocol):
@@ -66,10 +71,20 @@ class LedgerDeploymentInput:
             # the one-at-a-time limit must still see it.
             found = await self._offers.managed_live_offers(
                 session, self._scope, [self._long_tenor.symbol])
+            # A failed exposure read blocks new long offers only: the offers to withdraw
+            # still come back (savepoint, same transaction).
+            exposure: LongTenorExposure | None
+            try:
+                async with session.begin_nested():
+                    exposure = await self._offers.long_tenor_exposure(
+                        session, self._scope, self._long_tenor)
+            except Exception:  # the withdrawal must not depend on this read
+                log.exception("long_tenor_exposure_unreadable")
+                exposure = None
             return LongTenorState(
-                exposure=await self._offers.long_tenor_exposure(
-                    session, self._scope, self._long_tenor),
+                exposure=exposure,
                 resting=resting_long_offers(found, self._long_tenor),
+                withdrawable=withdrawable_long_offers(found, self._long_tenor),
             )
 
 

@@ -17,8 +17,10 @@ from bfx_funding_bot.modules.execution.deployment.tenor import (
     TenorChoice,
     TenorInputs,
     choose_tenor,
+    long_offers_to_withdraw,
     long_tenor_policy_from_env,
     resting_long_offers,
+    withdrawable_long_offers,
 )
 from bfx_funding_bot.modules.ledger import LongTenorExposure, ManagedOffer, ManagedOffers
 from bfx_funding_bot.modules.market import MarketSnapshot
@@ -115,7 +117,10 @@ def test_no_policy_or_other_symbol_records_nothing() -> None:
 @pytest.mark.parametrize(("overrides", "condition", "why"), [
     ({"envelope_max_period_days": 6}, 1, "envelope"),
     ({"now_ms": UNTIL_MS}, 2, "until"),
+    ({"now_ms": SINCE_MS + 4_999}, 2, "since"),
+    ({"now_ms": SINCE_MS + 5_000}, None, None),
     ({"state": None}, 3, "exposure_unreadable"),
+    ({"exposure": None}, 3, "exposure_unreadable"),
     ({"exposure": LongTenorExposure(29, Decimal(0), 0),
       "this_tick": LongTenorLoad()}, None, None),
     ({"exposure": LongTenorExposure(30, Decimal(0), 0)}, 3, "offers_total"),
@@ -215,9 +220,9 @@ def test_policy_from_env_rejects_invalid_values(key: str, value: str) -> None:
 
 
 def _managed(*, period: int | None = 7, created: int = NOW_MS, symbol: str = "fUST",
-             remaining: str = "150") -> ManagedOffer:
+             remaining: str = "150", voi: str = "1") -> ManagedOffer:
     return ManagedOffer(
-        venue_offer_id="1", symbol=symbol, amount_remaining=Decimal(remaining),
+        venue_offer_id=voi, symbol=symbol, amount_remaining=Decimal(remaining),
         attempt_id=uuid4(), decision_id="d", cell_id="c", signal_correlation_id="s",
         rate=None, rate_observed=False, period_days=period, mts_created=created,
         amount_original=None, status="ACTIVE",
@@ -227,11 +232,60 @@ def _managed(*, period: int | None = 7, created: int = NOW_MS, symbol: str = "fU
 def test_resting_counts_our_offers_of_the_tenor_or_unknown_tenor_since_the_start() -> None:
     found = ManagedOffers(offers=(
         _managed(), _managed(period=None, remaining="10"), _managed(period=2),
-        _managed(created=SINCE_MS - 1), _managed(symbol="fUSD"),
+        _managed(created=SINCE_MS - 5_001), _managed(symbol="fUSD"),
+        _managed(created=SINCE_MS - 5_000, remaining="1"),  # within the venue clock tolerance
     ), provenance_conflicts=())
-    assert resting_long_offers(found, _policy().query()) == LongTenorLoad(2, Decimal(160))
+    assert resting_long_offers(found, _policy().query()) == LongTenorLoad(3, Decimal(161))
 
 
 def test_resting_counts_a_contradictory_offer_without_its_amount() -> None:
     found = ManagedOffers(offers=(), provenance_conflicts=("x",))
     assert resting_long_offers(found, _policy().query()) == LongTenorLoad(1, Decimal(0))
+
+
+# --- Step 3: withdrawal ---------------------------------------------------------------
+
+TIMEOUT_MS = 1800 * 1000 + 5_000  # plus VENUE_CLOCK_TOLERANCE_MS
+
+
+def _withdraw(*offers: ManagedOffer, now: int = NOW_MS, envelope: int | None = 7):
+    return [(o.venue_offer_id, why) for o, why in long_offers_to_withdraw(
+        _policy(), offers, now_ms=now, envelope_max_period_days=envelope)]
+
+
+def test_withdrawable_is_exactly_the_long_tenor_of_the_symbol_before_the_start_too() -> None:
+    found = ManagedOffers(offers=(
+        _managed(voi="a"), _managed(voi="b", created=SINCE_MS - 1),
+        _managed(voi="c", period=None), _managed(voi="d", period=2),
+        _managed(voi="e", symbol="fUSD"),
+    ), provenance_conflicts=("x",))
+    assert [o.venue_offer_id for o in withdrawable_long_offers(found, _policy().query())] == [
+        "a", "b"]
+
+
+def test_withdraw_at_the_timeout_not_before() -> None:
+    assert _withdraw(_managed(created=NOW_MS - TIMEOUT_MS + 1)) == []
+    assert _withdraw(_managed(created=NOW_MS - TIMEOUT_MS)) == [("1", "timeout")]
+
+
+def test_withdraw_every_long_offer_once_the_envelope_refuses_the_tenor() -> None:
+    assert _withdraw(_managed(), envelope=6) == [("1", "envelope")]
+    assert _withdraw(_managed(), envelope=7) == []
+
+
+def test_withdraw_unreadable_envelope_falls_back_to_the_timeout() -> None:
+    assert _withdraw(_managed(), envelope=None) == []
+    assert _withdraw(_managed(created=NOW_MS - TIMEOUT_MS), envelope=None) == [
+        ("1", "timeout")]
+
+
+def test_withdraw_never_a_signal_tenor_or_other_symbol_offer() -> None:
+    old = NOW_MS - TIMEOUT_MS
+    assert _withdraw(_managed(period=2, created=old), _managed(period=None, created=old),
+                     _managed(symbol="fUSD", created=old), envelope=2) == []
+
+
+def test_withdraw_oldest_first() -> None:
+    old = NOW_MS - TIMEOUT_MS
+    assert _withdraw(_managed(voi="new", created=old), _managed(voi="old", created=old - 5)) == [
+        ("old", "timeout"), ("new", "timeout")]

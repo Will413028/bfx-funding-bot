@@ -6,7 +6,7 @@ offer the deployment loop is about to price is checked in order; the first condi
 fails keeps the signal's tenor and the existing path runs unchanged:
 
 1. the offer's symbol is the policy's and its envelope allows the long tenor;
-2. now is before the end date;
+2. now is on or after the start date (plus the venue clock tolerance) and before the end date;
 3. the long offers filled so far plus those sent this tick stay under the total limit
    (a resting offer is already in `offers_filled`: an offer counts unless it is known
    to have ended unfilled, so it is not added a second time);
@@ -17,6 +17,10 @@ fails keeps the signal's tenor and the existing path runs unchanged:
    least max(minimum daily rate, signal-tenor price).
 
 An unreadable exposure (`None`) never places a long offer.
+
+Step 3 withdraws a managed long offer that is still resting once it has rested for the
+policy's timeout, or once the envelope no longer allows the long tenor
+(`long_offers_to_withdraw`).
 """
 from __future__ import annotations
 
@@ -25,12 +29,18 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 
+from bfx_funding_bot.core.venue_time import VENUE_CLOCK_TOLERANCE_MS
 from bfx_funding_bot.modules.execution.contracts import BlockedExecution
 from bfx_funding_bot.modules.execution.deployment.period_pricing import (
     PeriodPricer,
     PriceDecision,
 )
-from bfx_funding_bot.modules.ledger import LongTenorExposure, LongTenorQuery, ManagedOffers
+from bfx_funding_bot.modules.ledger import (
+    LongTenorExposure,
+    LongTenorQuery,
+    ManagedOffer,
+    ManagedOffers,
+)
 from bfx_funding_bot.modules.market import MarketSnapshot
 from bfx_funding_bot.modules.strategy import DecisionPayload
 
@@ -141,18 +151,60 @@ def resting_long_offers(found: ManagedOffers, query: LongTenorQuery) -> LongTeno
     for offer in found.offers:
         if (offer.symbol == query.symbol
                 and offer.period_days in (None, query.period_days)
-                and offer.mts_created >= query.since_ms):
+                and offer.mts_created >= query.since_ms - VENUE_CLOCK_TOLERANCE_MS):
             count += 1
             amount += offer.amount_remaining
     return LongTenorLoad(count, amount)
+
+
+def withdrawable_long_offers(
+    found: ManagedOffers, query: LongTenorQuery,
+) -> tuple[ManagedOffer, ...]:
+    """The managed offers the venue reports at exactly the long tenor: what step 3 may cancel.
+
+    Narrower than `resting_long_offers` on purpose: an offer of unknown period may be a
+    signal-tenor offer, and a conflicting one has no provenance a cancel could name. Not
+    limited to `since_ms`: a long offer from before the window is withdrawn all the same.
+    """
+    return tuple(offer for offer in found.offers
+                 if offer.symbol == query.symbol and offer.period_days == query.period_days)
 
 
 @dataclass(frozen=True, slots=True)
 class LongTenorState:
     """What the deployment reads about the long tenor, in one transaction."""
 
-    exposure: LongTenorExposure
+    exposure: LongTenorExposure | None  # None: unreadable; no long offer goes out
     resting: LongTenorLoad
+    withdrawable: tuple[ManagedOffer, ...] = ()
+
+
+def long_offers_to_withdraw(
+    policy: LongTenorPolicy,
+    offers: tuple[ManagedOffer, ...],
+    *,
+    now_ms: int,
+    envelope_max_period_days: int | None,
+) -> tuple[tuple[ManagedOffer, str], ...]:
+    """Each long offer to cancel and why ("envelope" or "timeout"), oldest first.
+
+    `envelope_max_period_days` None means the envelope could not be read: only the
+    timeout applies then. The tenor is checked here again, so a caller passing other
+    offers cannot cancel a signal-tenor offer.
+    """
+    envelope_refuses = (envelope_max_period_days is not None
+                        and envelope_max_period_days < policy.period_days)
+    # The venue stamps mts_created; wait out the clock tolerance before calling it timed out.
+    timeout_ms = policy.offer_timeout_s * 1000 + VENUE_CLOCK_TOLERANCE_MS
+    out: list[tuple[ManagedOffer, str]] = []
+    for offer in sorted(offers, key=lambda o: o.mts_created):
+        if offer.symbol != policy.symbol or offer.period_days != policy.period_days:
+            continue
+        if envelope_refuses:
+            out.append((offer, "envelope"))
+        elif now_ms - offer.mts_created >= timeout_ms:
+            out.append((offer, "timeout"))
+    return tuple(out)
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +239,9 @@ def _schedule_refusal(policy: LongTenorPolicy, inputs: TenorInputs) -> TenorChoi
                         envelope_max_period_days=inputs.envelope_max_period_days)
     if inputs.now_ms >= policy.until_ms:
         return _refused(2, "until")
+    # Every count starts at since_ms: an offer placed before it would never be counted.
+    if inputs.now_ms < policy.since_ms + VENUE_CLOCK_TOLERANCE_MS:
+        return _refused(2, "since")
     return None
 
 
@@ -194,7 +249,7 @@ def _limits_refusal(
     policy: LongTenorPolicy, candidate: DecisionPayload, inputs: TenorInputs,
 ) -> TenorChoice | None:
     """Conditions 3-5: the total, one-at-a-time, amount and sample limits."""
-    if inputs.state is None:
+    if inputs.state is None or inputs.state.exposure is None:
         return _refused(3, "exposure_unreadable")
     exposure, resting, this_tick = inputs.state.exposure, inputs.state.resting, inputs.this_tick
     if exposure.offers_filled + this_tick.count >= policy.max_offers_total:
@@ -249,6 +304,8 @@ __all__ = [
     "TenorChoice",
     "TenorInputs",
     "choose_tenor",
+    "long_offers_to_withdraw",
     "long_tenor_policy_from_env",
     "resting_long_offers",
+    "withdrawable_long_offers",
 ]
