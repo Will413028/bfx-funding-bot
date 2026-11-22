@@ -7,6 +7,7 @@ import pytest
 
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.hold_times import (
+    Bootstrap,
     EndedCredit,
     group_holds,
     loans_that_became_credits,
@@ -165,6 +166,10 @@ def test_a_loan_that_opened_with_a_same_shaped_credit_is_flagged() -> None:
     twin = EndedCredit(credit_id=4, kind="loan", symbol="fUST", rate=RATE, period_days=2,
                        amount=Decimal("100"), opened_mts=T0, closed_mts=T0 + 2 * H)
     assert loans_that_became_credits([loan, twin, used]) == 1
+    # A loan that outlasts the credit did not turn into it.
+    short = EndedCredit(credit_id=6, kind="credit", symbol="fUST", rate=RATE, period_days=2,
+                        amount=Decimal("100"), opened_mts=T0, closed_mts=T0 + H)
+    assert loans_that_became_credits([loan, short]) == 0
 
 
 def test_terms_are_never_pooled() -> None:
@@ -196,6 +201,15 @@ def test_repaid_after_a_drop_counts_only_credits_that_saw_the_drop_first() -> No
     late_drop = _reference(dict.fromkeys(range(40, 120), "0.0001"))
     matured = repaid_after_drop(measure_holds([to_term], late_drop, MARGIN))
     assert (matured.n_dropped, matured.n_repaid_after, matured.share) == (1, 0, Decimal(0))
+    # A 7-day credit repaid on its first day, reported with three days of candles: the
+    # drop is judged on the hours it was out, not on a term the candles do not reach.
+    long_early = _credit(6, opened_h=2, held_h=12, period_days=7)
+    short_series = _reference(dict.fromkeys(range(10, 72), "0.0001"), hours=72)
+    row = measure_holds([long_early], short_series, MARGIN)[0]
+    assert row.predicted_ms is None and row.drop_ms == 9 * H
+    assert repaid_after_drop([row]).share == 1
+    # Hours the candles do not cover cannot show a drop.
+    assert measure_holds([long_early], _reference({}, hours=5), MARGIN)[0].drop_ms is None
     # No drop at all: nothing to divide by, not a zero.
     flat = repaid_after_drop(measure_holds([followed, to_term], _reference({}), MARGIN))
     assert (flat.n_dropped, flat.share) == (0, None)
@@ -219,7 +233,7 @@ def _long_and_base() -> list[EndedCredit]:
 
 def test_the_rate_gap_is_weighted_by_amount_and_time() -> None:
     rows = measure_holds(_long_and_base(), [], MARGIN)
-    gap = rate_gap(rows, period_days=7, min_sample=3, resamples=200)
+    gap = rate_gap(rows, period_days=7, min_sample=3, bootstrap=Bootstrap(resamples=200))
     assert (gap.n_long, gap.n_included, gap.n_excluded) == (3, 2, 1)
     # Credit 1: 0.0005 - (100*0.0002 + 300*0.0004)/400 = 0.00015, weight 100 x 100h.
     # Credit 2: 0.0003 - 0.0002 = 0.0001, weight 300 x 50h.
@@ -227,7 +241,7 @@ def test_the_rate_gap_is_weighted_by_amount_and_time() -> None:
     assert gap.ci_low is not None and gap.ci_high is not None
     assert Decimal("0.0001") <= gap.ci_low <= gap.gap <= gap.ci_high <= Decimal("0.00015")
     # Same seed, same interval.
-    again = rate_gap(rows, period_days=7, min_sample=3, resamples=200)
+    again = rate_gap(rows, period_days=7, min_sample=3, bootstrap=Bootstrap(resamples=200))
     assert (again.ci_low, again.ci_high) == (gap.ci_low, gap.ci_high)
 
 
@@ -246,3 +260,27 @@ def test_the_rate_gap_needs_an_included_credit_and_ignores_loans() -> None:
     gap = rate_gap(measure_holds([alone, loan], [], MARGIN), period_days=7, min_sample=1)
     assert (gap.n_long, gap.n_included, gap.n_excluded) == (1, 0, 1)
     assert (gap.gap, gap.ci_low, gap.ci_high) == (None, None, None)
+
+
+def test_a_long_credit_without_a_fixed_rate_is_not_scored() -> None:
+    frr = _credit(4, opened_h=0, held_h=90, rate=Decimal(0), period_days=7)
+    gap = rate_gap(measure_holds([*_long_and_base(), frr], [], MARGIN),
+                   period_days=7, min_sample=3, bootstrap=Bootstrap(resamples=200))
+    assert (gap.n_long, gap.n_included, gap.gap) == (3, 2, Decimal("0.00012"))
+
+
+def test_the_rate_gap_waits_for_the_two_day_credits_alongside_to_end() -> None:
+    rows = measure_holds(_long_and_base(), [], MARGIN)
+    last_close = T0 + 530 * H
+    early = rate_gap(rows, period_days=7, min_sample=3, bootstrap=Bootstrap(resamples=200),
+                     as_of_mts=last_close + 47 * H)
+    assert (early.settled, early.gap, early.ci_low) == (False, None, None)
+    assert early.n_included == 2  # still counted, only not reported
+    later = rate_gap(rows, period_days=7, min_sample=3, bootstrap=Bootstrap(resamples=200),
+                     as_of_mts=last_close + 48 * H)
+    assert (later.settled, later.gap) == (True, Decimal("0.00012"))
+
+
+def test_the_long_term_must_be_longer_than_the_base() -> None:
+    with pytest.raises(ValueError, match="over 2 days"):
+        rate_gap([], period_days=2)

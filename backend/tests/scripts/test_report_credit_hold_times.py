@@ -114,6 +114,24 @@ def test_a_bad_margin_is_refused(margin: str) -> None:
         report._parse_args([*good, "--refinance-margin", margin])
 
 
+def test_the_long_term_cannot_be_the_base_term() -> None:
+    good = ["--registry-entry", "x", "--output", "/nonexistent/x.md"]
+    assert report._parse_args([*good, "--long-period-days", "14"]).long_period_days == 14
+    with pytest.raises(SystemExit):
+        report._parse_args([*good, "--long-period-days", "2"])
+
+
+def test_a_gap_from_a_run_that_came_too_early_is_said_so() -> None:
+    data = _data()
+    data.credits.append(_credit(4, "credit", 84, period_days=7))
+    closed = T0 + 85 * H
+    line = report.render_markdown(
+        [report.build_report(data, Decimal("0.2"), 7, closed + 10 * H)], margin=Decimal("0.2"))
+    assert "not reported, run too early (1 ended 7-day credits" in line
+    settled = report.build_report(data, Decimal("0.2"), 7, closed + 48 * H)
+    assert settled.gap.settled is True
+
+
 def _row(credit_id: int, account: UUID, *, closed: int | None, amount: str = "-100") -> FundingCreditHistoryRow:
     return FundingCreditHistoryRow(
         exchange_account_id=account, kind="credit", credit_id=credit_id, symbol="fUST", side=1,

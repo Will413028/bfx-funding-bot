@@ -43,8 +43,15 @@ FOLLOW_WINDOW_MS = 24 * _MS_PER_HOUR
 # Ended long credits below which the rate gap is not reported.
 MIN_LONG_SAMPLE = 20
 BASE_PERIOD_DAYS = 2
-BOOTSTRAP_RESAMPLES = 10_000
-BOOTSTRAP_SEED = 20261122
+
+
+@dataclass(frozen=True)
+class Bootstrap:
+    resamples: int = 10_000
+    seed: int = 20261122
+
+
+DEFAULT_BOOTSTRAP = Bootstrap()
 
 
 @dataclass(frozen=True)
@@ -69,6 +76,9 @@ class HoldRow:
     drop_at_close: Decimal | None
     # What the refinance rule gives for this credit; None when the reference does not cover it.
     predicted_ms: int | None
+    # Time from the opening to the first close under the rule's trigger that came before
+    # the credit actually ended; None when there was none or the series cannot show it.
+    drop_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -104,6 +114,7 @@ def measure_holds(
             early=held_ms < term_ms - EARLY_TOLERANCE_MS,
             drop_at_close=_drop_at(series, credit.closed_mts, credit.rate),
             predicted_ms=predicted,
+            drop_ms=_drop_before_close(series, credit, margin, held_ms),
         ))
     return rows
 
@@ -120,21 +131,44 @@ def _rule_prediction(
     that fires the rule, so a credit with less than `MIN_TERM_COVERAGE` of its
     term on the series is left out whether or not the rule fired on the rest.
     """
-    if credit.rate <= 0:
+    return _rule_hold(series, credit, margin, term_ms)
+
+
+def _rule_hold(
+    series: tuple[list[int], list[Decimal | None]], credit: EndedCredit, margin: Decimal,
+    span_ms: int,
+) -> int | None:
+    """The rule run over the first `span_ms` of the credit; `span_ms` when it did not fire."""
+    if credit.rate <= 0 or span_ms <= 0:
         return None
     mts = series[0]
-    end_mts = credit.opened_mts + term_ms
-    # Candles whose close falls inside the term, the hour the credit opened in included.
+    end_mts = credit.opened_mts + span_ms
+    # Candles whose close falls inside the span, the hour the credit opened in included.
     covered = bisect_left(mts, end_mts - _MS_PER_HOUR + 1) - bisect_right(
         mts, credit.opened_mts - _MS_PER_HOUR)
-    if covered * _MS_PER_HOUR < MIN_TERM_COVERAGE * term_ms:
+    if covered * _MS_PER_HOUR < MIN_TERM_COVERAGE * span_ms:
         return None
     try:
         return held_ms_until_refinance(
             series, lock_start_mts=credit.opened_mts, locked_rate=credit.rate,
-            margin=margin, term_ms=term_ms)
+            margin=margin, term_ms=span_ms)
     except BacktestIncomplete:
         return None
+
+
+def _drop_before_close(
+    series: tuple[list[int], list[Decimal | None]], credit: EndedCredit, margin: Decimal,
+    held_ms: int,
+) -> int | None:
+    """When the market first closed under the trigger while the credit was still out.
+
+    Judged on the hours the credit was actually held, with the same coverage share:
+    a long credit repaid on its first day needs candles to that day, not to a term
+    end that may lie after the report runs. Requiring the whole term would drop
+    exactly the early repayments and keep the credits that ran to term.
+    """
+    fired = _rule_hold(series, credit, margin, held_ms)
+    return fired if fired is not None and fired < held_ms else None
 
 
 def _drop_at(
@@ -157,19 +191,22 @@ def loans_that_became_credits(credits: Sequence[EndedCredit], *, within_ms: int 
     A heuristic for one lend the venue listed first as a loan (taken, unused) and
     then as a credit (in use): such a loan's end is a conversion, not a repayment.
     The credit keeps the lend's opening time, so the two are matched on when they
-    opened; the loan row ends at the conversion, before the credit does.
+    opened; the loan row ends at the conversion, no later than the credit does.
     """
-    opened_by_shape: dict[tuple[Decimal, Decimal, int], list[int]] = {}
+    opened_by_shape: dict[tuple[Decimal, Decimal, int], list[tuple[int, int]]] = {}
     for credit in credits:
         if credit.kind == "credit":
             key = (credit.amount, credit.rate, credit.period_days)
-            opened_by_shape.setdefault(key, []).append(credit.opened_mts)
+            opened_by_shape.setdefault(key, []).append((credit.opened_mts, credit.closed_mts))
     converted = 0
     for loan in credits:
         if loan.kind != "loan":
             continue
         openings = opened_by_shape.get((loan.amount, loan.rate, loan.period_days), [])
-        match = next((o for o in openings if abs(o - loan.opened_mts) <= within_ms), None)
+        # The loan listing comes first: it cannot outlast the credit it turned into.
+        match = next((pair for pair in openings
+                      if abs(pair[0] - loan.opened_mts) <= within_ms
+                      and loan.closed_mts <= pair[1]), None)
         if match is not None:
             openings.remove(match)  # one credit explains one loan
             converted += 1
@@ -229,20 +266,16 @@ def repaid_after_drop(rows: Sequence[HoldRow]) -> DropFollow:
     """Of the venue credits that saw the market fall under the trigger, how many then left.
 
     The fall is the refinance rule's own: the first hourly 2-day close under
-    `rate * (1 - margin)` inside the term, on the series and coverage `measure_holds`
-    used. A credit counts only if that close came before it actually ended; one
-    that then ran to its term is in the denominator, never the numerator.
+    `rate * (1 - margin)`, on the series `measure_holds` used (`HoldRow.drop_ms`).
+    A credit counts only if that close came before it actually ended; one that
+    then ran to its term is in the denominator, never the numerator.
     """
     dropped = repaid = 0
     for row in rows:
-        if (row.credit.kind != "credit" or row.predicted_ms is None
-                or row.predicted_ms >= row.term_ms):
-            continue
-        drop_mts = row.credit.opened_mts + row.predicted_ms
-        if drop_mts >= row.credit.closed_mts:
+        if row.credit.kind != "credit" or row.drop_ms is None:
             continue
         dropped += 1
-        if row.early and row.credit.closed_mts - drop_mts <= FOLLOW_WINDOW_MS:
+        if row.early and row.held_ms - row.drop_ms <= FOLLOW_WINDOW_MS:
             repaid += 1
     return DropFollow(dropped, repaid, Decimal(repaid) / dropped if dropped else None)
 
@@ -250,7 +283,7 @@ def repaid_after_drop(rows: Sequence[HoldRow]) -> DropFollow:
 @dataclass(frozen=True)
 class RateGap:
     period_days: int
-    n_long: int  # ended venue credits of the long term
+    n_long: int  # ended venue credits of the long term with a real fixed rate
     n_included: int  # of those, lent alongside at least one 2-day credit
     n_excluded: int  # no 2-day credit overlapped their life
     min_sample: int
@@ -259,6 +292,9 @@ class RateGap:
     gap: Decimal | None
     ci_low: Decimal | None
     ci_high: Decimal | None
+    # False when the newest long credit ended too recently for the 2-day credits lent
+    # alongside it to have ended and be in the data: the gap is then not reported.
+    settled: bool = True
 
 
 def _base_rate_over(base: Sequence[EndedCredit], start_mts: int, end_mts: int) -> Decimal | None:
@@ -273,21 +309,39 @@ def _base_rate_over(base: Sequence[EndedCredit], start_mts: int, end_mts: int) -
 
 
 def _bootstrap_interval(
-    gaps: Sequence[Decimal], weights: Sequence[Decimal], *, resamples: int, seed: int,
+    gaps: Sequence[Decimal], weights: Sequence[Decimal], bootstrap: Bootstrap,
 ) -> tuple[Decimal, Decimal]:
     """The 2.5 and 97.5 percentiles of the weighted mean over resampled credits."""
     gap = np.array([float(g) for g in gaps])
     weight = np.array([float(w) for w in weights])
-    picks = np.random.default_rng(seed).integers(0, len(gap), size=(resamples, len(gap)))
+    resamples = bootstrap.resamples
+    picks = np.random.default_rng(bootstrap.seed).integers(
+        0, len(gap), size=(resamples, len(gap)))
     means = np.sort((gap[picks] * weight[picks]).sum(axis=1) / weight[picks].sum(axis=1))
-    low = means[int(resamples * 0.025)]
-    high = means[min(resamples - 1, int(resamples * 0.975))]
+    # The same number of resampled means is left outside on each side.
+    cut = int(resamples * 0.025)
+    low = means[max(0, cut - 1)]
+    high = means[min(resamples - 1, resamples - cut)]
     return Decimal(repr(float(low))), Decimal(repr(float(high)))
 
 
+def _long_gaps(
+    long_rows: Sequence[HoldRow], base: Sequence[EndedCredit],
+) -> tuple[list[Decimal], list[Decimal]]:
+    """Each included long credit's rate over its 2-day comparison, and its weight."""
+    gaps: list[Decimal] = []
+    weights: list[Decimal] = []
+    for row in long_rows:
+        base_rate = _base_rate_over(base, row.credit.opened_mts, row.credit.closed_mts)
+        if base_rate is not None and row.held_ms > 0:
+            gaps.append(row.credit.rate - base_rate)
+            weights.append(row.credit.amount * row.held_ms)
+    return gaps, weights
+
+
 def rate_gap(
-    rows: Sequence[HoldRow], *, period_days: int, min_sample: int = MIN_LONG_SAMPLE,
-    resamples: int = BOOTSTRAP_RESAMPLES, seed: int = BOOTSTRAP_SEED,
+    rows: Sequence[HoldRow], *, period_days: int, as_of_mts: int | None = None,
+    min_sample: int = MIN_LONG_SAMPLE, bootstrap: Bootstrap = DEFAULT_BOOTSTRAP,
 ) -> RateGap:
     """What a long credit earned over the 2-day credits lent during the same hours.
 
@@ -297,25 +351,29 @@ def rate_gap(
     rate (above 0: 0 marks FRR), each counted for the part of its life inside the
     long credit's own, weighted by amount x overlap. A long credit nothing
     overlaps is left out and counted. The sample threshold is on ended long
-    credits, included or not.
+    credits, included or not. Long credits without a real fixed rate are not long
+    credits here at all. Only ended credits are in the data, so with `as_of_mts`
+    (the time of the run) the gap is withheld until the newest long credit has
+    been over for a full 2-day term: before that the 2-day credits lent during
+    its last hours may still be out and missing from the comparison.
     """
+    if period_days <= BASE_PERIOD_DAYS:
+        raise ValueError(f"the long term must be over {BASE_PERIOD_DAYS} days, got {period_days}")
     credits = [row for row in rows if row.credit.kind == "credit"]
     base = [row.credit for row in credits
             if row.credit.period_days == BASE_PERIOD_DAYS and row.credit.rate > 0]
-    long_rows = [row for row in credits if row.credit.period_days == period_days]
-    gaps: list[Decimal] = []
-    weights: list[Decimal] = []
-    for row in long_rows:
-        base_rate = _base_rate_over(base, row.credit.opened_mts, row.credit.closed_mts)
-        if base_rate is not None and row.held_ms > 0:
-            gaps.append(row.credit.rate - base_rate)
-            weights.append(row.credit.amount * row.held_ms)
+    long_rows = [row for row in credits
+                 if row.credit.period_days == period_days and row.credit.rate > 0]
+    settle_ms = BASE_PERIOD_DAYS * 24 * _MS_PER_HOUR
+    settled = as_of_mts is None or all(
+        as_of_mts - row.credit.closed_mts >= settle_ms for row in long_rows)
+    gaps, weights = _long_gaps(long_rows, base)
     gap = low = high = None
-    if len(long_rows) >= min_sample and gaps and sum(weights) > 0:
+    if settled and len(long_rows) >= min_sample and gaps and sum(weights) > 0:
         gap = sum((g * w for g, w in zip(gaps, weights, strict=True)), Decimal(0)) / sum(weights)
-        low, high = _bootstrap_interval(gaps, weights, resamples=resamples, seed=seed)
+        low, high = _bootstrap_interval(gaps, weights, bootstrap)
     return RateGap(
         period_days=period_days, n_long=len(long_rows), n_included=len(gaps),
         n_excluded=len(long_rows) - len(gaps), min_sample=min_sample,
-        gap=gap, ci_low=low, ci_high=high,
+        gap=gap, ci_low=low, ci_high=high, settled=settled,
     )

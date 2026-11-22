@@ -39,6 +39,7 @@ from bfx_funding_bot.core.db import make_engine, make_session_factory, session_s
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.hold_times import (
+    BASE_PERIOD_DAYS,
     DropFollow,
     EndedCredit,
     HoldRow,
@@ -77,7 +78,11 @@ CAVEATS = (
     "end is not a repayment, so the loan row overstates early closes by about that many.",
     "'repaid after a drop' is over venue credits the market fell under the rule's trigger for "
     "before they ended: the share repaid early within 24 hours of that close. A credit that "
-    "then ran to its term counts against it.",
+    "then ran to its term counts against it. The drop is looked for over the hours the credit "
+    "was actually out; a credit whose hours the candles do not cover is left out.",
+    "Only ended credits are read. A credit still out is in no row, so a report run while "
+    "long credits are out sees only the ones repaid early and overstates early repayment "
+    "for that term.",
     "The rate gap is the long credit's rate minus the amount-and-overlap weighted rate of the "
     "2-day credits (fixed rate only) lent during its life, per unit per day. It is a rate "
     "difference: it leaves out the hours 2-day money sits idle between credits, so it is "
@@ -177,7 +182,9 @@ class SymbolReport:
     gap: RateGap
 
 
-def build_report(data: SymbolData, margin: Decimal, long_period_days: int) -> SymbolReport:
+def build_report(
+    data: SymbolData, margin: Decimal, long_period_days: int, as_of_mts: int,
+) -> SymbolReport:
     rows = measure_holds(data.credits, data.reference, margin)
     groups = group_holds(rows)
     return SymbolReport(
@@ -185,13 +192,17 @@ def build_report(data: SymbolData, margin: Decimal, long_period_days: int) -> Sy
         summaries={key: summarize_holds(group, margin) for key, group in groups.items()},
         drop_follow={period: repaid_after_drop(group)
                      for (kind, period), group in groups.items() if kind == "credit"},
-        gap=rate_gap(rows, period_days=long_period_days),
+        gap=rate_gap(rows, period_days=long_period_days, as_of_mts=as_of_mts),
     )
 
 
 def _gap_line(gap: RateGap) -> str:
     counts = (f"{gap.n_long} ended {gap.period_days}-day credits, {gap.n_included} included, "
               f"{gap.n_excluded} with no overlapping 2-day credit")
+    if not gap.settled:
+        return (f"Rate gap, {gap.period_days}-day against 2-day: not reported, run too early "
+                f"({counts}; the newest {gap.period_days}-day credit ended less than two days "
+                "ago, so the 2-day credits lent alongside it may still be out).")
     if gap.gap is None:
         return (f"Rate gap, {gap.period_days}-day against 2-day: not reported ({counts}; "
                 f"reported from {gap.min_sample} ended).")
@@ -299,6 +310,8 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         margin_ok = Decimal(0) < Decimal(args.refinance_margin) < Decimal(1)
     except ArithmeticError:
         margin_ok = False
+    if args.long_period_days <= BASE_PERIOD_DAYS:
+        p.error(f"--long-period-days must be over {BASE_PERIOD_DAYS}")
     if not margin_ok:
         p.error("--refinance-margin must be a fraction strictly between 0 and 1, e.g. 0.2")
     return args
@@ -325,7 +338,8 @@ async def _amain(argv: Sequence[str]) -> int:
     if missing:
         logger.error("no 2-day candles over the credits of %s", missing)
         return 2
-    reports = [build_report(data, margin, args.long_period_days) for data in loaded]
+    as_of_mts = int(start.started_at.timestamp() * 1000)
+    reports = [build_report(data, margin, args.long_period_days, as_of_mts) for data in loaded]
     out: Path = args.output
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render_markdown(reports, margin=margin))
