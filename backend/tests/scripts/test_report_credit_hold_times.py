@@ -19,8 +19,9 @@ T0 = 1_768_003_200_000  # 2026-01-10T00:00:00Z
 RATE = Decimal("0.0002")
 
 
-def _credit(credit_id: int, kind: str, held_h: int) -> EndedCredit:
-    return EndedCredit(credit_id=credit_id, kind=kind, symbol="fUST", rate=RATE, period_days=2,
+def _credit(credit_id: int, kind: str, held_h: int, period_days: int = 2) -> EndedCredit:
+    return EndedCredit(credit_id=credit_id, kind=kind, symbol="fUST", rate=RATE,
+                       period_days=period_days,
                        amount=Decimal("100"), opened_mts=T0 + H, closed_mts=T0 + H + held_h * H)
 
 
@@ -52,21 +53,48 @@ def test_report_groups_by_kind_and_places_the_measurement(
     symbol = payload["symbols"][0]
     assert symbol["open_rows_left_out"] == 2
     # Credits and loans are never pooled: one lend may be listed as both.
-    assert set(symbol["summaries"]) == {"credit", "loan"}
-    assert (symbol["summaries"]["credit"]["n"], symbol["summaries"]["credit"]["n_early"]) == (2, 1)
-    assert symbol["summaries"]["loan"]["n_early"] == 0
+    assert set(symbol["summaries"]) == {"credit_2d", "loan_2d"}
+    assert (symbol["summaries"]["credit_2d"]["n"],
+            symbol["summaries"]["credit_2d"]["n_early"]) == (2, 1)
+    assert symbol["summaries"]["loan_2d"]["n_early"] == 0
     # One of two credits held to term while the rule predicted an immediate repayment.
-    assert abs(Decimal(symbol["summaries"]["credit"]["position"]) - Decimal("0.5")) < Decimal("1e-9")
-    assert symbol["loans_that_look_converted"] == 0
+    assert abs(Decimal(symbol["summaries"]["credit_2d"]["position"]) - Decimal("0.5")) < Decimal("1e-9")
+    # The loan opened together with a same-shaped credit: one lend listed twice.
+    assert symbol["loans_that_look_converted"] == 1
     assert symbol["credits"][1]["held_hours"] == "1.0000"
-    assert symbol["summaries"]["credit"]["median_held_hours"] == "24.5000"
+    assert symbol["summaries"]["credit_2d"]["median_held_hours"] == "24.5000"
     assert [c["credit_id"] for c in symbol["credits"]] == [1, 2, 3]
     assert symbol["credits"][1]["early"] is True
     markdown = out.read_text()
     assert "## fUST — 3 ended credits (2 rows without a close time left out)" in markdown
-    assert "| loan | 1 | 0 |" in markdown
+    assert "| loan | 2 | 1 | 0 |" in markdown
+    # The market is under the trigger from the first close: the 48h credit saw it and stayed,
+    # the 1h credit ended at that same close, so it did not see a drop before it ended.
+    assert symbol["repaid_after_drop"] == {
+        "credit_2d": {"n_dropped": 1, "n_repaid_after": 0, "share": "0"}}
+    assert "| 1 | 0 (0.000) |" in markdown
+    assert symbol["rate_gap"]["n_long"] == 0 and symbol["rate_gap"]["gap"] is None
+    assert "Rate gap, 7-day against 2-day: not reported (0 ended 7-day credits" in markdown
     record = json.loads(out.with_suffix(".run.json").read_text())
     assert record["registry_entry"] == "hold-times"
+
+
+def test_each_term_gets_its_own_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    data = _data()
+    data.credits.append(_credit(4, "credit", 84, period_days=7))
+    rc, out = _run(tmp_path, monkeypatch, [data])
+    assert rc == 0
+    symbol = json.loads(out.with_suffix(".json").read_text())["symbols"][0]
+    assert set(symbol["summaries"]) == {"credit_2d", "credit_7d", "loan_2d"}
+    assert symbol["summaries"]["credit_2d"]["n"] == 2
+    assert symbol["summaries"]["credit_7d"]["median_held_share"] == "0.5"
+    assert set(symbol["repaid_after_drop"]) == {"credit_2d", "credit_7d"}
+    # One ended 7-day credit is far under the sample the gap is reported from.
+    assert (symbol["rate_gap"]["n_long"], symbol["rate_gap"]["n_included"]) == (1, 1)
+    assert symbol["rate_gap"]["gap"] is None
+    assert "| credit | 7 | 1 |" in out.read_text()
+    record = json.loads(out.with_suffix(".run.json").read_text())
+    assert record["params"]["long_period_days"] == 7
 
 
 def test_no_credits_or_no_candles_is_an_error_not_an_empty_report(
@@ -84,6 +112,24 @@ def test_a_bad_margin_is_refused(margin: str) -> None:
     assert report._parse_args(good).refinance_margin == "0.2"
     with pytest.raises(SystemExit):
         report._parse_args([*good, "--refinance-margin", margin])
+
+
+def test_the_long_term_cannot_be_the_base_term() -> None:
+    good = ["--registry-entry", "x", "--output", "/nonexistent/x.md"]
+    assert report._parse_args([*good, "--long-period-days", "14"]).long_period_days == 14
+    with pytest.raises(SystemExit):
+        report._parse_args([*good, "--long-period-days", "2"])
+
+
+def test_a_gap_from_a_run_that_came_too_early_is_said_so() -> None:
+    data = _data()
+    data.credits.append(_credit(4, "credit", 84, period_days=7))
+    closed = T0 + 85 * H
+    line = report.render_markdown(
+        [report.build_report(data, Decimal("0.2"), 7, closed + 10 * H)], margin=Decimal("0.2"))
+    assert "not reported, run too early (1 ended 7-day credits" in line
+    settled = report.build_report(data, Decimal("0.2"), 7, closed + 48 * H)
+    assert settled.gap.settled is True
 
 
 def _row(credit_id: int, account: UUID, *, closed: int | None, amount: str = "-100") -> FundingCreditHistoryRow:

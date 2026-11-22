@@ -134,7 +134,7 @@
   - 停止條件：(a) 借款記的天期不是 7 → 把包絡改回 2–2（owner 核准），停在這裡，交 D3；(b) 步驟 4 設定的截止日到了還沒有任何一筆成交 → 回報可見率與條件成立的時數，交 owner 決定延長或放棄。
   - 需要人做的事：對正式 DB 的唯讀查詢要 owner 核准。
 
-- [ ] **7. 持有時間報告依天期分組並補指標**（被擋於：無；可與步驟 1–6 並行，須在步驟 8 之前完成）
+- [x] **7. 持有時間報告依天期分組並補指標**（被擋於：無；可與步驟 1–6 並行，須在步驟 8 之前完成）
   - 檔案：修改 `backend/src/bfx_funding_bot/modules/backtest/hold_times.py`、`backend/scripts/report_credit_hold_times.py`、兩者的測試、`backend/ARCHITECTURE.md`。
   - 範圍：摘要改成依（kind, 天期）分組，每組多輸出「持有時間中位數佔期限的比例」。`loans_that_became_credits` 改成比對兩者的開始時間。新增兩個指標，定義如下（D6），只對 credit 列算：
     - **指標 3**：對每筆借款，沿用還款規則的同一個序列（2 天期每小時收盤）、同一個 margin（0.2，即預登記的 20%）與同一個覆蓋率門檻（期限的 90%），找期限內第一次收盤低於「鎖定利率 × 0.8」的時刻。分母＝實際結束前曾發生這種下跌的借款；分子＝其中「提前結束」（沿用既有定義：距到期超過 1 小時）且結束時間在那個時刻之後 24 小時內的。自然到期的不算進分子。同時輸出分母。分母為 0 時比例輸出 `None`。
@@ -142,6 +142,7 @@
   - 消費端：`rg -n "hold_times|report_credit_hold_times|loans_that_became_credits" backend`。
   - 不能動：還款規則本身（`held_ms_until_refinance`）與 margin 預設。
   - 驗收：單元測試（不同天期不混在一組；中位數比例；指標 3 的分母只含結束前發生過下跌的借款、自然到期的不進分子；指標 4 的加權、沒有重疊的借款被排除並計數、未達門檻時回 `None` 而不是 0、達門檻但有借款被排除時仍輸出並標示列入筆數、利率為 0 的 2 天期借款不進對照、固定 seed 下區間可重現；2026-11-21 那種 loan 先於 credit 結束的形狀被判成轉換）；mutation：指標 3 分母改成全部借款、指標 4 改成不加權、樣本門檻拿掉、轉換判定改回比對結束時間，各自要讓測試失敗。
+  - 實作與原文的差異（2026-11-22，`/code-review` 後）：(a) 指標 3 的下跌改在「借款實際借出的那段時間」裡找，覆蓋率門檻（90%）也只要求那一段；原文要求整個期限的覆蓋率，會讓第一天就還款的 7 天期借款在報告跑的時候（K 線還沒到期限終點）被整筆排除，留下的都是持有到期的，偏向「不會提前還款」。還款規則本身與 `position` 的算法沒動。(b) 利率不大於 0（FRR 標記）的 7 天期借款不算進指標 4 的樣本與門檻。(c) 「最後一筆結束滿 2 天後才跑」由程式檢查：未滿時不輸出利率差並標示。(d) 轉換判定除了比開始時間，還要求 loan 不比 credit 晚結束。(e) 「看起來是轉換的 loan」仍是每個幣別一個數字，沒有依天期拆開（審查的 nit，未做）。
 
 - [ ] **8. 發版把上限調到正式值**（被擋於：步驟 6 的結果是記 7 天（D3＝A）、步驟 7；owner 核准）
   - 檔案：修改 `deploy/vm/live.env`。
@@ -201,7 +202,7 @@
 | 4 發版（第零步設定） | 程式完成待驗收（已發版，2026-11-22） | 設定 PR #461（`77d746e2`）與發版 PR #462（merge commit `0b99b806`，Will 核准）CI 綠：`gate (ci)`、`gate (security)`、`gate (capital-rules)`。部署紀錄（VM，唯讀查詢）：`534|deployed|0b99b8062615|migrations_applied=f|2026-11-22 14:03:54+00|service_degraded=f`。bot：`running`、重啟 0 次、`/healthz` 200、容器內 `BFX_LONG_TENOR_*` 9 個、開機後 16 分鐘內沒有 error 或 `boot_refused` log，觀測照常打 venue。webapi：`healthy`。交易狀態不變：`ACTIVE`（id 16，2026-11-21 的 resume）。包絡仍是 fUST 2–2、單筆上限 200（`bfx-op status`）。7 天期掛單 0 張。設定檔在本機以 `long_tenor_policy_from_env` 解析通過 | evidence 的 `tenor` 還沒看到：發版後沒有新的 execution decision（最後一筆是 2026-11-21 21:02Z，資金全數借出中：借款 5 筆、掛單 0 張），要等有資金回來、產生下一筆決策才驗得到，查詢是 `select model_evidence->'optimizer'->'tenor' from execution_decisions order by occurred_at_ms desc limit 5`（表沒有 `created_at` 欄，步驟原文的寫法要改用 `occurred_at_ms`）。`/readyz` 回 503 `startup_not_ready`：readiness 要等開機後第一筆 READY 決策才翻成 ready（`deployment/eligibility.py` 的 `set_ready`），這次發版沒改到 `readiness.py`、`eligibility.py`、`apps/runtime`（`git diff b205806a..0b99b806` 為空），是資金全借出時重啟的既有行為，不是這次造成的 | `77d746e2`、`0b99b806` |
 | 5 放寬包絡 | 未開始 | | | |
 | 6 第零步判讀 | 未開始 | | | |
-| 7 報告依天期分組 | 未開始 | | | |
+| 7 報告依天期分組 | 完成 | PR #464 的 CI（`a14b8f3e`）：`gate (ci)`、`gate (security)`、`gate (capital-rules)` 通過。本機：`ruff check`、`mypy src/`、`lint-imports`、quality ratchet 綠（沒有新增 suppression，重抽用 numpy 的產生器）；`tests/modules/backtest`、`tests/scripts/test_report_credit_hold_times.py`、`tests/architecture` 477 passed。mutation（複本，一次一個）13 個全殺：指標 3 分母改成全部借款、對照利率不加權、樣本門檻拿掉、轉換判定改回比對結束時間（以上是計畫指定的四個）、自然到期算進分子、FRR 借款進對照、拿掉 24 小時窗、整體的差不加權、不同天期混在一組、下跌判定要求整個期限的覆蓋率、FRR 的長天期借款被計分、跑得太早仍輸出、loan 比 credit 晚結束仍算轉換。`/code-review` high：7 項（blocking 0）：修 6（見步驟 7 的「實作與原文的差異」a–d、`--long-period-days` 不得小於等於 2、bootstrap 區間兩側各留同樣數量）、駁回 1（nit：轉換數沒有依天期拆開） | 第 2 輪審查沒跑（每項修正都有會失敗的 mutation）；報告還沒對正式資料跑過（要等有已結束的 7 天期借款，步驟 9） | `af2adbad`、`a14b8f3e` |
 | 8 發版（正式上限） | 未開始 | | | |
 | 9 累積樣本與判讀 | 未開始 | | | |
 | 10 收尾 | 未開始 | | | |
