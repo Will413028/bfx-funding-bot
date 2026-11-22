@@ -10,6 +10,7 @@ import pytest
 
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+from bfx_funding_bot.modules.execution.deployment.tenor import LongTenorLoad, LongTenorState
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
 from bfx_funding_bot.modules.ledger import CycleResult, LongTenorExposure, Scope
@@ -23,7 +24,7 @@ class _Input:
 
     def __init__(
         self, offers: tuple[ActiveFundingOffer, ...] = (),
-        long_tenor: LongTenorExposure | None = None,
+        long_tenor: LongTenorState | None = None,
     ) -> None:
         self._offers = offers
         self._long_tenor = long_tenor
@@ -31,7 +32,7 @@ class _Input:
     async def offers(self, cycle: CycleResult) -> tuple[ActiveFundingOffer, ...]:
         return self._offers
 
-    async def long_tenor(self) -> LongTenorExposure | None:
+    async def long_tenor(self) -> LongTenorState | None:
         return self._long_tenor
 
 
@@ -273,7 +274,10 @@ async def test_deploy_receives_the_offers_of_the_deployment_input():
         async def deploy(self, *, venue_offers=(), long_tenor=None) -> None:
             self.received.append((venue_offers, long_tenor))
 
-    exposure = LongTenorExposure(offers_filled=1, lent_amount=Decimal("200"), ended_credits=0)
+    exposure = LongTenorState(
+        LongTenorExposure(offers_filled=1, lent_amount=Decimal("200"), ended_credits=0),
+        LongTenorLoad(),
+    )
     dep = _CapturingDeployment()
     pr = _make_periodic(
         recovery=_FakeRecovery([ACCEPTED]), probe=_FakeProbe(), interval_s=90,
@@ -286,7 +290,7 @@ async def test_deploy_receives_the_offers_of_the_deployment_input():
 @pytest.mark.asyncio
 async def test_an_unreadable_long_tenor_still_deploys_with_none():
     class _Failing(_Input):
-        async def long_tenor(self) -> LongTenorExposure | None:
+        async def long_tenor(self) -> LongTenorState | None:
             raise RuntimeError("db down")
 
     class _CapturingDeployment:

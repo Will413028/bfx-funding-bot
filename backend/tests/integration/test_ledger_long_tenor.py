@@ -24,6 +24,7 @@ from decimal import Decimal
 import pytest
 import pytest_asyncio
 
+from bfx_funding_bot.modules.execution.deployment.tenor import LongTenorLoad
 from bfx_funding_bot.modules.execution.deployment_input import LedgerDeploymentInput
 from bfx_funding_bot.modules.ledger import (
     CycleResult,
@@ -97,7 +98,8 @@ async def test_offers_count_from_submissions_minus_the_ones_the_venue_ended_unfi
     ) == "accepted"
     await _long(ledger, "14", outcome=None)
 
-    exposure = await _input(ledger).long_tenor()
+    state = await _input(ledger).long_tenor()
+    exposure = state.exposure if state is not None else None
 
     assert exposure is not None
     assert exposure.offers_filled == 4
@@ -138,7 +140,8 @@ async def test_terminal_rows_come_from_accepted_observations_and_ties_keep_count
         OfferHistory(_offer("tied", "33", "20"), "canceled", 1150),
     ))) == "accepted"
 
-    exposure = await _input(ledger).long_tenor()
+    state = await _input(ledger).long_tenor()
+    exposure = state.exposure if state is not None else None
 
     assert exposure is not None
     assert exposure.offers_filled == 3
@@ -157,7 +160,8 @@ async def test_lent_and_ended_come_from_the_credit_mirror_since_the_start(ledger
         _credit("two-day", "200", opening=SINCE, period=2),
     )))
 
-    exposure = await _input(ledger).long_tenor()
+    state = await _input(ledger).long_tenor()
+    exposure = state.exposure if state is not None else None
 
     assert exposure == LongTenorExposure(
         offers_filled=0, lent_amount=Decimal("190"), ended_credits=1,
@@ -179,3 +183,26 @@ async def test_managed_offers_carry_their_signal(ledger: Book) -> None:
 
     assert offer.signal_correlation_id is not None
     assert offer.signal_correlation_id.startswith("reader-")
+
+
+@pytest.mark.asyncio
+async def test_resting_counts_every_managed_offer_of_the_tenor_priced_or_not(
+    ledger: Book,
+) -> None:
+    """Reprice skips an offer without an observed rate; the one-at-a-time limit must not."""
+    await _long(ledger, "150", venue_offer_id="unpriced")
+    await _long(ledger, "160", venue_offer_id="priced")
+    await ledger.attempt("170", venue_offer_id="two-day", started_at_ms=SINCE)
+    unpriced = replace(_offer("unpriced", "150"), rate=None, rate_observed=False, period_days=7)
+    priced = replace(_offer("priced", "160", "60"), period_days=7)
+    assert await ledger.accept(
+        _observation(offers=(unpriced, priced, _offer("two-day", "170")))
+    ) == "accepted"
+
+    state = await _input(ledger).long_tenor()
+
+    assert state is not None
+    assert state.resting == LongTenorLoad(2, Decimal("210"))
+    # The reprice input leaves the unpriced one out, which is why resting is read here.
+    priced_ids = {o.venue_offer_id for o in await _input(ledger).offers(CycleResult("accepted"))}
+    assert priced_ids == {"priced", "two-day"}

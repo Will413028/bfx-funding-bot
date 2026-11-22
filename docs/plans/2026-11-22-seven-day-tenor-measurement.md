@@ -78,18 +78,19 @@
   - 子步驟：**1a** 純計數：`backend/src/bfx_funding_bot/modules/ledger/read/long_tenor.py`（新增；`long_tenor_exposure` 與輸入、輸出型別）與 `backend/tests/modules/ledger/test_long_tenor_exposure.py`（新增）。**1b** 資料庫讀取與接線：把送單紀錄（含對應的掛單終態與有無成交列）與 `venue_credit_mirror` 的列讀成 1a 的輸入型別；經 ledger 的 facade 匯出；`deployment_input`、`periodic_reconcile`、`reconciler.deploy` 接線（`bot_ports`、`bot` 的接線移到步驟 2：查詢的天期與啟用時間來自步驟 2 新增的環境變數，1b 沒有來源可傳；2026-11-22 1b 契約審查）；`venue_offers` 的元素帶上 `signal_correlation_id`；integration 測試；`ARCHITECTURE.md`。1b 的驗收是本步驗收裡 1a 以外的全部。
   - 完成後的狀態：多一個沒有人使用的輸入，行為不變。
 
-- [ ] **2. 天期選擇規則（預設關閉）**（被擋於：步驟 1）
+- [ ] **2. 天期選擇規則（預設關閉）**（被擋於：步驟 1）——程式完成待驗收（CI），見進度表
   - 檔案：`apps/bot_ports.py` 把政策的幣別、天期、啟用時間組成 `LongTenorQuery` 傳給 `LedgerDeploymentInput(long_tenor=...)`（自步驟 1b 移入）；新增 `backend/src/bfx_funding_bot/modules/execution/deployment/tenor.py`（政策物件、從環境變數建立、純函式的選擇規則）與 `backend/tests/modules/execution/deployment/test_tenor.py`；修改 `deployment/reconciler.py`、其測試、`apps/bot.py`、`backend/ARCHITECTURE.md`、`.env.example`、`backend/.env.example`。
   - 範圍：部署迴圈對每一筆要送的單，在既有的定價之前多做一次判斷。依序檢查，任何一條不成立就維持訊號給的天期，照既有流程走：
     1. 政策物件存在（環境變數有設）、這筆單的幣別等於政策的幣別、且該幣別包絡的 `max_period_days` ≥ 長天期（包絡取自這筆單所屬 cell 的 capital view，也就是迴圈裡已經讀到的 `views[cell_id].applied.policy`）；
     2. 現在時間早於截止日（`BFX_LONG_TENOR_UNTIL`，`YYYY-MM-DD`，UTC，該日 00:00 起不再掛）；
-    3. 累計成交過的長天期掛單數（步驟 1 的第 1 個數字）加上掛單中的張數、加上本 tick 已送出的張數，低於總上限；
-    4. 掛單中的長天期張數加上本 tick 已送出的張數，低於同時掛單上限（固定 1：一次只掛一張長天期單，成交或逾時撤回後才掛下一張）；
+    3. 累計成交過的長天期掛單數（步驟 1 的第 1 個數字）加上本 tick 已送出的張數，低於總上限（掛單中的單不另外加：步驟 1 的計數只扣掉 venue 證明沒成交就結束的單，掛單中的已經算在裡面；2026-11-22 步驟 2 契約審查）；曝險讀不到（`None`）算這條不成立；
+    4. 掛單中的長天期張數加上本 tick 已送出的張數，低於同時掛單上限（固定 1：一次只掛一張長天期單，成交或逾時撤回後才掛下一張）。掛單中的張數與金額在讀曝險的同一個交易裡，從帳本的受管掛單算（`LongTenorState.resting`）：沒觀測到利率的也算，天期不明或 provenance 矛盾的也算（fail closed）；不用 `venue_offers`，它為了撤單重掛丟掉沒有利率的列（2026-11-22 步驟 2 `/code-review`）；
     5. 借出中的長天期金額＋掛單中的長天期金額＋本 tick 已送出的長天期金額＋這筆單的金額，不超過金額上限；已結束的長天期借款筆數（步驟 1 的第 4 個數字）低於樣本上限；
     6. 把這筆單的天期改成長天期後，用既有的 `PeriodPricer` 對同一份 book 定價得到一個價（被擋就算不成立）；同一筆單以 2 天期定價也得到一個價（被擋也算不成立）；長天期的價 ≥ max(利率門檻, 2 天期的價)。
 
-    全部成立才以長天期的 `DecisionPayload` 與剛才定出的價往下走；之後的 safety guard、execution gate、送單沿用既有路徑。本 tick 送出長天期單後（結果是 UNKNOWN 也算），立刻計入第 3–5 條的「本 tick 已送出」。每次判斷的結果寫進 execution decision 的 evidence：沿用 reconciler 傳給 `ExecutionGate.prepare` 的 `optimizer_evidence` 字典，新增鍵 `tenor`（選了哪個天期、第幾條不成立、兩個天期定出的價），落在 `execution_decisions.model_evidence`。`ExecutionGate.prepare` 的簽章不改。
-    環境變數（全部有設才建立政策，缺任何一個就是 `None`；值不合法時開機失敗）：`BFX_LONG_TENOR_SYMBOL`、`BFX_LONG_TENOR_DAYS`、`BFX_LONG_TENOR_MIN_DAILY_RATE`、`BFX_LONG_TENOR_MAX_AMOUNT`、`BFX_LONG_TENOR_MAX_OFFERS_TOTAL`（累計成交過的掛單上限）、`BFX_LONG_TENOR_MAX_ENDED_CREDITS`（已結束借款的樣本上限）、`BFX_LONG_TENOR_SINCE`（`YYYY-MM-DD`，UTC；只數這一天 00:00 之後建立的掛單與借款）、`BFX_LONG_TENOR_UNTIL`、`BFX_LONG_TENOR_OFFER_TIMEOUT_S`。
+    全部成立後，先用 safety chain 判一次長天期版本（包絡的底價與天期檢查依天期不同）；被擋就在同一個 tick 退回訊號的天期，evidence 記第 7 條 `guard`（2026-11-22 步驟 2 `/code-review`：否則該 cell 每個 tick 都閒置）。通過才以長天期的 `DecisionPayload` 與剛才定出的價往下走；之後的 safety guard、execution gate、送單沿用既有路徑。本 tick 送出長天期單後（結果是 UNKNOWN 也算），立刻計入第 3–5 條的「本 tick 已送出」。每次判斷的結果寫進 execution decision 的 evidence：沿用 reconciler 傳給 `ExecutionGate.prepare` 的 `optimizer_evidence` 字典，新增鍵 `tenor`（選了哪個天期、第幾條不成立、兩個天期定出的價），落在 `execution_decisions.model_evidence->'optimizer'->'tenor'`（`prepare` 把 `optimizer_evidence` 放在 `optimizer` 鍵下）；沒有政策或幣別不符時不寫這個鍵。`ExecutionGate.prepare` 的簽章不改。
+    開機條件：政策只在 `BFX_EXECUTION_POLICY=book_guarded`（optimizer 的成交模型是 cell 自己天期的）且撤單重掛為 `BFX_REPRICE_REFERENCE=book`（quote 模式會拿 2 天期的 quote 把長天期掛單當 stale-high 撤掉）時允許；正式環境兩者都符合（`deploy/vm/live.env`）。
+    環境變數（全都沒設＝政策為 `None`；只設一部分、值不合法、或幣別不在 cells 裡＝開機失敗，避免實驗半設定卻安靜地沒開；2026-11-22 步驟 2 `/code-review`）：`BFX_LONG_TENOR_SYMBOL`、`BFX_LONG_TENOR_DAYS`、`BFX_LONG_TENOR_MIN_DAILY_RATE`、`BFX_LONG_TENOR_MAX_AMOUNT`、`BFX_LONG_TENOR_MAX_OFFERS_TOTAL`（累計成交過的掛單上限）、`BFX_LONG_TENOR_MAX_ENDED_CREDITS`（已結束借款的樣本上限）、`BFX_LONG_TENOR_SINCE`（`YYYY-MM-DD`，UTC；只數這一天 00:00 之後建立的掛單與借款）、`BFX_LONG_TENOR_UNTIL`、`BFX_LONG_TENOR_OFFER_TIMEOUT_S`。
   - 消費端：`rg -n "ladder_policy_from_env|policy_from_env|DeploymentReconciler\(" backend/src backend/tests`（新政策物件的接線位置）；`rg -n "offer_duration_days" backend/src`（天期的讀取端，本步不改它們）；`rg -n "period_days" backend/src/bfx_funding_bot/modules/live_validation backend/scripts`（讀借款天期並依 cell 彙總的下游：週報與 G3，本步不改，處置見前提段）。
   - 不能動：包絡 guard 的檢查；`PeriodPricer` 的定價規則；每小時訊號與 `StandingQuote`；command gate；`ExecutionGate.prepare` 的簽章。
   - 驗收：單元測試逐條覆蓋六個條件各自不成立時維持 2 天、全部成立時選長天期；兩個 cell 同一個 tick 都有單、同時掛單上限 1 時只有一筆是長天期；book 上有 7 天期借方出價 ≥ 訊號利率、而訊號利率低於門檻時不掛長天期（taker 分支）；2 天期定不出價時維持 2 天；政策為 `None` 時既有的 reconciler 測試不改就全過；evidence 的 `tenor` 內容。mutation：六個條件各拿掉一個、拿掉 tick 內累加、把第 6 條改成只比 book 上的賣價、截止日比較反向、金額檢查不含這筆單，各自要讓測試失敗。
@@ -108,7 +109,7 @@
 - [ ] **4. 發版（第零步的設定）**（被擋於：步驟 2、3；owner 核准）
   - 檔案：修改 `deploy/vm/live.env`。
   - 範圍：`live.env` 設定 `BFX_LONG_TENOR_SYMBOL=fUST`、`BFX_LONG_TENOR_DAYS=7`、`BFX_LONG_TENOR_MIN_DAILY_RATE=0.0002`、`BFX_LONG_TENOR_MAX_AMOUNT=200`、`BFX_LONG_TENOR_MAX_OFFERS_TOTAL=1`、`BFX_LONG_TENOR_MAX_ENDED_CREDITS=20`、`BFX_LONG_TENOR_SINCE=<步驟 4 發版日>`、`BFX_LONG_TENOR_UNTIL=<步驟 4 發版日＋14 天>`、`BFX_LONG_TENOR_OFFER_TIMEOUT_S=1800`。開 `dev`→`main` 的發版 PR。
-  - 驗收：部署紀錄 `deploy deployed … ok`；bot 與 webapi 健康、交易狀態不變；包絡仍是 2–2，所以發版後沒有任何 7 天期的單，evidence 的 `tenor` 顯示第 1 條（包絡不允許）不成立。查詢（唯讀）：`select model_evidence->'tenor' from execution_decisions order by created_at desc limit 5`（欄位名以步驟 2 落地時的實際 schema 為準，寫進進度表）。貼出部署紀錄與一筆 evidence。
+  - 驗收：部署紀錄 `deploy deployed … ok`；bot 與 webapi 健康、交易狀態不變；包絡仍是 2–2，所以發版後沒有任何 7 天期的單，evidence 的 `tenor` 顯示第 1 條（包絡不允許）不成立。查詢（唯讀）：`select model_evidence->'optimizer'->'tenor' from execution_decisions order by created_at desc limit 5`（步驟 2 落地時確認的路徑）。貼出部署紀錄與一筆 evidence。
   - 需要人做的事：owner 核准發版；驗收的唯讀查詢要 owner 核准。
   - 完成後的狀態：規則在線但不動作，等步驟 5。
 
@@ -180,6 +181,7 @@
 |---|---|---|---|---|
 | 1a 純計數 | 完成 | `tests/modules/ledger/test_long_tenor_exposure.py` 6 passed；`ruff check`、`mypy src/`；mutation 15 個全殺（天期與啟用時間條件、確定沒成交的四個條件逐一、終態不存在當成沒成交、已成交當成沒成交、金額 NULL 當成沒成交、成交列被忽略、已結束算進借出中、loan 或仍在借出的算進已結束筆數；其中「已成交當成沒成交」第一次存活，補了「已成交但兩個金額欄相等」的案例後殺掉） | `/code-review` 與契約審查隨 1b 一起做；CI 待 PR | `66912535` |
 | 1b 資料庫讀取與接線 | 程式完成待驗收（CI） | 本機：`ruff check`、`mypy src/`、`lint-imports`、quality ratchet 綠；受影響單元測試 2229 passed；integration `test_ledger_long_tenor.py` 5 passed、`test_ledger_deployment_input.py` 4 passed（本機 PG18）；mutation（複本）：讀取漏掉 bound 的 offer id、保留已結案 attempt、不查成交列、採用未被接受觀測的終態列、同時間矛盾時取沒成交那列、executed 當成沒成交、`signal_correlation_id` 沒帶、沒設定也讀、periodic 不傳 `long_tenor`、讀取失敗就跳過部署，全殺；SQL 的天期與啟用時間條件拿掉不會失敗（純函式會再過濾，語意由 1a 的 mutation 守住，SQL 條件只限定讀取範圍）。`/code-review` high：8 項（important 3），修 5、記錄 1（拆 `deploy` 的 baseline noqa 併入步驟 2）、交 Will 1（索引，D7）、已處理 1（bot 接線移到步驟 2）；契約審查：3 項（blocking 1＝bot 接線，以改寫計畫處理；should 2：沒有 outcome 的 attempt 算一張已補登進計畫；索引併入 D7） | 全套單元、integration 以 PR 的 CI 為準；第 2 輪審查沒跑（每項修正都有會失敗的測試）；成交列查詢的「只認被接受的觀測」沒有單獨的 mutation 測試 | |
+| 2 天期選擇規則 | 程式完成待驗收（CI） | 本機：`ruff check`、`mypy src/`、`lint-imports`、quality ratchet 綠；受影響單元測試 1750 passed（execution、apps、architecture、ledger）；integration `test_ledger_long_tenor.py`＋`test_ledger_deployment_input.py` 9 passed（本機 PG18，含新增的「沒利率的受管長天期掛單也算掛單中」）；mutation（整個 repo 的複本、`PYTHONPATH` 指向複本，複本基線 126 passed）24 個全殺：六個條件各拿掉、截止日反向、金額不含這筆、第 6 條改比賣價、第 6 條只比門檻、2 天期定不出價仍放行、曝險 None 當 0、tick 內累加拿掉、evidence 拿掉、長天期 decision 沒套用、掛單中的天期不明不算、provenance 矛盾不算、啟用時間篩選拿掉、guard 退回拿掉、optimizer／quote reprice 開機檢查拿掉、部分設定不報錯。`/code-review` high：7 項（important 3）：修 4（guard 被擋退回原天期、掛單中改從帳本受管掛單算、quote reprice 開機拒絕、部分設定與幣別不符開機失敗）、駁回 2（逾時欄位未用：計畫已規定與步驟 3 同一次發版；金額大於上限永遠不選：正式包絡單筆上限 200＝`BFX_LONG_TENOR_MAX_AMOUNT` 第零步的值）、記錄 1（索引併入 D7）；契約審查：3 項（blocking 0）：駁回 1（UNKNOWN 掛單漏看：未解的 UNKNOWN 在 sizing 前就擋住整個幣別，`reconciler.py` 的 `evaluate_before_sizing`／`_fallback_uncertain`）、修 2（optimizer 開機檢查寫進計畫並核對正式環境是 `book_guarded`；條件 3 原文改寫） | 全套單元、integration 以 PR 的 CI 為準；第 2 輪審查沒跑（每項修正都有會失敗的測試）；`bot.py` 的接線（政策傳進 reconciler 與 `LedgerDeploymentInput`、幣別檢查）沒有單元測試，靠步驟 4 的現場 evidence 驗 | |
 | 2 天期選擇規則 | 未開始 | | | |
 | 3 逾時與包絡撤回 | 未開始 | | | |
 | 4 發版（第零步設定） | 未開始 | | | |

@@ -28,9 +28,10 @@ from typing import Protocol
 from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.external.bitfinex.errors import credential_rejection
+from bfx_funding_bot.modules.execution.deployment.tenor import LongTenorState
 from bfx_funding_bot.modules.execution.deployment_input import DeploymentInput
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
-from bfx_funding_bot.modules.ledger import CycleResult, LongTenorExposure, ObservationSink, Scope
+from bfx_funding_bot.modules.ledger import CycleResult, ObservationSink, Scope
 from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ class _Probe(Protocol):
 class _Deployment(Protocol):
     async def deploy(
         self, *, venue_offers: tuple[ActiveFundingOffer, ...] = (),
-        long_tenor: LongTenorExposure | None = None,
+        long_tenor: LongTenorState | None = None,
     ) -> None: ...
 
 
@@ -201,7 +202,7 @@ class PeriodicReconcile:
             )
         await self._deploy(cycle)
 
-    async def _long_tenor(self) -> LongTenorExposure | None:
+    async def _long_tenor(self) -> LongTenorState | None:
         """The long tenor's exposure, or None when unread: a failed read never skips the deploy.
 
         None is what an unconfigured long tenor reads as, so a consumer that places long

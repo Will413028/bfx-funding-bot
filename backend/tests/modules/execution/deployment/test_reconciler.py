@@ -91,7 +91,7 @@ async def test_planner_requires_current_adapter_amount_evidence(fault):
     assert venue.ready_submissions == []
 
 
-def _simulated_capital(ledger, *, cell_exposure=None, totals=None, reserves=None):
+def _simulated_capital(ledger, *, cell_exposure=None, totals=None, reserves=None, envelope=None):
     """Explicit simulated policies/snapshots; never installed by application code.
 
     One object answers the planner's capital, managed-offer and uncertainty
@@ -123,7 +123,8 @@ def _simulated_capital(ledger, *, cell_exposure=None, totals=None, reserves=None
             total = totals[symbol]
             reserve = reserves.get(symbol, D("0"))
             policy = CapitalPolicy(enabled=total > 0, reserve_amount=reserve,
-                                   max_cell_fraction=D("0.70"))
+                                   max_cell_fraction=D("0.70"), envelope=envelope,
+                                   max_offer_amount=D("200") if envelope else None)
             exposure = ledger.current_exposure(symbol)
             available = min(max(D("0"), total - exposure + reserve), ledger.available_balance(symbol))
             snapshot = CapitalSnapshot(available, D("0"), max(total + reserve, available),
@@ -491,7 +492,8 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
            optimizer_horizon_h: int | None = None,
            rate_optimizer: RateOptimizer | None = None,
            uncertain_symbols: set[str] | None = None,
-           ledger: _FakeLedger | None = None, capital_ports=None):
+           ledger: _FakeLedger | None = None, capital_ports=None,
+           long_tenor=None, envelope=None):
     cells = [_cell("fUST", "a30"), _cell("fUST", "p2")]
     store = StandingQuoteStore(ttl_ms=3_900_000)
     for q in quotes:
@@ -510,7 +512,8 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
     )
     rec = DeploymentReconciler(
         **(capital_ports or _capital_ports(_simulated_capital(
-            fixture_ledger, totals={"fUST": cap if cap is not None else D("570")}))),
+            fixture_ledger, totals={"fUST": cap if cap is not None else D("570")},
+            envelope=envelope))),
         store=store,
         safety_chain=safety, executor=ex, account_ctx=ctx, cells=cells,
         funding_rules=FixedRules(),
@@ -527,6 +530,7 @@ def _build(*, exposure, quotes, safety_allowed=True, executor=None, safety=None,
             fill_model_provider=fill_model_provider,
         ),
         ladder=ladder,
+        long_tenor=long_tenor,
         attempt_recorder=attempt_recorder,
         rate_optimizer=rate_optimizer,
         optimizer_fee_rate=optimizer_fee_rate,
@@ -1991,3 +1995,142 @@ async def test_an_unreadable_stop_state_and_a_running_currency_are_reported_as_s
             observe=lambda symbol, **kw: seen.append(kw["reason"]))
         await planner._pull_if_stopped("fUST")
     assert seen == ["stop_state_failed", "stop_state_unreachable", None]
+
+
+# --- Long-tenor selection (plan 2026-11-22 seven-day tenor, step 2) ---------------------
+
+def _long_policy(**overrides):
+    from bfx_funding_bot.modules.execution.deployment.tenor import LongTenorPolicy
+    fields = {
+        "symbol": "fUST", "period_days": 7, "min_daily_rate": D("0.0002"),
+        "max_amount": D("10000"), "max_offers_total": 30, "max_ended_credits": 20,
+        "since_ms": 0, "until_ms": 10_000, "offer_timeout_s": 1800,
+    }
+    return LongTenorPolicy(**{**fields, **overrides})
+
+
+def _envelope(max_period_days: int = 7):
+    from bfx_funding_bot.modules.trading.policy import OfferEnvelope
+    return OfferEnvelope(min_period_days=2, max_period_days=max_period_days,
+                         max_open_offers=6, rate_floor_ratio=D("0.5"),
+                         min_rate_apr=D("0.01"))
+
+
+def _long_book() -> MarketSnapshot:
+    from bfx_funding_bot.external.bitfinex.funding_book_level import FundingBookLevel
+    return MarketSnapshot(
+        snapshot_id="book-7", symbol="fUST", bids=(),
+        asks=(FundingBookLevel(rate=0.0003, period=7, count=1, amount=100_000),
+              FundingBookLevel(rate=0.00018, period=2, count=1, amount=100_000)),
+        captured_at_ms=1_000, received_at_ms=1_000, source="ws",
+        sequence_valid=True, checksum_valid=True, sequence=2,
+    )
+
+
+class _AllAudit(_Audit):
+    def __init__(self) -> None:
+        super().__init__()
+        self.all: list = []
+
+    async def record(self, decision) -> None:
+        self.all.append(decision)
+        await super().record(decision)
+
+
+def _zero_exposure(resting_count: int = 0):
+    from bfx_funding_bot.modules.execution.deployment.tenor import LongTenorLoad, LongTenorState
+    from bfx_funding_bot.modules.ledger import LongTenorExposure
+    return LongTenorState(LongTenorExposure.none(),
+                          LongTenorLoad(resting_count, D(150) * resting_count))
+
+
+def _build_long(**kwargs):
+    audit = _AllAudit()
+    defaults = {
+        "exposure": D("0"), "quotes": [_post_quote("fUST_a30"), _post_quote("fUST_p2")],
+        "book_provider": _SnapshotProvider(_long_book()), "audit": audit,
+        "long_tenor": _long_policy(), "envelope": _envelope(),
+    }
+    rec, ex, _ = _build(**{**defaults, **kwargs})
+    return rec, ex, audit
+
+
+async def test_long_tenor_one_offer_per_tick_across_cells() -> None:
+    rec, ex, audit = _build_long()
+    await rec.deploy(long_tenor=_zero_exposure())
+    assert len(ex.submitted) == 2
+    durations = sorted(d.offer_duration_days for d in ex.submitted)
+    assert durations == [2, 7]
+    long_ready = next(r for r in ex.ready_submissions if r.decision.offer_duration_days == 7)
+    assert long_ready.decision.offer_rate == D("0.00029999")
+    tenors = [a.model_evidence["optimizer"]["tenor"] for a in audit.all]
+    assert tenors[0]["selected_days"] == 7
+    assert tenors[1] == {"selected_days": None, "failed_condition": 4,
+                         "why": "one_at_a_time", "resting": 0}
+
+
+async def test_long_tenor_envelope_at_two_days_keeps_two_days_and_records_why() -> None:
+    rec, ex, audit = _build_long(envelope=_envelope(max_period_days=2))
+    await rec.deploy(long_tenor=_zero_exposure())
+    assert [d.offer_duration_days for d in ex.submitted] == [2, 2]
+    assert audit.all[0].model_evidence["optimizer"]["tenor"]["failed_condition"] == 1
+
+
+async def test_long_tenor_unread_exposure_places_no_long_offer() -> None:
+    rec, ex, _ = _build_long()
+    await rec.deploy(long_tenor=None)
+    assert [d.offer_duration_days for d in ex.submitted] == [2, 2]
+
+
+async def test_long_tenor_resting_offer_blocks_another() -> None:
+    rec, ex, _ = _build_long()
+    await rec.deploy(long_tenor=_zero_exposure(resting_count=1))
+    assert all(d.offer_duration_days == 2 for d in ex.submitted)
+
+
+async def test_long_tenor_refused_by_the_guards_falls_back_to_the_signal_tenor() -> None:
+    class _RefuseLong(_FakeSafety):
+        async def evaluate(self, decision, ctx) -> GuardResult:
+            if decision.offer_duration_days == 7:
+                return GuardResult(allowed=False, guard_name="offer_envelope",
+                                   reason="offer_rate < floor")
+            return await super().evaluate(decision, ctx)
+
+    rec, ex, audit = _build_long(safety=_RefuseLong())
+    await rec.deploy(long_tenor=_zero_exposure())
+    assert [d.offer_duration_days for d in ex.submitted] == [2, 2]
+    tenor = audit.all[0].model_evidence["optimizer"]["tenor"]
+    assert tenor["failed_condition"] == 7
+    assert tenor["guard"] == "offer_envelope"
+
+
+def test_long_tenor_refuses_quote_reference_reprice() -> None:
+    with pytest.raises(ValueError, match="REPRICE_REFERENCE"):
+        _build_long(reprice=RepricePolicy(True, 0.1, 1_800_000, 3, reference="quote"))
+    _build_long(reprice=RepricePolicy(True, 0.1, 1_800_000, 3, reference="book"))
+
+
+async def test_long_tenor_unknown_submit_still_counts_this_tick() -> None:
+    class _UnknownExecutor(_FakeExecutor):
+        async def submit(self, decision, ctx) -> SubmittedOrder:
+            await super().submit(decision, ctx)
+            return SubmittedOrder(outcome=SubmitOutcomeUnknown("timeout", True))
+
+    ex = _UnknownExecutor()
+    rec, _, _ = _build_long(executor=ex)
+    await rec.deploy(long_tenor=_zero_exposure())
+    assert [d.offer_duration_days for d in ex.submitted].count(7) == 1
+
+
+async def test_without_long_tenor_policy_evidence_has_no_tenor_key() -> None:
+    rec, ex, audit = _build_long(long_tenor=None)
+    await rec.deploy(long_tenor=_zero_exposure())
+    assert [d.offer_duration_days for d in ex.submitted] == [2, 2]
+    assert all("tenor" not in a.model_evidence["optimizer"] for a in audit.all)
+
+
+def test_long_tenor_refuses_the_optimizer_policy() -> None:
+    with pytest.raises(ValueError, match="book_guarded"):
+        _build_long(gate_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+                    execution_policy=ExecutionPolicy.OPTIMIZER_LIVE,
+                    optimizer_fee_rate=D("0.15"))

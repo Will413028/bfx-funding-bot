@@ -40,6 +40,7 @@ from bfx_funding_bot.modules.ledger import (
     BOOT_GRACE_MS,
     RUNTIME_GRACE_MS,
     CapitalAuthority,
+    LongTenorQuery,
     ManagedOfferReader,
     ObservationSink,
     OperatorResolution,
@@ -123,6 +124,7 @@ def build_capital_ports(  # noqa: PLR0913
     resync: ResyncChannel,
     clock: Callable[[], int],
     max_snapshot_age_ms: int,
+    long_tenor: LongTenorQuery | None = None,
 ) -> CapitalPorts:
     """The bot boots only on the ``ledger`` authority (``apps/authority_support.py``)."""
     capital_authority = build_capital_authority(
@@ -165,7 +167,7 @@ def build_capital_ports(  # noqa: PLR0913
         operator_resolution=build_operator_resolution(),
         deployment_input=LedgerDeploymentInput(
             session_factory=session_factory, account_id=scope.exchange_account_id,
-            offers=build_ledger_managed_offers(),
+            offers=build_ledger_managed_offers(), long_tenor=long_tenor,
         ),
         observation=observation,
         uncertainty_reader=build_uncertainty_reader(session_factory),

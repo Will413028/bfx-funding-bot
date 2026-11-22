@@ -14,10 +14,13 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+from bfx_funding_bot.modules.execution.deployment.tenor import (
+    LongTenorState,
+    resting_long_offers,
+)
 from bfx_funding_bot.modules.ledger import (
     CycleResult,
     LedgerManagedOffers,
-    LongTenorExposure,
     LongTenorQuery,
     ManagedOffer,
     Scope,
@@ -29,8 +32,8 @@ class DeploymentInput(Protocol):
         """The accepted ``cycle``'s offers the deployment may reprice."""
         ...
 
-    async def long_tenor(self) -> LongTenorExposure | None:
-        """The configured long tenor's exposure; None when no long tenor is configured."""
+    async def long_tenor(self) -> LongTenorState | None:
+        """The configured long tenor's exposure and resting offers; None when unconfigured."""
         ...
 
 
@@ -55,11 +58,19 @@ class LedgerDeploymentInput:
         priced = (_active_offer(offer) for offer in found.offers)
         return tuple(offer for offer in priced if offer is not None)
 
-    async def long_tenor(self) -> LongTenorExposure | None:
+    async def long_tenor(self) -> LongTenorState | None:
         if self._long_tenor is None:
             return None
         async with self._sf() as session, session.begin():
-            return await self._offers.long_tenor_exposure(session, self._scope, self._long_tenor)
+            # Every managed offer, priced or not: reprice skips an unpriced one, but
+            # the one-at-a-time limit must still see it.
+            found = await self._offers.managed_live_offers(
+                session, self._scope, [self._long_tenor.symbol])
+            return LongTenorState(
+                exposure=await self._offers.long_tenor_exposure(
+                    session, self._scope, self._long_tenor),
+                resting=resting_long_offers(found, self._long_tenor),
+            )
 
 
 def _active_offer(offer: ManagedOffer) -> ActiveFundingOffer | None:

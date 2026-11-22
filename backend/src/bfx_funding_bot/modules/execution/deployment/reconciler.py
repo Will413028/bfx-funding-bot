@@ -68,6 +68,14 @@ from bfx_funding_bot.modules.execution.deployment.standing_quote import (
 from bfx_funding_bot.modules.execution.deployment.submit_attempt import (
     SubmitAttemptRecorder,
 )
+from bfx_funding_bot.modules.execution.deployment.tenor import (
+    LongTenorLoad,
+    LongTenorPolicy,
+    LongTenorState,
+    TenorChoice,
+    TenorInputs,
+    choose_tenor,
+)
 from bfx_funding_bot.modules.execution.emit import emit_order_submit
 from bfx_funding_bot.modules.execution.managed_cancel import ManagedOfferSweep
 from bfx_funding_bot.modules.execution.protocols import (
@@ -88,7 +96,6 @@ from bfx_funding_bot.modules.ledger import (
     CapitalAuthority,
     CapitalAvailable,
     CapitalBlocked,
-    LongTenorExposure,
     ManagedOfferReader,
     ProvenanceConflict,
     Scope,
@@ -198,6 +205,7 @@ class DeploymentReconciler:
         optimizer_fee_rate: Decimal | None = None,
         optimizer_horizon_h: int | None = None,
         managed_sweep: ManagedOfferSweep | None = None,
+        long_tenor: LongTenorPolicy | None = None,
     ) -> None:
         self._store = store
         # Level-triggered: while the account is HALTED or a currency's policy is
@@ -224,6 +232,15 @@ class DeploymentReconciler:
         self._protection = protection
         self._reprice = reprice
         self._ladder = ladder
+        # The long-tenor rule prices on the exact-period book only: the optimizer's fill
+        # model is fitted on the cell's own tenor and would score a long offer on it.
+        if long_tenor is not None and execution_policy is ExecutionPolicy.OPTIMIZER_LIVE:
+            raise ValueError("long tenor requires the book_guarded execution policy")
+        # Quote-reference reprice compares every managed offer with the cell's quote,
+        # whose tenor is the signal's: it would cancel a long offer as stale-high.
+        if long_tenor is not None and reprice is not None and reprice.reference != "book":
+            raise ValueError("long tenor requires BFX_REPRICE_REFERENCE=book")
+        self._long_tenor = long_tenor
         self._book_provider = book_provider
         if execution_gate.policy is not execution_policy:
             raise ValueError("execution_gate policy must match execution_policy")
@@ -348,11 +365,13 @@ class DeploymentReconciler:
 
     async def deploy(  # noqa: C901, PLR0912, PLR0915
         self, *, venue_offers: tuple[ActiveFundingOffer, ...] = (),
-        long_tenor: LongTenorExposure | None = None,
+        long_tenor: LongTenorState | None = None,
     ) -> None:
         ctx = self._ctx
         # long_tenor: the configured long tenor's exposure (plan 2026-11-22 seven-day
-        # tenor, step 1); None when none is configured. Read but not yet acted on.
+        # tenor); None when none is configured or the read failed, and then no offer
+        # goes out at the long tenor. `long_sent` counts this tick's long submits,
+        # an UNKNOWN or failed one included, before the next offer is judged.
         # venue_offers: threaded from PeriodicReconcile's reconcile snapshot
         # (E1 stale-offer reprice). Consumed below by _reprice_sweep when a
         # RepricePolicy is configured (self._reprice is not None); otherwise
@@ -362,6 +381,7 @@ class DeploymentReconciler:
         cancel_budget = (
             self._reprice.max_cancels_per_tick if self._reprice is not None else 0
         )
+        long_sent = LongTenorLoad()
         # Phase 2: each configured currency is an INDEPENDENT gap pool. The
         # reconciler is the real-money sizing authority, so the sizing math runs
         # once per symbol against THAT symbol's cap[symbol] / buffer[symbol] /
@@ -503,9 +523,19 @@ class DeploymentReconciler:
                     NAMESPACE_URL,
                     f"{reconcile_id}:{cell_id}:{decision.signal_correlation_id}:{amount}",
                 ))
-                if snapshot is None:
+                envelope = views[cell_id].applied.policy.envelope
+                tenor = choose_tenor(self._long_tenor, decision, TenorInputs(
+                    envelope_max_period_days=(
+                        envelope.max_period_days if envelope is not None else 0),
+                    state=long_tenor, this_tick=long_sent, now_ms=now, snapshot=snapshot,
+                ), self._period_pricer)
+                tenor = await self._guard_long(tenor, cell_ctx)
+                if tenor is not None and tenor.decision is not None and tenor.price is not None:
+                    decision = tenor.decision
+                    price: PriceDecision | BlockedExecution = tenor.price
+                elif snapshot is None:
                     unavailable = self._book_provider.unavailable_reason(symbol, now_ms=now)
-                    price: PriceDecision | BlockedExecution = BlockedExecution(
+                    price = BlockedExecution(
                         decision_id=decision_id,
                         candidate=decision,
                         reason=_BOOK_BLOCK_REASONS.get(unavailable, BlockReason.BOOK_STALE),
@@ -600,7 +630,8 @@ class DeploymentReconciler:
                         candidate=decision, cell_id=cell_id, reconcile_id=reconcile_id,
                     ), strategy=self._cell_strategy[cell_id].value),
                     optimizer_evidence={**(optimizer_evidence or {}),
-                                        "funding_amount": amount_evidence.payload()},
+                                        "funding_amount": amount_evidence.payload(),
+                                        **({"tenor": tenor.evidence} if tenor else {})},
                     optimizer_block_reason=optimizer_block_reason,
                     expected_period_agg=period_agg,
                     expected_horizon_h=expected_horizon_h,
@@ -641,6 +672,8 @@ class DeploymentReconciler:
                                 cell_id, outcome.decision.offer_rate,
                                 [(round(a, 2), r) for a, r in rungs], ask_rate,
                             )
+                if tenor is not None and tenor.decision is not None:
+                    long_sent = long_sent.plus(amount)
                 try:
                     outcome = replace(outcome, capital_view=views[cell_id],
                                       funding_amount_evidence=amount_evidence)
@@ -715,6 +748,26 @@ class DeploymentReconciler:
                         cell=cell_id, symbol=symbol, amount=amount,
                     )
                 await self._emit_submit(cell_id, outcome, result, reconcile_id)
+
+    async def _guard_long(
+        self, tenor: TenorChoice | None, cell_ctx: AccountContext,
+    ) -> TenorChoice | None:
+        """A long offer the guards would refuse falls back to the signal tenor.
+
+        The envelope's floor and period checks differ by tenor; without this a refused
+        long offer would leave the cell idle every tick while the exposure stays put.
+        """
+        if tenor is None or tenor.decision is None or tenor.price is None:
+            return tenor
+        guard = await self._safety.evaluate(
+            tenor.decision.model_copy(update={"offer_rate": tenor.price.rate}), cell_ctx,
+        )
+        if guard.allowed:
+            return tenor
+        return TenorChoice(evidence={
+            **tenor.evidence, "selected_days": None, "failed_condition": 7, "why": "guard",
+            "guard": guard.guard_name,
+        })
 
     def _fill_evidence_for(  # noqa: PLR0913
         self,
