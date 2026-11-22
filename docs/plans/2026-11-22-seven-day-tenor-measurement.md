@@ -108,11 +108,12 @@
 
   - 實作與原文的差異（2026-11-22 審查後）：撤回放在逐幣別迴圈**之前**（原文寫「讀 capital 之前」；放在迴圈裡時，排在前面的幣別的 E1 會先用光共用額度，長天期就不是先用）；`signal_correlation_id` 取帳本受管掛單自己的（`ManagedOffer.signal_correlation_id` 型別是非空字串，所以原文的「值是 `None`」改成「轉不成 UUID 的不撤並記 log」）；逾時比較加上 `VENUE_CLOCK_TOLERANCE_MS`（`.claude/rules/bitfinex-venue.md`）；曝險讀取失敗只擋新單，撤單照跑（曝險改在同一交易的 savepoint 裡讀）。
 
-- [ ] **3b. 發版前的三項修補**（被擋於：無；擋住步驟 4）——步驟 3 的 `/code-review`（2026-11-22）找到、屬於步驟 1、2 的程式：
+- [ ] **3b. 發版前的三項修補**（被擋於：無；擋住步驟 4）——程式完成待驗收（CI），見進度表。步驟 3 的 `/code-review`（2026-11-22）找到、屬於步驟 1、2 的程式：
   - (a) 長天期被 guard 擋下、退回原天期時，`_guard_long` 走完整的 `self._safety.evaluate`，每次都發 `safety_trigger` warn 事件；包絡底價依天期不同時約每 90 秒一次，會淹掉真正的擋單。改成試算不發事件（或只在原天期也被擋時發），附測試。
   - (b) 借出中金額的讀取以 `mts_opening >= since_ms` 過濾，`mts_opening` 為 NULL 的借款被丟掉，金額上限不再 fail closed。改成 NULL 也算進借出中，附 integration 測試。
   - (c) `deploy` 仍帶 baseline 的 `# noqa: C901, PLR0912, PLR0915`，步驟 1b 說併入步驟 2 拆，沒拆。把每筆單的天期與定價選擇抽成 helper、調低 ratchet（`AGENTS.md`「碰到 baseline 的函式時順手拆掉」）。
   - 驗收：各自有「改回去要失敗」的測試；ruff、mypy、lint-imports、ratchet 綠；`/code-review`。
+  - 實作與原文的差異（2026-11-22）：(a) 試算改用 safety chain 既有的 `dry_evaluate`（不發事件、不記 heartbeat、不短路）；guard 逾時或拋例外時 evidence 記 `guard_error` 並寫 error log，不發 `critical` 事件。(b) `mts_opening` 為 NULL 的列只算進借出中，不算進已結束筆數（樣本要確定落在實驗期間）。現行的觀測驗證拒收沒有 `mts_opening` 的借款（`ledger/_internal/observation.py` 的 `invalid credit or loan`），所以這條是防線，integration 測試直接把列改成 NULL。(c) `deploy` 拆成逐幣別、逐筆單的 helper，ratchet 的 `noqa` 745 → 744；搬進 `_plan_symbol` 的 `# noqa: BLE001` 是原有的，沒有新增。
 
 - [ ] **4. 發版（第零步的設定）**（被擋於：步驟 2、3、3b；owner 核准）
   - 檔案：修改 `deploy/vm/live.env`。
@@ -179,7 +180,12 @@
   - B：不加索引，接受全表掃。只在表小的時候成立。
   - 建議：先對正式 DB 跑一次唯讀的列數查詢（需 owner 核准），四張表都在數十萬列以內選 B，否則選 A。
 
-拍板順序：D1、D5、D6 已拍；D2 是預設；D3 等步驟 6；D4 等步驟 9；D7 等列數。
+- **D8 `period_days` 為 NULL 的借款要不要算進長天期的借出中**（狀態：未決，2026-11-22 步驟 3b `/code-review` 提出；擋住步驟 8（金額上限 600 生效）；不擋步驟 4–6：第零步只掛 1 張，由累計張數擋住，不靠金額上限）。步驟 1 的驗收寫「`period_days` 為 NULL 的列不算」；但觀測驗證允許借款沒有天期（`ledger/_internal/observation.py` 只拒絕 ≤ 0），而掛單中的長天期單是「天期不明也算」（fail closed）。兩邊不一致：venue 某次沒回天期時，一筆 7 天期借款不會被算進金額上限。
+  - A（建議）：仍在借出中、天期不明的借款算進長天期的借出中（與掛單的算法一致）。代價：任何一筆天期不明的借款（包含 2 天期的）在它結束前都會佔金額上限，可能讓長天期暫時掛不出去。
+  - B：維持不算，接受 venue 沒回天期時金額上限可能被超過一筆（上限 600、單筆 200）。
+  - 需要的事實：正式 DB 的 `venue_credit_mirror` 有沒有出現過 `period_days` 為 NULL 的列（唯讀查詢，需 owner 核准）；從未出現的話兩案在實務上沒有差別。
+
+拍板順序：D1、D5、D6 已拍；D2 是預設；D3 等步驟 6；D4 等步驟 9；D7 等列數；D8 在步驟 8 之前。
 
 ## 進度
 
@@ -191,7 +197,7 @@
 | 1b 資料庫讀取與接線 | 程式完成待驗收（CI） | 本機：`ruff check`、`mypy src/`、`lint-imports`、quality ratchet 綠；受影響單元測試 2229 passed；integration `test_ledger_long_tenor.py` 5 passed、`test_ledger_deployment_input.py` 4 passed（本機 PG18）；mutation（複本）：讀取漏掉 bound 的 offer id、保留已結案 attempt、不查成交列、採用未被接受觀測的終態列、同時間矛盾時取沒成交那列、executed 當成沒成交、`signal_correlation_id` 沒帶、沒設定也讀、periodic 不傳 `long_tenor`、讀取失敗就跳過部署，全殺；SQL 的天期與啟用時間條件拿掉不會失敗（純函式會再過濾，語意由 1a 的 mutation 守住，SQL 條件只限定讀取範圍）。`/code-review` high：8 項（important 3），修 5、記錄 1（拆 `deploy` 的 baseline noqa 併入步驟 2）、交 Will 1（索引，D7）、已處理 1（bot 接線移到步驟 2）；契約審查：3 項（blocking 1＝bot 接線，以改寫計畫處理；should 2：沒有 outcome 的 attempt 算一張已補登進計畫；索引併入 D7） | 全套單元、integration 以 PR 的 CI 為準；第 2 輪審查沒跑（每項修正都有會失敗的測試）；成交列查詢的「只認被接受的觀測」沒有單獨的 mutation 測試 | |
 | 2 天期選擇規則 | 程式完成待驗收（CI） | 本機：`ruff check`、`mypy src/`、`lint-imports`、quality ratchet 綠；受影響單元測試 1750 passed（execution、apps、architecture、ledger）；integration `test_ledger_long_tenor.py`＋`test_ledger_deployment_input.py` 9 passed（本機 PG18，含新增的「沒利率的受管長天期掛單也算掛單中」）；mutation（整個 repo 的複本、`PYTHONPATH` 指向複本，複本基線 126 passed）24 個全殺：六個條件各拿掉、截止日反向、金額不含這筆、第 6 條改比賣價、第 6 條只比門檻、2 天期定不出價仍放行、曝險 None 當 0、tick 內累加拿掉、evidence 拿掉、長天期 decision 沒套用、掛單中的天期不明不算、provenance 矛盾不算、啟用時間篩選拿掉、guard 退回拿掉、optimizer／quote reprice 開機檢查拿掉、部分設定不報錯。`/code-review` high：7 項（important 3）：修 4（guard 被擋退回原天期、掛單中改從帳本受管掛單算、quote reprice 開機拒絕、部分設定與幣別不符開機失敗）、駁回 2（逾時欄位未用：計畫已規定與步驟 3 同一次發版；金額大於上限永遠不選：正式包絡單筆上限 200＝`BFX_LONG_TENOR_MAX_AMOUNT` 第零步的值）、記錄 1（索引併入 D7）；契約審查：3 項（blocking 0）：駁回 1（UNKNOWN 掛單漏看：未解的 UNKNOWN 在 sizing 前就擋住整個幣別，`reconciler.py` 的 `evaluate_before_sizing`／`_fallback_uncertain`）、修 2（optimizer 開機檢查寫進計畫並核對正式環境是 `book_guarded`；條件 3 原文改寫） | 全套單元、integration 以 PR 的 CI 為準；第 2 輪審查沒跑（每項修正都有會失敗的測試）；`bot.py` 的接線（政策傳進 reconciler 與 `LedgerDeploymentInput`、幣別檢查）沒有單元測試，靠步驟 4 的現場 evidence 驗 | |
 | 3 逾時與包絡撤回 | 程式完成待驗收（CI） | 本機：`ruff check`、`mypy src/`、`lint-imports`、quality ratchet 綠；單元 `tests/modules/execution/deployment` 262 passed；integration `test_ledger_long_tenor.py`＋`test_ledger_deployment_input.py` 10 passed（本機 PG18，含新增的「曝險 SQL 失敗時仍拿得到要撤的掛單」）；mutation（整個 repo 的複本，複本基線 154 passed）15 個全殺：拿掉天期條件、逾時條件、包絡條件、不扣額度、無視額度、預設額度改 0、可撤清單含天期不明、包絡讀不到當成 0、拿掉 since 條件、拋例外的撤單不扣額度、曝險 None 仍放行、逾時不加容差、掛單中不加容差、曝險 None 時不撤、撤回移回逐幣別迴圈。`/code-review` high（範圍是整條分支）：10 項（無 blocking 標記）：修 6（SINCE 之前會掛出不被計數的單、額度被其他幣別的 E1 先用光、曝險讀不到時不撤、拋例外的撤單不扣額度、venue 時鐘容差、runbook 的 `already_terminal`）、記錄 3（步驟 3b）、駁回 1（第 6 條在 TAKER 分支比的是送單價：前提段 D2 預設就是「實際會送出的利率」）；契約審查：NO DEFECTS FOUND，1 個 nit 駁回（quote 模式下 E1 重撤：設了長天期政策時開機就拒絕 quote 模式，`reconciler.py` 的建構檢查） | 全套單元、integration 以 PR 的 CI 為準；第 2 輪審查沒跑（每項修正都有會失敗的 mutation）；runbook 那段的 psql 查詢沒對正式 DB 跑（需 owner 核准，步驟 4 前） | |
-| 3b 發版前修補 | 未開始 | | | |
+| 3b 發版前修補 | 程式完成待驗收（CI） | 本機：`ruff check`、`mypy src/`、`lint-imports`（31 kept）、quality ratchet（`noqa` 744）綠；受影響測試 1805 passed（execution、ledger、apps、architecture 單元加 integration `test_ledger_long_tenor.py`、`test_ledger_deployment_input.py`，本機 PG18；審查修正後重跑 deployment＋長天期 279 passed）；新測試修補前先紅（(a) 2 個、(b) 單元與 integration 各 1 個、`guard_error` 1 個）；mutation（複本，一次一個）3 個全殺：試算改回會發事件的 `evaluate`、SQL 拿掉 `IS NULL`、計數改回要求有 `mts_opening`；(c) 以「`deploy` 沒有 noqa 時 ruff 綠、ratchet 鎖在 744」為證。`/code-review` high（`082accc2..HEAD`）：8 項（blocking 0）：修 3（試算時 guard 逾時或例外要分得出來、三處 docstring 與 mutation 清單、`ARCHITECTURE.md` 未 commit）、交 Will 1（D8）、駁回 4（皆 nit：試算不短路、已結束筆數不含無日期的列、沒有 `dry_evaluate` 的 chain、搬移的 `BLE001`）；契約審查：NO DEFECTS FOUND（逐段對照拆開前後的 `deploy`，無行為差異） | 全套單元、integration 以 PR 的 CI 為準；第 2 輪審查沒跑（修正有會失敗的測試）；(c) 的「noqa 加回去 ratchet 會紅」沒實跑，依 ratchet「數量必須等於鎖定值」的規則推論 | `c1b4613c`、`9fa5053a` 與審查修正的 commit |
 | 4 發版（第零步設定） | 未開始 | | | |
 | 5 放寬包絡 | 未開始 | | | |
 | 6 第零步判讀 | 未開始 | | | |
