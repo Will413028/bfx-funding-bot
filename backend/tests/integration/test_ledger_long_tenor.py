@@ -14,8 +14,10 @@ Mutations (apply one at a time, run this file, revert):
 6. a tie on ``occurred_at_ms`` picks the unfilled-looking row: the tied offer drops out.
 7. drop the ``mts_opening IS NULL`` arm in ``reads._long_tenor_credits``: the undated lent
    credit drops out.
+8. drop the ``period_days IS NULL`` arm in ``reads._long_tenor_credits``: the lent credit
+   of unreported tenor drops out.
 
-The other SQL bounds on tenor and start time are not separately killable: the counting in
+The equality bounds on tenor and start time are not separately killable: the counting in
 ``read.long_tenor`` filters both again, and its unit mutations cover them.
 """
 from __future__ import annotations
@@ -188,6 +190,22 @@ async def test_a_lent_credit_with_no_opening_time_is_still_read(ledger: Book) ->
             "WHERE venue_credit_id = 'undated' RETURNING venue_credit_id"
         ))).all()
     assert updated == ["undated"]
+
+    state = await _input(ledger).long_tenor()
+
+    assert state is not None
+    assert state.exposure is not None
+    assert state.exposure.lent_amount == Decimal("190")
+
+
+@pytest.mark.asyncio
+async def test_a_lent_credit_with_no_reported_tenor_is_read(ledger: Book) -> None:
+    """The tenor bound must not drop money out at a tenor the venue did not report."""
+    await ledger.accept(_observation(credits=(
+        _credit("no-tenor", "150", opening=SINCE, period=None),
+        _credit("long", "40", opening=SINCE, period=7),
+        _credit("short", "999", opening=SINCE, period=2),
+    )))
 
     state = await _input(ledger).long_tenor()
 

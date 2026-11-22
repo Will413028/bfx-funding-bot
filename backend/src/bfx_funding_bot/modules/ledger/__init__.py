@@ -823,7 +823,9 @@ class LongTenorCredit:
 @dataclass(frozen=True, slots=True)
 class LongTenorExposure:
     offers_filled: int  # our offers of the tenor not known to have ended unfilled
-    lent_amount: Decimal  # out now at the tenor, credits and loans
+    # Out now at the tenor, credits and loans; a row of unreported tenor or opening
+    # time counts here too (fail closed), never in `ended_credits`.
+    lent_amount: Decimal
     ended_credits: int  # credit rows of the tenor no longer out
 
     @classmethod
@@ -879,6 +881,7 @@ class LedgerManagedOffers(Protocol):
         """Our offers, lent amount and ended credits of one tenor since ``query.since_ms``.
 
         Bounded by the symbol, the tenor and the start time, not by the live mirror.
+        Credits whose tenor or opening time the venue did not report are read as well.
         """
         ...
 
