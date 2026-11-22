@@ -2,12 +2,17 @@
 
 Read-only. Loads our ended credits (`funding_credit_history`, the venue's own
 record of each credit's rate, term, opening and actual close) and the hourly
-2-day market candles, then reports per symbol and credit kind: how many closed
+2-day market candles, then reports per symbol, credit kind and term: how many closed
 early, the amount-and-term weighted share of the term actually held, what the
 refinance-on-drop rule (ADR 2026-09-27 D3) would have predicted for the same
 credits, and where the measurement sits between that rule (0) and held to
 maturity (1). Venue credits (in use) and venue loans (taken, unused) are
 reported separately, never added together: one lend may be listed as both.
+Terms are never pooled either. For venue credits it adds, per term, how many
+were repaid within a day of the market falling under the rule's trigger, and
+for the long term (`--long-period-days`) its rate against the 2-day credits
+lent over the same hours. Run it at least two days after the last long credit
+ended: by then the 2-day credits that overlapped it have ended and are in the data.
 
     python -m scripts.report_credit_hold_times --registry-entry "<registry row>" \
         --output /reports/<date>-credit-hold-times.md
@@ -34,11 +39,16 @@ from bfx_funding_bot.core.db import make_engine, make_session_factory, session_s
 from bfx_funding_bot.core.settings import Settings
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.hold_times import (
+    DropFollow,
     EndedCredit,
     HoldRow,
     HoldSummary,
+    RateGap,
+    group_holds,
     loans_that_became_credits,
     measure_holds,
+    rate_gap,
+    repaid_after_drop,
     summarize_holds,
 )
 from bfx_funding_bot.modules.backtest.run_record import fingerprint_candles
@@ -56,15 +66,24 @@ logger = logging.getLogger("report_credit_hold_times")
 _MS_PER_HOUR = 3_600_000
 _REFERENCE_PAD_MS = 48 * _MS_PER_HOUR
 DEFAULT_REFINANCE_MARGIN = "0.2"  # ADR 2026-09-27 D3
-KINDS = ("credit", "loan")
+DEFAULT_LONG_PERIOD_DAYS = 7
 
 CAVEATS = (
-    "Small sample from one account, one currency and (so far) 2-day terms only: it says "
-    "nothing direct about how borrowers treat 7-, 14- or 30-day credits.",
+    "Small sample from one account and one currency. Each term is its own row: a term with "
+    "no row here was not measured, and one term says nothing direct about another.",
     "Venue credits and venue loans are never added together: one lend may be listed first as "
-    "a loan and then as a credit. 'loans that look converted' counts loans that end within a "
-    "minute of a same-sized, same-rate, same-term credit opening (a heuristic); such a loan's "
+    "a loan and then as a credit. 'loans that look converted' counts loans that opened within a "
+    "minute of a same-sized, same-rate, same-term credit (a heuristic); such a loan's "
     "end is not a repayment, so the loan row overstates early closes by about that many.",
+    "'repaid after a drop' is over venue credits the market fell under the rule's trigger for "
+    "before they ended: the share repaid early within 24 hours of that close. A credit that "
+    "then ran to its term counts against it.",
+    "The rate gap is the long credit's rate minus the amount-and-overlap weighted rate of the "
+    "2-day credits (fixed rate only) lent during its life, per unit per day. It is a rate "
+    "difference: it leaves out the hours 2-day money sits idle between credits, so it is "
+    "slightly unfavourable to the long term. It is reported from 20 ended long credits on; "
+    "long credits no 2-day credit overlapped are left out and counted. The interval is a "
+    "10,000-resample bootstrap over the included long credits, fixed seed.",
     "Credits with a rate of 0 or below (the venue's FRR marker) and credits whose term runs "
     "past the loaded candles without the rule firing are left out of the comparison.",
     "A close within one hour of the term end counts as the term running out.",
@@ -149,13 +168,38 @@ def _hours(ms: int | None) -> str | None:
     return None if ms is None else str((Decimal(ms) / _MS_PER_HOUR).quantize(Decimal("0.0001")))
 
 
-def _groups(rows: Sequence[HoldRow]) -> dict[str, list[HoldRow]]:
-    return {kind: [row for row in rows if row.credit.kind == kind] for kind in KINDS}
+@dataclass(frozen=True)
+class SymbolReport:
+    data: SymbolData
+    rows: list[HoldRow]
+    summaries: dict[tuple[str, int], HoldSummary]
+    drop_follow: dict[int, DropFollow]  # venue credits, by term
+    gap: RateGap
 
 
-def render_markdown(
-    results: Sequence[tuple[SymbolData, dict[str, HoldSummary]]], *, margin: Decimal
-) -> str:
+def build_report(data: SymbolData, margin: Decimal, long_period_days: int) -> SymbolReport:
+    rows = measure_holds(data.credits, data.reference, margin)
+    groups = group_holds(rows)
+    return SymbolReport(
+        data=data, rows=rows,
+        summaries={key: summarize_holds(group, margin) for key, group in groups.items()},
+        drop_follow={period: repaid_after_drop(group)
+                     for (kind, period), group in groups.items() if kind == "credit"},
+        gap=rate_gap(rows, period_days=long_period_days),
+    )
+
+
+def _gap_line(gap: RateGap) -> str:
+    counts = (f"{gap.n_long} ended {gap.period_days}-day credits, {gap.n_included} included, "
+              f"{gap.n_excluded} with no overlapping 2-day credit")
+    if gap.gap is None:
+        return (f"Rate gap, {gap.period_days}-day against 2-day: not reported ({counts}; "
+                f"reported from {gap.min_sample} ended).")
+    return (f"Rate gap, {gap.period_days}-day against 2-day: {_f(gap.gap, 8)} per day "
+            f"(95% interval {_f(gap.ci_low, 8)} to {_f(gap.ci_high, 8)}; {counts}).")
+
+
+def render_markdown(reports: Sequence[SymbolReport], *, margin: Decimal) -> str:
     lines = [
         "# Credit hold times",
         "",
@@ -167,7 +211,8 @@ def render_markdown(
         "",
         *(f"- {c}" for c in CAVEATS),
     ]
-    for data, summaries in results:
+    for report in reports:
+        data = report.data
         lines += [
             "",
             f"## {data.symbol} — {len(data.credits)} ended credits "
@@ -175,28 +220,34 @@ def render_markdown(
             "",
             f"Loans that look converted into a credit: {loans_that_became_credits(data.credits)}.",
             "",
-            "| kind | credits | closed early | median held h | held share of term | compared "
+            "| kind | term d | credits | closed early | median held h | median held share "
+            "| held share of term | compared "
             "| held share (compared) | refinance rule share | position | early with market print "
-            "| of those, market more than the margin below rate |",
-            "|---|---|---|---|---|---|---|---|---|---|---|",
+            "| of those, market more than the margin below rate | saw a drop | repaid after a drop |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         ]
-        for kind, s in summaries.items():
+        for (kind, period), s in report.summaries.items():
+            follow = report.drop_follow.get(period) if kind == "credit" else None
             lines.append(
-                f"| {kind} | {s.n} | {s.n_early} | {_f(s.median_held_hours, 1)} | "
+                f"| {kind} | {period} | {s.n} | {s.n_early} | {_f(s.median_held_hours, 1)} | "
+                f"{_f(s.median_held_share)} | "
                 f"{_f(s.held_fraction)} | {s.n_compared} | {_f(s.compared_held_fraction)} | "
                 f"{_f(s.predicted_fraction)} | {_f(s.position)} | {s.early_with_market} | "
-                f"{s.early_with_drop} |"
+                f"{s.early_with_drop} | {'-' if follow is None else follow.n_dropped} | "
+                f"{'-' if follow is None else f'{follow.n_repaid_after} ({_f(follow.share)})'} |"
             )
+        lines += ["", _gap_line(report.gap)]
     return "\n".join(lines) + "\n"
 
 
-def to_json(
-    results: Sequence[tuple[SymbolData, dict[str, HoldSummary]]],
-    rows_by_symbol: dict[str, list[HoldRow]], *, margin: Decimal,
-) -> dict[str, object]:
+def _plain(values: object) -> dict[str, object]:
+    return {key: (str(value) if isinstance(value, Decimal) else value)
+            for key, value in vars(values).items()}
+
+
+def to_json(reports: Sequence[SymbolReport], *, margin: Decimal) -> dict[str, object]:
     def summary(s: HoldSummary) -> dict[str, object]:
-        values = {key: (str(value) if isinstance(value, Decimal) else value)
-                  for key, value in vars(s).items()}
+        values = _plain(s)
         if s.median_held_hours is not None:
             values["median_held_hours"] = str(s.median_held_hours.quantize(Decimal("0.0001")))
         return values
@@ -205,11 +256,15 @@ def to_json(
         "refinance_margin": str(margin),
         "symbols": [
             {
-                "symbol": data.symbol,
-                "exchange_account_id": str(data.account_id) if data.account_id else None,
-                "open_rows_left_out": data.open_rows,
-                "loans_that_look_converted": loans_that_became_credits(data.credits),
-                "summaries": {kind: summary(s) for kind, s in summaries.items()},
+                "symbol": report.data.symbol,
+                "exchange_account_id": str(report.data.account_id) if report.data.account_id else None,
+                "open_rows_left_out": report.data.open_rows,
+                "loans_that_look_converted": loans_that_became_credits(report.data.credits),
+                "summaries": {f"{kind}_{period}d": summary(s)
+                              for (kind, period), s in report.summaries.items()},
+                "repaid_after_drop": {f"credit_{period}d": _plain(follow)
+                                      for period, follow in report.drop_follow.items()},
+                "rate_gap": _plain(report.gap),
                 "credits": [
                     {"credit_id": row.credit.credit_id, "kind": row.credit.kind,
                      "rate": str(row.credit.rate), "period_days": row.credit.period_days,
@@ -219,10 +274,10 @@ def to_json(
                      "drop_at_close": (str(row.drop_at_close)
                                        if row.drop_at_close is not None else None),
                      "refinance_rule_hours": _hours(row.predicted_ms)}
-                    for row in rows_by_symbol[data.symbol]
+                    for row in report.rows
                 ],
             }
-            for data, summaries in results
+            for report in reports
         ],
     }
 
@@ -237,6 +292,8 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p.add_argument("--exchange-account-id", type=UUID, default=None,
                    help="required when the table holds credits of more than one account")
     p.add_argument("--refinance-margin", default=DEFAULT_REFINANCE_MARGIN)
+    p.add_argument("--long-period-days", type=int, default=DEFAULT_LONG_PERIOD_DAYS,
+                   help="the term whose rate is compared against the 2-day credits")
     args = p.parse_args(list(argv))
     try:
         margin_ok = Decimal(0) < Decimal(args.refinance_margin) < Decimal(1)
@@ -268,21 +325,16 @@ async def _amain(argv: Sequence[str]) -> int:
     if missing:
         logger.error("no 2-day candles over the credits of %s", missing)
         return 2
-    rows_by_symbol = {data.symbol: measure_holds(data.credits, data.reference, margin)
-                      for data in loaded}
-    results = [
-        (data, {kind: summarize_holds(rows, margin)
-                for kind, rows in _groups(rows_by_symbol[data.symbol]).items() if rows})
-        for data in loaded
-    ]
+    reports = [build_report(data, margin, args.long_period_days) for data in loaded]
     out: Path = args.output
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render_markdown(results, margin=margin))
+    out.write_text(render_markdown(reports, margin=margin))
     out.with_suffix(".json").write_text(
-        json.dumps(to_json(results, rows_by_symbol, margin=margin), indent=2))
+        json.dumps(to_json(reports, margin=margin), indent=2))
     record = write_research_run_record(
         out, start,
         params={"symbols": symbols, "refinance_margin": margin,
+                "long_period_days": args.long_period_days,
                 "exchange_account_id": str(account_id) if account_id else None},
         # The credit rows themselves are in the .json output, whose hash the record carries.
         inputs=[fingerprint_candles(f"candles:{data.symbol}:p2", data.reference)
