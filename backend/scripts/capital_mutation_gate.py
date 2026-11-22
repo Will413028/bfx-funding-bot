@@ -139,7 +139,7 @@ MUTANTS: tuple[Mutant, ...] = (
            "fills = allocate_capital(views=views, min_fill=min_fill)",
            "fills = allocate_capital(views=views, min_fill=Decimal(0))", RECONCILER_TESTS),
     Mutant("M18", "reconciler fingerprints without the per-offer ceiling", RECONCILER,
-           "maximum=views[cell_id].applied.policy.max_offer_amount,", "maximum=None,",
+           "maximum=plan.views[cell_id].applied.policy.max_offer_amount,", "maximum=None,",
            RECONCILER_TESTS),
     Mutant("M19", "basis counts a lent credit into the symbol's cells", BASIS,
            "        values.credits += credit.amount\n",

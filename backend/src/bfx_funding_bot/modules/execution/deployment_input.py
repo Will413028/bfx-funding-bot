@@ -8,23 +8,37 @@ contradicts itself is neither.
 """
 from __future__ import annotations
 
+import logging
 from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
+from bfx_funding_bot.modules.execution.deployment.tenor import (
+    LongTenorState,
+    resting_long_offers,
+    withdrawable_long_offers,
+)
 from bfx_funding_bot.modules.ledger import (
     CycleResult,
     LedgerManagedOffers,
+    LongTenorExposure,
+    LongTenorQuery,
     ManagedOffer,
     Scope,
 )
+
+log = logging.getLogger(__name__)
 
 
 class DeploymentInput(Protocol):
     async def offers(self, cycle: CycleResult) -> tuple[ActiveFundingOffer, ...]:
         """The accepted ``cycle``'s offers the deployment may reprice."""
+        ...
+
+    async def long_tenor(self) -> LongTenorState | None:
+        """The configured long tenor's exposure and resting offers; None when unconfigured."""
         ...
 
 
@@ -37,16 +51,41 @@ class LedgerDeploymentInput:
     """
 
     def __init__(self, *, session_factory: async_sessionmaker[AsyncSession], account_id: UUID,
-                 offers: LedgerManagedOffers) -> None:
+                 offers: LedgerManagedOffers, long_tenor: LongTenorQuery | None = None) -> None:
         self._sf = session_factory
         self._scope = Scope(account_id)
         self._offers = offers
+        self._long_tenor = long_tenor
 
     async def offers(self, cycle: CycleResult) -> tuple[ActiveFundingOffer, ...]:
         async with self._sf() as session, session.begin():
             found = await self._offers.managed_live_offers(session, self._scope)
         priced = (_active_offer(offer) for offer in found.offers)
         return tuple(offer for offer in priced if offer is not None)
+
+    async def long_tenor(self) -> LongTenorState | None:
+        if self._long_tenor is None:
+            return None
+        async with self._sf() as session, session.begin():
+            # Every managed offer, priced or not: reprice skips an unpriced one, but
+            # the one-at-a-time limit must still see it.
+            found = await self._offers.managed_live_offers(
+                session, self._scope, [self._long_tenor.symbol])
+            # A failed exposure read blocks new long offers only: the offers to withdraw
+            # still come back (savepoint, same transaction).
+            exposure: LongTenorExposure | None
+            try:
+                async with session.begin_nested():
+                    exposure = await self._offers.long_tenor_exposure(
+                        session, self._scope, self._long_tenor)
+            except Exception:  # the withdrawal must not depend on this read
+                log.exception("long_tenor_exposure_unreadable")
+                exposure = None
+            return LongTenorState(
+                exposure=exposure,
+                resting=resting_long_offers(found, self._long_tenor),
+                withdrawable=withdrawable_long_offers(found, self._long_tenor),
+            )
 
 
 def _active_offer(offer: ManagedOffer) -> ActiveFundingOffer | None:
@@ -63,6 +102,7 @@ def _active_offer(offer: ManagedOffer) -> ActiveFundingOffer | None:
         amount_original=offer.amount_original,
         rate_observed=True,
         rate_decimal=offer.rate,
+        signal_correlation_id=offer.signal_correlation_id,
     )
 
 

@@ -178,7 +178,7 @@ class DeployRecorder:
     def __init__(self) -> None:
         self.venue_offers: list[Any] = []
 
-    async def deploy(self, *, venue_offers: Any) -> None:
+    async def deploy(self, *, venue_offers: Any, long_tenor: Any = None) -> None:
         self.venue_offers.append(venue_offers)
 
 

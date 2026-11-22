@@ -39,6 +39,8 @@ from bfx_funding_bot.modules.ledger import (
     LedgerUncertainties,
     LockedCancelGuard,
     LockedCommandGuard,
+    LongTenorExposure,
+    LongTenorQuery,
     ManagedOfferReader,
     ManagedOffers,
     Observation,
@@ -300,6 +302,11 @@ class _SqlLedgerManagedOffers:
         self, session: AsyncSession, scope: Scope, symbol: str
     ) -> frozenset[Decimal]:
         return await reads.fingerprints_in_use(session, scope, symbol)
+
+    async def long_tenor_exposure(
+        self, session: AsyncSession, scope: Scope, query: LongTenorQuery
+    ) -> LongTenorExposure:
+        return await reads.long_tenor_exposure(session, scope, query)
 
 
 def build_ledger_managed_offers() -> LedgerManagedOffers:

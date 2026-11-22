@@ -107,6 +107,7 @@ def test_ports_expose_their_methods() -> None:
         "managed_live_offers",
         "cancel_provenance",
         "fingerprints_in_use",
+        "long_tenor_exposure",
     }
     assert _methods(ledger.LedgerConservationReader) == {"latest"}
     assert _methods(ledger.LedgerCycleReads) == {"accepted_positions", "foreign_live_offers"}
