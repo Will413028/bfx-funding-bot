@@ -181,6 +181,7 @@ class Book:
         symbol: str = "fUST",
         started_at_ms: int = 0,
         completed_at_ms: int = 0,
+        duration_days: int = 2,
     ) -> UUID:
         assert self.basis_id is not None
         self.decisions += 1
@@ -195,7 +196,7 @@ class Book:
                     "duration_days, model_evidence, safety_result, execution_policy, "
                     "service_version, config_hash, occurred_at_ms, recorded_at_ms) VALUES "
                     "(:d, 'account', :a, 'r', :cell, :symbol, :d, 'submitted', 0, "
-                    ":amount, 2, '{}', '{}', 'policy', 'test', 'hash', 0, 0)"
+                    ":amount, :days, '{}', '{}', 'policy', 'test', 'hash', 0, 0)"
                 ),
                 {
                     "d": decision_id,
@@ -203,6 +204,7 @@ class Book:
                     "cell": cell,
                     "symbol": symbol,
                     "amount": amount,
+                    "days": duration_days,
                 },
             )
             await record_attempt(

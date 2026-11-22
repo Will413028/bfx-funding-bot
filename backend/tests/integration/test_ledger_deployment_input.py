@@ -68,12 +68,13 @@ async def test_the_input_is_the_managed_offers_with_their_terms(ledger: Book) ->
         ),
     ))
     offers = await _input(ledger).offers(SimpleNamespace(decision="accepted"))  # type: ignore[arg-type]
-    assert offers == (
+    assert [replace(offer, signal_correlation_id=None) for offer in offers] == [
         ActiveFundingOffer(
             "managed", "fUST", Decimal("150"), 0.0001, 2, 101_000, "partially_filled",
             amount_original=Decimal("200"), rate_observed=True, rate_decimal=Decimal("0.0001"),
         ),
-    )
+    ]
+    assert offers[0].signal_correlation_id  # the decision's signal, for a later cancel
 
 
 @pytest.mark.asyncio

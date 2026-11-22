@@ -34,7 +34,7 @@ from dataclasses import dataclass, replace
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Select, Text, column, select, table
+from sqlalchemy import Integer, Select, Text, column, select, table
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
@@ -44,9 +44,14 @@ from bfx_funding_bot.modules.ledger import (
     ForeignOffer,
     LedgerReadUnbounded,
     LiveOffer,
+    LongTenorCredit,
+    LongTenorExposure,
+    LongTenorQuery,
+    LongTenorSubmission,
     ManagedOffer,
     ManagedOffers,
     ObservationWindow,
+    OfferTerminal,
     OpenUncertainty,
     ProvenanceConflict,
     Scope,
@@ -62,6 +67,10 @@ from bfx_funding_bot.modules.ledger.read.attempts import (
     tail_attempts,
 )
 from bfx_funding_bot.modules.ledger.read.basis import previous_basis
+from bfx_funding_bot.modules.ledger.read.long_tenor import (
+    long_tenor_exposure as _count_long_tenor,
+)
+from bfx_funding_bot.modules.ledger.read.long_tenor import terminal_shows_unfilled
 from bfx_funding_bot.modules.ledger.read.provenance import offer_provenance, sole_owner
 from bfx_funding_bot.modules.ledger.read.quarantine import (
     has_unresolved_quarantine,
@@ -71,18 +80,24 @@ from bfx_funding_bot.modules.ledger.tables import (
     AcceptedCapitalBasisAttemptRow,
     AcceptedCapitalBasisRow,
     ExecutionResolutionJournalRow,
+    LedgerObservationOfferHistoryRow,
     LedgerObservationQueryRow,
     LedgerObservationRow,
+    LedgerObservationTradeRow,
     SubmissionAttemptJournalRow,
+    TransportOutcomeJournalRow,
+    VenueCreditMirrorRow,
     VenueOfferMirrorRow,
 )
 
-# The decision row is execution's audit table; ledger reads only its key and
-# signal correlation (the attempt's FK names it) and never imports execution.
+# The decision row is execution's audit table; ledger reads only its key, signal
+# correlation and tenor (``duration_days``: the long-tenor count's tenor of an attempt;
+# the attempt's FK names the row) and never imports execution.
 _DECISIONS = table(
     "execution_decisions",
     column("decision_id", Text),
     column("signal_correlation_id", Text),
+    column("duration_days", Integer),
 )
 # The operator-visible code per subject: OperatorReads and the consumer port share it.
 UNCERTAINTY_KINDS: dict[str, UncertaintyKind] = {
@@ -528,6 +543,151 @@ async def fingerprints_in_use(
     return frozenset(amount for amount in held if amount is not None)
 
 
+async def _long_tenor_submissions(
+    session: AsyncSession, scope: Scope, query: LongTenorQuery
+) -> list[LongTenorSubmission]:
+    """Our attempts at the tenor that may have reached the venue, with its terminal report.
+
+    The tenor is the decision's ``duration_days`` (what the deployment chose). An attempt
+    the venue refused, never sent, or an UNKNOWN resolved ``not_accepted`` is dropped;
+    every other one may be on the venue and is kept -- including one with no outcome yet
+    (a crash between send and outcome) and an open UNKNOWN, which have no offer id.
+    """
+    attempt, outcome, resolution = (
+        SubmissionAttemptJournalRow, TransportOutcomeJournalRow, ExecutionResolutionJournalRow,
+    )
+    rows = (await session.execute(
+        select(
+            attempt.started_at_ms, _DECISIONS.c.duration_days, outcome.kind,
+            outcome.venue_offer_id, resolution.action, resolution.venue_offer_id,
+        )
+        .join(_DECISIONS, _DECISIONS.c.decision_id == attempt.execution_decision_id)
+        .outerjoin(outcome, outcome.attempt_id == attempt.attempt_id)
+        .outerjoin(resolution, resolution.attempt_id == attempt.attempt_id)
+        .where(
+            attempt.exchange_account_id == scope.exchange_account_id,
+            attempt.symbol == query.symbol,
+            attempt.started_at_ms >= query.since_ms,
+            _DECISIONS.c.duration_days == query.period_days,
+        )
+    )).tuples().all()
+    kept: list[tuple[int, int, str | None]] = []
+    for started, period, kind, acked_id, action, bound_id in rows:
+        if _settled(kind, action):
+            continue
+        kept.append((started, period, acked_id or bound_id))
+    offer_ids = sorted({offer_id for _, _, offer_id in kept if offer_id is not None})
+    terminals = await _offer_terminals(session, scope, query.symbol, offer_ids)
+    traded = await _traded_offers(session, scope, query.symbol, offer_ids)
+    return [
+        LongTenorSubmission(
+            period_days=period,
+            started_at_ms=started,
+            terminal=terminals.get(offer_id) if offer_id is not None else None,
+            has_trade=offer_id in traded,
+        )
+        for started, period, offer_id in kept
+    ]
+
+
+def _accepted_evidence(scope: Scope) -> Select[tuple[UUID]]:
+    """Observations of the scope that were accepted: the only evidence the ledger trusts."""
+    return select(LedgerObservationRow.id).where(
+        LedgerObservationRow.exchange_account_id == scope.exchange_account_id,
+        LedgerObservationRow.accepted.is_(True),
+    )
+
+
+async def _offer_terminals(
+    session: AsyncSession, scope: Scope, symbol: str, offer_ids: list[str]
+) -> dict[str, OfferTerminal]:
+    """The venue's terminal row per offer from accepted observations; the latest reported.
+
+    Two rows of one offer tied on ``occurred_at_ms`` that disagree resolve to the one that
+    keeps the offer counted (a partial fill, or unequal amounts), never to an arbitrary id.
+    """
+    if not offer_ids:
+        return {}
+    history = LedgerObservationOfferHistoryRow
+    rows = (await session.execute(
+        select(
+            history.venue_offer_id, history.occurred_at_ms, history.terminal_kind,
+            history.status, history.amount_original, history.amount_remaining,
+        )
+        .where(
+            history.symbol == symbol,
+            history.venue_offer_id.in_(offer_ids),
+            history.observation_id.in_(_accepted_evidence(scope)),
+        )
+    )).tuples().all()
+    latest: dict[str, tuple[int, list[OfferTerminal]]] = {}
+    for offer_id, occurred, kind, status, original, remaining in rows:
+        terminal = OfferTerminal(
+            terminal_kind=kind, status=status,
+            amount_original=original, amount_remaining=remaining,
+        )
+        seen = latest.get(offer_id)
+        if seen is None or occurred > seen[0]:
+            latest[offer_id] = (occurred, [terminal])
+        elif occurred == seen[0]:
+            seen[1].append(terminal)
+    return {
+        # False sorts first: max picks a row that keeps the offer counted when one exists.
+        offer_id: max(terminals, key=lambda t: not terminal_shows_unfilled(t))
+        for offer_id, (_, terminals) in latest.items()
+    }
+
+
+async def _traded_offers(
+    session: AsyncSession, scope: Scope, symbol: str, offer_ids: list[str]
+) -> frozenset[str]:
+    if not offer_ids:
+        return frozenset()
+    trade = LedgerObservationTradeRow
+    return frozenset(await session.scalars(
+        select(trade.venue_offer_id).distinct()
+        .where(
+            trade.symbol == symbol,
+            trade.venue_offer_id.in_(offer_ids),
+            trade.observation_id.in_(_accepted_evidence(scope)),
+        )
+    ))
+
+
+async def _long_tenor_credits(
+    session: AsyncSession, scope: Scope, query: LongTenorQuery
+) -> list[LongTenorCredit]:
+    credit = VenueCreditMirrorRow
+    rows = await session.scalars(select(credit).where(
+        credit.exchange_account_id == scope.exchange_account_id,
+        credit.symbol == query.symbol,
+        credit.period_days == query.period_days,
+        credit.mts_opening >= query.since_ms,
+    ))
+    return [
+        LongTenorCredit(
+            source_kind=row.source_kind,
+            period_days=row.period_days,
+            amount=row.amount,
+            present=row.present_in_latest_accepted_snapshot,
+            mts_opening=row.mts_opening,
+        )
+        for row in rows
+    ]
+
+
+async def long_tenor_exposure(
+    session: AsyncSession, scope: Scope, query: LongTenorQuery
+) -> LongTenorExposure:
+    """Read the rows ``read.long_tenor`` counts; bounded by symbol, tenor and start time."""
+    return _count_long_tenor(
+        await _long_tenor_submissions(session, scope, query),
+        await _long_tenor_credits(session, scope, query),
+        period_days=query.period_days,
+        since_ms=query.since_ms,
+    )
+
+
 __all__ = [
     "UNCERTAINTY_KINDS",
     "cancel_provenance",
@@ -535,6 +695,7 @@ __all__ = [
     "fingerprints_in_use",
     "has_open_uncertainty",
     "live_symbols",
+    "long_tenor_exposure",
     "managed_live_offers",
     "observation_window",
     "open_uncertainties",

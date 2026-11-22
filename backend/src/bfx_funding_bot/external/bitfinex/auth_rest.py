@@ -103,6 +103,9 @@ class ActiveFundingOffer:
     flags: dict[str, Any] | int | None = None
     rate_observed: bool = True
     rate_decimal: Decimal | None = None
+    # Set only on an offer the ledger proves this bot placed (the decision's signal), so
+    # a deployment cancel can name it; None on venue reads and foreign offers.
+    signal_correlation_id: str | None = None
 
     @property
     def amount_remaining(self) -> Decimal:

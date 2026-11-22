@@ -12,7 +12,7 @@ from bfx_funding_bot.core.telemetry import HealthStatus, HealthTarget
 from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.modules.execution.periodic_reconcile import PeriodicReconcile
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
-from bfx_funding_bot.modules.ledger import CycleResult, Scope
+from bfx_funding_bot.modules.ledger import CycleResult, LongTenorExposure, Scope
 from tests.async_wait import run_until, running, until, yield_loop
 
 ACCEPTED = CycleResult("accepted")
@@ -21,11 +21,18 @@ ACCEPTED = CycleResult("accepted")
 class _Input:
     """The deployment input: hands the deployment ``offers`` for every accepted cycle."""
 
-    def __init__(self, offers: tuple[ActiveFundingOffer, ...] = ()) -> None:
+    def __init__(
+        self, offers: tuple[ActiveFundingOffer, ...] = (),
+        long_tenor: LongTenorExposure | None = None,
+    ) -> None:
         self._offers = offers
+        self._long_tenor = long_tenor
 
     async def offers(self, cycle: CycleResult) -> tuple[ActiveFundingOffer, ...]:
         return self._offers
+
+    async def long_tenor(self) -> LongTenorExposure | None:
+        return self._long_tenor
 
 
 def _make_periodic(*, recovery, scope=None, **kwargs):
@@ -195,7 +202,7 @@ class _FakeDeployment:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def deploy(self, *, venue_offers=()) -> None:
+    async def deploy(self, *, venue_offers=(), long_tenor=None) -> None:
         self.calls += 1
 
 
@@ -235,7 +242,7 @@ async def test_deployment_exception_does_not_crash_loop():
         def __init__(self) -> None:
             self.calls = 0
 
-        async def deploy(self, *, venue_offers=()) -> None:
+        async def deploy(self, *, venue_offers=(), long_tenor=None) -> None:
             self.calls += 1
             raise RuntimeError("deploy boom")
 
@@ -263,16 +270,39 @@ async def test_deploy_receives_the_offers_of_the_deployment_input():
         def __init__(self) -> None:
             self.received: list[tuple] = []
 
-        async def deploy(self, *, venue_offers=()) -> None:
-            self.received.append(venue_offers)
+        async def deploy(self, *, venue_offers=(), long_tenor=None) -> None:
+            self.received.append((venue_offers, long_tenor))
+
+    exposure = LongTenorExposure(offers_filled=1, lent_amount=Decimal("200"), ended_credits=0)
+    dep = _CapturingDeployment()
+    pr = _make_periodic(
+        recovery=_FakeRecovery([ACCEPTED]), probe=_FakeProbe(), interval_s=90,
+        deployment=dep, deployment_input=_Input((offer,), exposure),
+    )
+    await pr._tick()
+    assert dep.received == [((offer,), exposure)]
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_long_tenor_still_deploys_with_none():
+    class _Failing(_Input):
+        async def long_tenor(self) -> LongTenorExposure | None:
+            raise RuntimeError("db down")
+
+    class _CapturingDeployment:
+        def __init__(self) -> None:
+            self.received: list[object] = []
+
+        async def deploy(self, *, venue_offers=(), long_tenor=None) -> None:
+            self.received.append(long_tenor)
 
     dep = _CapturingDeployment()
     pr = _make_periodic(
         recovery=_FakeRecovery([ACCEPTED]), probe=_FakeProbe(), interval_s=90,
-        deployment=dep, deployment_input=_Input((offer,)),
+        deployment=dep, deployment_input=_Failing(),
     )
     await pr._tick()
-    assert dep.received == [(offer,)]
+    assert dep.received == [None]
 
 
 @pytest.mark.asyncio
@@ -371,7 +401,7 @@ async def test_a_submit_refused_for_the_key_ends_the_loop_like_a_refused_read():
     refused = VenueCredentialRejectedError(500, "Internal Server Error", _DIGEST_INVALID)
 
     class _RefusedDeployment:
-        async def deploy(self, *, venue_offers=()) -> None:
+        async def deploy(self, *, venue_offers=(), long_tenor=None) -> None:
             raise refused
 
     probe = _FakeProbe()
@@ -391,7 +421,7 @@ async def test_a_bare_403_from_the_deployment_is_still_only_logged():
         def __init__(self) -> None:
             self.calls = 0
 
-        async def deploy(self, *, venue_offers=()) -> None:
+        async def deploy(self, *, venue_offers=(), long_tenor=None) -> None:
             self.calls += 1
             raise VenueCredentialRejectedError(403, "Forbidden", "<html>waf</html>")
 

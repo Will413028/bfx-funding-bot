@@ -303,6 +303,8 @@ query → 它的 observation → 它的 basis（不以時間挑 basis；最新 q
 
 **部署（每 ~90s，由 PeriodicReconcile 在 observation cycle 被接受後呼叫；cycle 失敗或未被接受則該 tick 不部署）**
 
+部署的輸入來自 `LedgerDeploymentInput`（`execution/deployment_input.py`）：`venue_offers` 是這次被接受的 snapshot 裡的受管 offer（每筆帶 decision 的 `signal_correlation_id`，撤單時用）；`long_tenor` 是設定了長天期查詢（`LongTenorQuery`：幣別、天期、啟用時間）時的長天期曝險，沒設定就是 `None`、不讀 DB。曝險有三個數（`ledger/read/long_tenor.py` 計數，`ledger/read/reads.py` 的 `long_tenor_exposure` 取列）：**累計成交過的掛單數**以送單紀錄為底（decision 的 `duration_days` 等於該天期、`started_at_ms` 不早於啟用時間；venue 拒絕、沒送出、UNKNOWN 解成 `not_accepted` 的不算，沒有 outcome 或 UNKNOWN 未解的算），扣掉 venue 的 terminal 列（`ledger_observation_offer_history`）證明「撤單、沒部分成交、原始與剩餘金額相等」且沒有成交列（`ledger_observation_trade`）的；不讀 `venue_offer_mirror` 的金額（停在最後一個快照，漏掉之後的成交）。**借出中金額**與**已結束的 credit 筆數**讀 `venue_credit_mirror`（同天期、`mts_opening` 不早於啟用時間；已結束只數 credit，避免同一筆先 loan 後 credit 數兩次）。目前 `deploy` 收下這個輸入但還不使用（計畫 `docs/plans/2026-11-22-seven-day-tenor-measurement.md` 步驟 2 才接上天期選擇規則）。
+
 `DeploymentReconciler.deploy`（`deployment/reconciler.py`）對每個設定的 symbol 依序：
 
 5. **停止與不確定**：account HALTED 或該幣別 applied policy `enabled=false` → 撤掉本 bot 在該 symbol 的受管 offer，不送單（`_pull_if_stopped`）。有 open UNKNOWN（`SafetyGuardChain.evaluate_before_sizing`，或沒有該 hook 時讀 uncertainty reader）→ 不送單。

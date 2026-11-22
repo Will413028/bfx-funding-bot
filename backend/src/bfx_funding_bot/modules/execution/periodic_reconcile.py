@@ -30,7 +30,7 @@ from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.external.bitfinex.errors import credential_rejection
 from bfx_funding_bot.modules.execution.deployment_input import DeploymentInput
 from bfx_funding_bot.modules.execution.resync_channel import ResyncChannel
-from bfx_funding_bot.modules.ledger import CycleResult, ObservationSink, Scope
+from bfx_funding_bot.modules.ledger import CycleResult, LongTenorExposure, ObservationSink, Scope
 from bfx_funding_bot.modules.observability import alerts
 
 log = logging.getLogger(__name__)
@@ -57,6 +57,7 @@ class _Probe(Protocol):
 class _Deployment(Protocol):
     async def deploy(
         self, *, venue_offers: tuple[ActiveFundingOffer, ...] = (),
+        long_tenor: LongTenorExposure | None = None,
     ) -> None: ...
 
 
@@ -200,12 +201,26 @@ class PeriodicReconcile:
             )
         await self._deploy(cycle)
 
+    async def _long_tenor(self) -> LongTenorExposure | None:
+        """The long tenor's exposure, or None when unread: a failed read never skips the deploy.
+
+        None is what an unconfigured long tenor reads as, so a consumer that places long
+        offers only on a value places none while the read fails.
+        """
+        assert self._deployment_input is not None
+        try:
+            return await self._deployment_input.long_tenor()
+        except Exception:  # the stops and pulls of deploy must still run
+            log.exception("long_tenor_exposure_unreadable")
+            return None
+
     async def _deploy(self, cycle: CycleResult) -> None:
         if self._deployment is None or self._deployment_input is None:
             return
         try:
             await self._deployment.deploy(
                 venue_offers=await self._deployment_input.offers(cycle),
+                long_tenor=await self._long_tenor(),
             )
         except Exception as exc:  # deployment must never crash the reconcile backbone...
             # ...except on a submit the venue answered by refusing the key (9g): the same exit

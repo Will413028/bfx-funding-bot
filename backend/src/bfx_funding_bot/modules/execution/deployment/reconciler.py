@@ -88,6 +88,7 @@ from bfx_funding_bot.modules.ledger import (
     CapitalAuthority,
     CapitalAvailable,
     CapitalBlocked,
+    LongTenorExposure,
     ManagedOfferReader,
     ProvenanceConflict,
     Scope,
@@ -345,8 +346,13 @@ class DeploymentReconciler:
             log.exception("deployment_uncertainty_unreadable symbol=%s", symbol)
             return True
 
-    async def deploy(self, *, venue_offers: tuple[ActiveFundingOffer, ...] = ()) -> None:  # noqa: C901, PLR0912, PLR0915
+    async def deploy(  # noqa: C901, PLR0912, PLR0915
+        self, *, venue_offers: tuple[ActiveFundingOffer, ...] = (),
+        long_tenor: LongTenorExposure | None = None,
+    ) -> None:
         ctx = self._ctx
+        # long_tenor: the configured long tenor's exposure (plan 2026-11-22 seven-day
+        # tenor, step 1); None when none is configured. Read but not yet acted on.
         # venue_offers: threaded from PeriodicReconcile's reconcile snapshot
         # (E1 stale-offer reprice). Consumed below by _reprice_sweep when a
         # RepricePolicy is configured (self._reprice is not None); otherwise

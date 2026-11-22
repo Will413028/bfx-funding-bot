@@ -56,12 +56,15 @@ class _Input:
         self.cycles.append(cycle)
         return self.offers_
 
+    async def long_tenor(self):
+        return None
+
 
 class _Deployment:
     def __init__(self) -> None:
         self.received: list[tuple] = []
 
-    async def deploy(self, *, venue_offers=()) -> None:
+    async def deploy(self, *, venue_offers=(), long_tenor=None) -> None:
         self.received.append(venue_offers)
 
 

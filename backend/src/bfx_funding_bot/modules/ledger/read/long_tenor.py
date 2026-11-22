@@ -20,61 +20,32 @@ this: they freeze at the last live snapshot and miss a fill that lands after it.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
 from decimal import Decimal
 
-
-@dataclass(frozen=True, slots=True)
-class OfferTerminal:
-    """The venue's terminal report of one offer (a row of the observed offer history)."""
-
-    terminal_kind: str  # "executed" | "canceled"
-    status: str  # "active" | "partially_filled" (what it was when it ended)
-    amount_original: Decimal | None
-    amount_remaining: Decimal | None
+from bfx_funding_bot.modules.ledger import (
+    LongTenorCredit,
+    LongTenorExposure,
+    LongTenorSubmission,
+    OfferTerminal,
+)
 
 
-@dataclass(frozen=True, slots=True)
-class LongTenorSubmission:
-    """One offer of ours that reached the venue."""
-
-    period_days: int
-    started_at_ms: int
-    terminal: OfferTerminal | None  # None: resting, or ended with no terminal row observed yet
-    has_trade: bool  # an observed funding trade names this offer
-
-
-@dataclass(frozen=True, slots=True)
-class LongTenorCredit:
-    """One row of the venue credit mirror."""
-
-    source_kind: str  # "credit" (in use) | "loan" (taken, unused)
-    period_days: int | None
-    amount: Decimal
-    present: bool  # in the latest accepted snapshot: the money is out now
-    mts_opening: int | None
-
-
-@dataclass(frozen=True, slots=True)
-class LongTenorExposure:
-    offers_filled: int  # our offers of the tenor not known to have ended unfilled
-    lent_amount: Decimal  # out now at the tenor, credits and loans
-    ended_credits: int  # credit rows of the tenor no longer out
-
-    @classmethod
-    def none(cls) -> LongTenorExposure:
-        return cls(offers_filled=0, lent_amount=Decimal(0), ended_credits=0)
+def terminal_shows_unfilled(terminal: OfferTerminal) -> bool:
+    """The venue's terminal row says the offer was canceled with nothing taken."""
+    return (
+        terminal.terminal_kind == "canceled"
+        and terminal.status != "partially_filled"
+        and terminal.amount_original is not None
+        and terminal.amount_remaining is not None
+        and terminal.amount_original == terminal.amount_remaining
+    )
 
 
 def _ended_unfilled(submission: LongTenorSubmission) -> bool:
     terminal = submission.terminal
     return (
         terminal is not None
-        and terminal.terminal_kind == "canceled"
-        and terminal.status != "partially_filled"
-        and terminal.amount_original is not None
-        and terminal.amount_remaining is not None
-        and terminal.amount_original == terminal.amount_remaining
+        and terminal_shows_unfilled(terminal)
         and not submission.has_trade
     )
 
@@ -106,3 +77,13 @@ def long_tenor_exposure(
             1 for credit in ours if not credit.present and credit.source_kind == "credit"
         ),
     )
+
+
+__all__ = [
+    "LongTenorCredit",
+    "LongTenorExposure",
+    "LongTenorSubmission",
+    "OfferTerminal",
+    "long_tenor_exposure",
+    "terminal_shows_unfilled",
+]

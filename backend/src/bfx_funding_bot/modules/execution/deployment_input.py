@@ -17,6 +17,8 @@ from bfx_funding_bot.external.bitfinex.auth_rest import ActiveFundingOffer
 from bfx_funding_bot.modules.ledger import (
     CycleResult,
     LedgerManagedOffers,
+    LongTenorExposure,
+    LongTenorQuery,
     ManagedOffer,
     Scope,
 )
@@ -25,6 +27,10 @@ from bfx_funding_bot.modules.ledger import (
 class DeploymentInput(Protocol):
     async def offers(self, cycle: CycleResult) -> tuple[ActiveFundingOffer, ...]:
         """The accepted ``cycle``'s offers the deployment may reprice."""
+        ...
+
+    async def long_tenor(self) -> LongTenorExposure | None:
+        """The configured long tenor's exposure; None when no long tenor is configured."""
         ...
 
 
@@ -37,16 +43,23 @@ class LedgerDeploymentInput:
     """
 
     def __init__(self, *, session_factory: async_sessionmaker[AsyncSession], account_id: UUID,
-                 offers: LedgerManagedOffers) -> None:
+                 offers: LedgerManagedOffers, long_tenor: LongTenorQuery | None = None) -> None:
         self._sf = session_factory
         self._scope = Scope(account_id)
         self._offers = offers
+        self._long_tenor = long_tenor
 
     async def offers(self, cycle: CycleResult) -> tuple[ActiveFundingOffer, ...]:
         async with self._sf() as session, session.begin():
             found = await self._offers.managed_live_offers(session, self._scope)
         priced = (_active_offer(offer) for offer in found.offers)
         return tuple(offer for offer in priced if offer is not None)
+
+    async def long_tenor(self) -> LongTenorExposure | None:
+        if self._long_tenor is None:
+            return None
+        async with self._sf() as session, session.begin():
+            return await self._offers.long_tenor_exposure(session, self._scope, self._long_tenor)
 
 
 def _active_offer(offer: ManagedOffer) -> ActiveFundingOffer | None:
@@ -63,6 +76,7 @@ def _active_offer(offer: ManagedOffer) -> ActiveFundingOffer | None:
         amount_original=offer.amount_original,
         rate_observed=True,
         rate_decimal=offer.rate,
+        signal_correlation_id=offer.signal_correlation_id,
     )
 
 
