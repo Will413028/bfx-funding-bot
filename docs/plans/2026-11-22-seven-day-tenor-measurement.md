@@ -63,7 +63,7 @@
 
 ## 步驟
 
-- [ ] **1. 帳本提供長天期曝險的讀取**（被擋於：無）
+- [ ] **1. 帳本提供長天期曝險的讀取**（被擋於：無）——拆成兩個子步驟：1a 純計數（完成 2026-11-22）、1b 資料庫讀取與接線（未開始），見進度表
   - 檔案：修改 `backend/src/bfx_funding_bot/modules/ledger/__init__.py`（回傳型別與讀取介面）、`modules/ledger/` 下實作讀取的檔案（修改；開工時以 `rg -n "managed_live_offers" backend/src/bfx_funding_bot/modules/ledger` 找到既有讀取的位置，新讀取放同一檔）、`modules/execution/deployment_input.py`（修改：新輸入，並把受管掛單的 `signal_correlation_id` 帶進 `venue_offers` 的元素）、`external/bitfinex/auth_rest.py`（修改：`ActiveFundingOffer` 新增選填欄位 `signal_correlation_id`，預設 `None`）、`modules/execution/periodic_reconcile.py`（修改）、`modules/execution/deployment/reconciler.py`（修改，`deploy` 多收一個輸入）、`apps/bot_ports.py`（修改）、`apps/bot.py`（修改）、`backend/ARCHITECTURE.md`（修改）；新增 `backend/tests/modules/ledger/test_long_tenor_exposure.py` 與對應的 integration 測試。
   - 範圍：部署層每個 tick 拿到一份「指定幣別、指定天期」的曝險，四個數字，各自的來源寫死：
     1. **累計成交過的長天期掛單數**：以送單紀錄為底——本帳戶的 attempt（`submission_attempt_journal`），被 venue 確認（`transport_outcome_journal.kind='ack'`）或綁定到 venue 掛單（`execution_resolution_journal.action='bound_to_venue'`），幣別相符、天期（對應 execution decision 的 `duration_days`）等於該天期、`started_at_ms` 不早於 `BFX_LONG_TENOR_SINCE`。從中扣掉「確定沒成交就結束」的，四個條件要全部成立：(i) 該掛單在 `ledger_observation_offer_history` 有列（venue 回報的終態）；(ii) 那一列的 `terminal_kind` 是 `canceled`、`status` 不是部分成交、`amount_original` 與 `amount_remaining` 都有值並相等；(iii) `ledger_observation_trade` 裡沒有這張掛單的成交列；(iv) 金額一律讀歷史列，不讀 `venue_offer_mirror`。其餘一律算一張：還在掛、全部成交、部分成交、金額欄是 NULL、還沒有歷史列。送出結果不明（UNKNOWN）的 attempt 在未解期間算一張，解成 `bound_to_venue` 後照上面計，解成沒掛出（`not_accepted`）的不計。這個數字不看借款，也不依賴掛單有沒有被觀測到。
@@ -75,6 +75,7 @@
   - 不能動：`venue_credit_mirror`、`venue_offer_mirror` 的寫入端；cell 上限的算法；capital 的授權邏輯。
   - 驗收：純函式的單元測試（只數指定天期與幣別；確定沒成交就被撤的長天期掛單不計入累計；部分成交後被撤的計入；**從未出現在任何觀測快照就全部成交的掛單要計入**；金額欄是 NULL 或還沒有歷史列的計入；**鏡像表顯示已撤回且金額相等、但歷史列金額不等或有成交列的計入**；歷史列的狀態是部分成交的計入；UNKNOWN 未解時計入、解成沒掛出後不計；早於啟用時間的不計；`period_days` 為 NULL 的列不算；已結束的借款不算進借出中；loan 列不算進已結束筆數）；mutation 在複本對純函式跑：拿掉天期條件、把「確定沒成交」的也算進累計、把累計改回只數鏡像表有列的掛單、把 NULL 當成沒成交、金額改讀鏡像表、拿掉「沒有成交列」的條件、把已結束的算進借出中、把 loan 也算進已結束筆數，各自要讓單元測試失敗。DB 查詢本身由 integration 測試覆蓋，在 CI 跑。
   - 停止條件：送單紀錄取不到該筆單的天期，或分不出受管與否 → 回報，不退回只用鏡像表。某張長天期掛單超過一小時仍沒有歷史列（venue 查不到終態）→ 回報 owner；它在這段時間算一張，第零步會停在那裡。
+  - 子步驟：**1a** 純計數：`backend/src/bfx_funding_bot/modules/ledger/read/long_tenor.py`（新增；`long_tenor_exposure` 與輸入、輸出型別）與 `backend/tests/modules/ledger/test_long_tenor_exposure.py`（新增）。**1b** 資料庫讀取與接線：把送單紀錄（含對應的掛單終態與有無成交列）與 `venue_credit_mirror` 的列讀成 1a 的輸入型別；經 ledger 的 facade 匯出；`deployment_input`、`periodic_reconcile`、`reconciler.deploy`、`bot_ports`、`bot` 接線；`venue_offers` 的元素帶上 `signal_correlation_id`；integration 測試；`ARCHITECTURE.md`。1b 的驗收是本步驗收裡 1a 以外的全部。
   - 完成後的狀態：多一個沒有人使用的輸入，行為不變。
 
 - [ ] **2. 天期選擇規則（預設關閉）**（被擋於：步驟 1）
@@ -172,7 +173,8 @@
 
 | 步驟 | 狀態 | 已跑的驗收 | 未跑的驗收與原因 | commit |
 |---|---|---|---|---|
-| 1 長天期曝險的讀取 | 未開始 | | | |
+| 1a 純計數 | 完成 | `tests/modules/ledger/test_long_tenor_exposure.py` 6 passed；`ruff check`、`mypy src/`；mutation 15 個全殺（天期與啟用時間條件、確定沒成交的四個條件逐一、終態不存在當成沒成交、已成交當成沒成交、金額 NULL 當成沒成交、成交列被忽略、已結束算進借出中、loan 或仍在借出的算進已結束筆數；其中「已成交當成沒成交」第一次存活，補了「已成交但兩個金額欄相等」的案例後殺掉） | `/code-review` 與契約審查隨 1b 一起做；CI 待 PR | `66912535` |
+| 1b 資料庫讀取與接線 | 未開始 | | | |
 | 2 天期選擇規則 | 未開始 | | | |
 | 3 逾時與包絡撤回 | 未開始 | | | |
 | 4 發版（第零步設定） | 未開始 | | | |
