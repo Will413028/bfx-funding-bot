@@ -44,11 +44,11 @@ class TradingReadiness:
         self._notify()
 
     def set_ready(self) -> None:
-        self._decision = ReadinessSnapshot(True, None, None)
+        self._decision = ReadinessSnapshot(True, None, None)  # noqa: FBT003
         self._notify()
 
     def set_blocked(self, reason: BlockReason, dependency: str) -> None:
-        self._decision = ReadinessSnapshot(False, reason.value, dependency)
+        self._decision = ReadinessSnapshot(False, reason.value, dependency)  # noqa: FBT003
         self._notify()
 
     def set_dependency_stale(self, dependency: str) -> None:
@@ -61,7 +61,7 @@ class TradingReadiness:
 
     def snapshot(self) -> ReadinessSnapshot:
         if self._stale_dependencies:
-            return ReadinessSnapshot(False, DEPENDENCY_STALE, min(self._stale_dependencies))
+            return ReadinessSnapshot(False, DEPENDENCY_STALE, min(self._stale_dependencies))  # noqa: FBT003
         return self._decision
 
     def _notify(self) -> None:

@@ -412,7 +412,7 @@ class LedgerOperatorReads:
             for symbol, available, offered, credits in rows.tuples()
         )
 
-    async def list_offers(
+    async def list_offers(  # noqa: C901
         self, session: AsyncSession, scope: Scope, *, states: Collection[str]
     ) -> tuple[OfferView, ...]:
         """Managed offers only: pending, open UNKNOWN, claimed. History is not read here."""

@@ -40,7 +40,7 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-async def emit_order_submit(
+async def emit_order_submit(  # noqa: PLR0913
     *,
     event_sink: _EventSink,
     phase: Phase,
@@ -83,7 +83,7 @@ async def emit_order_submit(
     await event_sink.emit(env.model_dump(mode="json"))
 
 
-async def emit_safety_trigger(
+async def emit_safety_trigger(  # noqa: PLR0913
     *,
     diagnostics: _DiagnosticsProtocol,
     phase: Phase,

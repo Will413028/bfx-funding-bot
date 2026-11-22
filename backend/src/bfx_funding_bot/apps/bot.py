@@ -278,14 +278,14 @@ async def _refuse_live_boot(exc: BaseException, *, config: MarketfeedConfig,
     error is raised; nothing is written and nothing reaches the venue."""
     try:
         account_id = UUID(require_env("BFX_EXCHANGE_ACCOUNT_ID"))
-    except Exception:
+    except Exception:  # noqa: BLE001
         log.critical("boot_refused_without_account account unknown")
         return
     report_refused_boot(account_id=account_id, environment=config.deployment_environment.value,
                         reason=f"boot_blocked: {str(exc) or type(exc).__name__}")
 
 
-async def build_daemon(
+async def build_daemon(  # noqa: C901, PLR0912, PLR0915
     *,
     cells_yaml_path: Path | None = None,
     skip_ws: bool = False,
@@ -397,7 +397,6 @@ async def build_daemon(
     if (
         config.book_max_age_seconds is None
         or config.book_reconcile_interval_seconds is None
-        or config.book_max_down_pct is None
     ):
         raise ValueError(
             "the execution policy requires FundingBookService configuration",
@@ -781,10 +780,7 @@ async def build_daemon(
         execution_gate=execution_gate,
         execution_policy=config.execution_policy,
         optimizer_fee_rate=config.optimizer_fee_rate,
-        period_pricer=PeriodPricer(
-            max_down_pct=Decimal(str(config.book_max_down_pct)),
-            tick=Decimal("0.00000001"),
-        ),
+        period_pricer=PeriodPricer(tick=Decimal("0.00000001")),
         # Every decision names the build that made it: the revision and
         # image digest the deploy tool injected.
         audit_context_factory=_AuditContextFactory(
@@ -1045,7 +1041,7 @@ async def build_daemon(
 
     healthz_port_env = os.environ.get("BFX_HEALTHZ_PORT", "").strip()
     healthz_port = int(healthz_port_env) if healthz_port_env else 8080
-    healthz_host = os.environ.get("BFX_HEALTHZ_HOST", "0.0.0.0").strip() or "0.0.0.0"
+    healthz_host = os.environ.get("BFX_HEALTHZ_HOST", "0.0.0.0").strip() or "0.0.0.0"  # noqa: S104
     admin_token, admin_read_token = admin_tokens(os.environ)
 
     # Phase 4.4a Task 19: WS dispatcher — wired only for a venue whose capabilities require
@@ -1192,7 +1188,7 @@ async def _run() -> None:
             await watchdog_task
 
 
-async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:
+async def _run_daemon(stop: asyncio.Event, watchdog: LoopWatchdog) -> None:  # noqa: C901, PLR0912, PLR0915
     try:
         daemon = await build_daemon(stop_event=stop)
     except Exception as exc:

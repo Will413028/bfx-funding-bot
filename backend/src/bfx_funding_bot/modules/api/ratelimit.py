@@ -10,6 +10,7 @@ revisit at SP6 multi-tenant.
 """
 from __future__ import annotations
 
+import functools
 import math
 import os
 import time
@@ -58,30 +59,28 @@ class TokenBucketLimiter:
 
 def _limiter_from_env() -> TokenBucketLimiter:
     return TokenBucketLimiter(
-        read_per_min=int(os.environ.get("BFX_RATE_LIMIT_READ_PER_MIN", "120")),
-        write_per_min=int(os.environ.get("BFX_RATE_LIMIT_WRITE_PER_MIN", "30")),
+        read_per_min=int(os.environ.get("BFX_RATE_LIMIT_READ_PER_MIN", "120")),  # noqa: TID251
+        write_per_min=int(os.environ.get("BFX_RATE_LIMIT_WRITE_PER_MIN", "30")),  # noqa: TID251
     )
 
 
-_shared_limiter: TokenBucketLimiter | None = None
-_shared_dependency: Callable[..., Awaitable[None]] | None = None
+@functools.cache
+def _shared_limiter() -> TokenBucketLimiter:
+    return _limiter_from_env()
 
 
+@functools.cache
 def shared_rate_limit_dependency() -> Callable[..., Awaitable[None]]:
     """One process-wide dependency (and thus ONE bucket set) shared by every
     router — per-router instances would multiply the effective limit."""
-    global _shared_dependency, _shared_limiter
-    if _shared_dependency is None:
-        _shared_limiter = _limiter_from_env()
-        _shared_dependency = build_rate_limit_dependency(_shared_limiter)
-    return _shared_dependency
+    return build_rate_limit_dependency(_shared_limiter())
 
 
 def reset_shared_rate_limits() -> None:
     """Test hook: drop all buckets so suites with a shared fake user don't
     bleed limit state across tests. No-op in production paths."""
-    if _shared_limiter is not None:
-        _shared_limiter._buckets.clear()
+    if _shared_limiter.cache_info().currsize:
+        _shared_limiter()._buckets.clear()
 
 
 def build_rate_limit_dependency(

@@ -85,7 +85,7 @@ class BookReplayLearner:
         """The candle series key this model prices: `p2` for 2-day levels, `p30` for 30-day."""
         return f"p{self.period_days}"
 
-    def learn(
+    def learn(  # noqa: C901
         self, snapshots: Sequence[BookAskSnapshot], candles: Sequence[FundingCandle]
     ) -> list[BucketStat]:
         by_mts = {c.mts: c for c in candles}

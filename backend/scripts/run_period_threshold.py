@@ -80,7 +80,7 @@ def rules_for(period: int) -> list[ThresholdRule]:
     return rules
 
 
-def render_table(
+def render_table(  # noqa: PLR0913, PLR0917
     title: str,
     start_ms: int,
     r2: Sequence[float | None],

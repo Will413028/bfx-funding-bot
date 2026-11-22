@@ -90,7 +90,7 @@ async def publish_best_effort(bus: DomainEventBus, event: object) -> None:
     """Bus failure must not fail a submit: the outcome is already durable."""
     try:
         await bus.publish(event)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         log.critical(
             "bus_publish_failed_outer event=%s err=%r — projection lost, SoT already persisted",
             type(event).__name__,

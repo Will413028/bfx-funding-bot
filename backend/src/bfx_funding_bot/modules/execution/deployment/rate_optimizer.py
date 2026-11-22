@@ -212,7 +212,7 @@ def _freeze_scores(scores: Mapping[str, Decimal]) -> Mapping[str, Decimal]:
     return MappingProxyType(frozen)
 
 
-def _validate_fill_evidence(evidence: FillModelEvidence) -> None:
+def _validate_fill_evidence(evidence: FillModelEvidence) -> None:  # noqa: C901
     """Reject malformed canonical values before they can retain mutable aliases."""
     if not isinstance(evidence.fill_prob, Decimal):
         raise TypeError("canonical fill evidence fill_prob must be a Decimal")

@@ -204,7 +204,7 @@ async def request_trading_control(
     return request_id
 
 
-async def request_currency(
+async def request_currency(  # noqa: PLR0913
     session: AsyncSession, context: OperatorContext, *, symbol: str, action: CurrencyAction,
     reason: str, now_ms: int,
 ) -> UUID:
@@ -399,7 +399,7 @@ async def _current_recipient(session: AsyncSession, context: OperatorContext) ->
                CredentialRotationRecipientRow.recipient_id.desc()).limit(1))).first()
 
 
-async def request_credential_rotation(
+async def request_credential_rotation(  # noqa: PLR0913
     session: AsyncSession, context: OperatorContext, *, api_key: str, api_secret: str,
     label: str, reason: str, now_ms: int,
 ) -> UUID:
@@ -628,7 +628,7 @@ async def _details(
     ]
 
 
-async def list_uncertainties(
+async def list_uncertainties(  # noqa: PLR0913
     session: AsyncSession, context: OperatorContext, reads: OperatorReads,
     evidence: OperatorEvidence, *, state: UncertaintyState | None, limit: int,
 ) -> list[UncertaintyDetail]:

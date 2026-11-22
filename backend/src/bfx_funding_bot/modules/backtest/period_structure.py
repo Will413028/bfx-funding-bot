@@ -220,7 +220,7 @@ class PeriodStructureReport:
     windows: dict[str, list[tuple[int, Decimal]]] = field(default_factory=dict)
 
 
-def build_report(
+def build_report(  # noqa: PLR0913
     *,
     symbol: str,
     runs: Mapping[str, ArmRun],
@@ -326,7 +326,7 @@ def render_markdown(
     return "\n".join(lines) + "\n"
 
 
-def report_to_json(reports: Sequence[PeriodStructureReport], *, fill_alpha: Decimal) -> dict[str, object]:
+def symbol_to_json(r: PeriodStructureReport) -> dict[str, object]:
     def _summary(s: OosSummary) -> dict[str, str | int]:
         return {
             "n_windows": s.n_windows, "median_monthly": str(s.median_monthly),
@@ -337,29 +337,30 @@ def report_to_json(reports: Sequence[PeriodStructureReport], *, fill_alpha: Deci
         }
 
     return {
-        "fill_alpha": str(fill_alpha),
-        "symbols": [
-            {
-                "symbol": r.symbol, "n_windows": r.n_windows, "data_window": r.data_window,
-                "notes": list(r.notes),
-                "arms": {n: _summary(s) for n, s in r.arm_summaries.items()},
-                "series_used": r.series_used,
-                "pairs": {
-                    label: {
-                        "median_active": str(ps.median_active), "mean_active": str(ps.mean_active),
-                        "information_ratio": str(ps.information_ratio),
-                        "pct_months_outperform": str(ps.pct_months_outperform),
-                        "mean_ci": [str(r.pair_mean_ci[label][0]), str(r.pair_mean_ci[label][1])],
-                    }
-                    for label, ps in r.pair_summaries.items()
-                },
-                "per_year_mean_monthly": {
-                    a: {str(y): str(v) for y, v in d.items()} for a, d in r.per_year_mean_monthly.items()
-                },
-                "windows": {
-                    a: [[m, str(v)] for m, v in ws] for a, ws in r.windows.items()
-                },
+        "symbol": r.symbol, "n_windows": r.n_windows, "data_window": r.data_window,
+        "notes": list(r.notes),
+        "arms": {n: _summary(s) for n, s in r.arm_summaries.items()},
+        "series_used": r.series_used,
+        "pairs": {
+            label: {
+                "median_active": str(ps.median_active), "mean_active": str(ps.mean_active),
+                "information_ratio": str(ps.information_ratio),
+                "pct_months_outperform": str(ps.pct_months_outperform),
+                "mean_ci": [str(r.pair_mean_ci[label][0]), str(r.pair_mean_ci[label][1])],
             }
-            for r in reports
-        ],
+            for label, ps in r.pair_summaries.items()
+        },
+        "per_year_mean_monthly": {
+            a: {str(y): str(v) for y, v in d.items()} for a, d in r.per_year_mean_monthly.items()
+        },
+        "windows": {
+            a: [[m, str(v)] for m, v in ws] for a, ws in r.windows.items()
+        },
+    }
+
+
+def report_to_json(reports: Sequence[PeriodStructureReport], *, fill_alpha: Decimal) -> dict[str, object]:
+    return {
+        "fill_alpha": str(fill_alpha),
+        "symbols": [symbol_to_json(r) for r in reports],
     }

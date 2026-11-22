@@ -205,7 +205,7 @@ def _counts() -> dict[str, int]:
     return {table: int(_scalar(f"SELECT count(*) FROM public.{table}") or 0) for table in LEGACY}
 
 
-def upgrade() -> None:
+def upgrade() -> None:  # noqa: C901, PLR0912
     bind = op.get_bind()
     op.execute(f"LOCK TABLE {', '.join(f'public.{t}' for t in OUTBOXES)} IN SHARE MODE")
     op.execute("LOCK TABLE public.exchange_accounts IN SHARE MODE")

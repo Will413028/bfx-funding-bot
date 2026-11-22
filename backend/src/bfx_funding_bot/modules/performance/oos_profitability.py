@@ -196,7 +196,7 @@ def bootstrap_ci(
     """
     if not values:
         raise ValueError("bootstrap_ci: empty values")
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311
     n = len(values)
     stats: list[Decimal] = []
     for _ in range(n_resamples):

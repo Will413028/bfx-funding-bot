@@ -90,7 +90,7 @@ async def test_python_and_postgresql_refuse_the_same_transitions(migrated_db):
                 await session.execute(_INSERT, {"a": account, "state": state,
                                                 "cause": cause, "at": now_ms})
             database_refuses = False
-        except Exception:
+        except Exception:  # noqa: BLE001
             database_refuses = True
         database_verdicts[name, state, cause] = database_refuses
         if python_refuses != database_refuses and not (name == "none" and python_refuses):

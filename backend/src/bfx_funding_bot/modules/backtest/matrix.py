@@ -9,11 +9,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any
 
 from bfx_funding_bot.external.bitfinex.funding_candle_row import FundingCandle
 from bfx_funding_bot.modules.backtest.config import BacktestConfig
 from bfx_funding_bot.modules.backtest.engine import BacktestIncomplete, run_backtest
+from bfx_funding_bot.modules.backtest.incomplete import BacktestIncompleteReason
 from bfx_funding_bot.modules.backtest.schemas import BacktestResult
 from bfx_funding_bot.modules.backtest.wfo import WfoWindow
 from bfx_funding_bot.modules.lending.tracking.model import FillRateModel
@@ -66,10 +67,7 @@ class WindowOutcome:
     oos_sortino: Decimal | None
     baseline_net: Decimal | None
     baseline_sortino: Decimal | None
-    incomplete_reason: Literal[
-        "fill_model_missing", "fill_model_low_confidence", "fill_model_scope_mismatch",
-        "market_series_gap",
-    ] | None = None
+    incomplete_reason: BacktestIncompleteReason | None = None
 
 
 @dataclass(frozen=True)
@@ -183,7 +181,7 @@ def evaluate_strategy_qualification(
     )
 
 
-def run_cell_wfo(
+def run_cell_wfo(  # noqa: PLR0913, PLR0917
     strategy_spec: ResearchStrategySpec,
     candles: list[FundingCandle],
     eda_cell: dict[str, Any],

@@ -96,7 +96,7 @@ def test_ambiguous_apply_failure_does_not_claim_no_commit(monkeypatch, capsys):
         ("cleanup", True, 1),
     ],
 )
-def test_real_cli_transaction_and_dependency_errors_are_secret_safe(
+def test_real_cli_transaction_and_dependency_errors_are_secret_safe(  # noqa: C901
     tmp_path,
     monkeypatch,
     capsys,

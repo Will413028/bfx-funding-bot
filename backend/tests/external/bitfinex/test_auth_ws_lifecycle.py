@@ -194,7 +194,7 @@ async def test_reconnect_count_increments_on_disconnect(fake_bfx_ws_server: Any)
         try:
             async for _ in client.events():
                 await asyncio.sleep(0.05)
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
 
     task = asyncio.create_task(collect())

@@ -41,7 +41,7 @@ _BINANCE_BASE = "https://fapi.binance.com"
 
 
 class ExternalSignalsClient:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         http: httpx.AsyncClient,
         *,

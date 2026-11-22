@@ -99,7 +99,7 @@ class AuthoritativeSafetyEvaluator(Protocol):
 class AccountCommandGate:
     """Serialize one account's submits and make ambiguous outcomes fail closed."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         inner: VenueOrderPort,
         *,
@@ -177,7 +177,7 @@ class AccountCommandGate:
             self._admit("submit")
             return await self._submit_locked(ready, context)
 
-    async def _submit_locked(
+    async def _submit_locked(  # noqa: C901, PLR0912, PLR0915
         self,
         ready: ReadyToSubmit,
         context: AccountContext,
@@ -278,13 +278,13 @@ class AccountCommandGate:
                     attempt_id=attempt.attempt_id,
                     size=size, occurred_at_ms=self._clock(),
                 )
-            except Exception as exc:  # recovery still resolves the PENDING intent
+            except Exception as exc:  # recovery still resolves the PENDING intent  # noqa: BLE001
                 log.warning("submit_not_sent_persist_failed symbol=%s err_type=%s",
                             decision.symbol, type(exc).__name__)
             raise
         except asyncio.CancelledError:
             raise  # shutting down: recovery turns the durable PENDING into UNKNOWN
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001
             self._outcome_lost(decision.symbol, "submit ended without durable outcome", exc)
 
         outcome_ms = self._clock()
@@ -301,7 +301,7 @@ class AccountCommandGate:
             )
         except asyncio.CancelledError:
             raise
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001
             self._outcome_lost(decision.symbol, "outcome persistence failed", exc)
         return result
 
@@ -404,7 +404,7 @@ class AccountCommandGate:
             ))
             return result
 
-    async def _persist_outcome(
+    async def _persist_outcome(  # noqa: PLR0913
         self,
         result: SubmittedOrder,
         *,

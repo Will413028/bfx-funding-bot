@@ -502,7 +502,7 @@ def _revoke_defaults(role: str) -> None:
         op.execute(f"REVOKE ALL ({', '.join(columns)}) ON TABLE public.{name} FROM {role}")
 
 
-def upgrade() -> None:
+def upgrade() -> None:  # noqa: C901, PLR0912, PLR0915
     # BEGIN AUTOGEN-DDL-UPGRADE
     op.create_table(
         "capital_command_clock",

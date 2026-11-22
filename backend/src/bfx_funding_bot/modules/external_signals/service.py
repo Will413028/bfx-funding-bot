@@ -80,7 +80,7 @@ def _now_ms(now_ms: int | None) -> int:
     return now_ms if now_ms is not None else int(time.time() * 1000)
 
 
-async def backfill_perp_funding_to_earliest(
+async def backfill_perp_funding_to_earliest(  # noqa: PLR0913
     *,
     client: SignalsClient,
     session: AsyncSession,
@@ -131,7 +131,7 @@ async def backfill_perp_funding_to_earliest(
     )
 
 
-async def topup_perp_funding_to_latest(
+async def topup_perp_funding_to_latest(  # noqa: PLR0913
     *,
     client: SignalsClient,
     session: AsyncSession,
@@ -183,7 +183,7 @@ async def topup_perp_funding_to_latest(
     )
 
 
-async def backfill_liquidations_to_earliest(
+async def backfill_liquidations_to_earliest(  # noqa: PLR0913
     *,
     client: SignalsClient,
     session: AsyncSession,
@@ -240,7 +240,7 @@ async def backfill_liquidations_to_earliest(
     )
 
 
-async def topup_liquidations_to_latest(
+async def topup_liquidations_to_latest(  # noqa: PLR0913
     *,
     client: SignalsClient,
     session: AsyncSession,
@@ -300,7 +300,7 @@ async def topup_liquidations_to_latest(
     )
 
 
-async def topup_binance_funding_to_latest(
+async def topup_binance_funding_to_latest(  # noqa: PLR0913
     *,
     client: SignalsClient,
     session: AsyncSession,

@@ -86,7 +86,7 @@ class DryRunReport:
 
 
 class SafetyGuardChain:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         guards: list[GuardRule],
@@ -195,7 +195,7 @@ class SafetyGuardChain:
             result, _ = await self._evaluate_one(guard, decision, ctx)
             if not result.allowed:
                 return result
-        return GuardResult(True, label)
+        return GuardResult(True, label)  # noqa: FBT003
 
     async def dry_evaluate(
         self, decision: DecisionPayload, ctx: AccountContext,

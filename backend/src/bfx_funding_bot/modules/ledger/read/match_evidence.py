@@ -156,7 +156,7 @@ async def load_match_evidence(session: AsyncSession, observation_id: UUID) -> Ma
     )
 
 
-def build_terms(
+def build_terms(  # noqa: PLR0913, PLR0917
     attempt_id: UUID, symbol: str, amount: Decimal, rate: Decimal, period: object,
     offer_type: object, flags: object, started_at_ms: int, unknown_recorded_at_ms: int,
 ) -> UnknownTerms | None:
@@ -181,7 +181,7 @@ def build_terms(
     )
 
 
-def preview_terms(
+def preview_terms(  # noqa: PLR0913, PLR0917
     attempt_id: UUID, symbol: str, amount: Decimal, rate: Decimal | None, period: int | None,
     offer_type: str | None, flags: object, started_at_ms: int, unknown_recorded_at_ms: int,
 ) -> UnknownTerms | None:

@@ -64,7 +64,7 @@ def fund_wallet(currency: str, amount: Decimal, now_ms: int) -> list[VenueEvent]
     return [WalletFunded(currency, amount, now_ms)]
 
 
-def decide_submit(
+def decide_submit(  # noqa: PLR0911, PLR0913
     state: VenueState, config: SimulatedVenueConfig, *, now_ms: int, symbol: str,
     amount: Decimal, rate: Decimal, period: int, book: BookSnapshot | None,
 ) -> list[VenueEvent] | Refusal | NoMarketData:
@@ -199,7 +199,7 @@ def _candidates(
     return [c for c in out if c[0] <= now_ms]
 
 
-def catch_up(
+def catch_up(  # noqa: C901
     state: VenueState, config: SimulatedVenueConfig, *, now_ms: int,
     trades: Mapping[str, Sequence[PublicTrade]], through: Mapping[str, int],
 ) -> list[VenueEvent]:

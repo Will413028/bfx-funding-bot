@@ -135,7 +135,7 @@ def digest(observation: Observation) -> str:
     return sha256(digest_bytes(observation)).hexdigest()
 
 
-def _validate(observation: Observation) -> None:
+def _validate(observation: Observation) -> None:  # noqa: C901, PLR0912
     coverage = observation.coverage
     if observation.finished_at_ms < 0:
         raise ValueError("negative observation finish time")
@@ -235,7 +235,7 @@ def _validate(observation: Observation) -> None:
     digest_bytes(observation)
 
 
-async def accept_observation(
+async def accept_observation(  # noqa: C901, PLR0912, PLR0913, PLR0917
     session: AsyncSession,
     scope: Scope,
     handle: QueryHandle,
@@ -537,7 +537,7 @@ async def _mirror_credits(
     await session.flush()
 
 
-async def _quarantine_reappearance(
+async def _quarantine_reappearance(  # noqa: PLR0913, PLR0917
     session: AsyncSession,
     scope: Scope,
     observation_id: UUID,

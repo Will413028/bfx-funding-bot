@@ -37,7 +37,7 @@ _ATTEMPT_COLUMNS = (
 )
 
 
-def _columns(with_payload: bool) -> tuple[InstrumentedAttribute[object], ...]:
+def _columns(with_payload: bool) -> tuple[InstrumentedAttribute[object], ...]:  # noqa: FBT001
     """The bot's reads need the payload; the web API's column grant excludes it and
     reads the generated ``intended_amount`` instead."""
     return (

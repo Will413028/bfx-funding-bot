@@ -99,7 +99,7 @@ async def build_g3_report(
     Pass `session_factory` to run against an injected DB (unit tests);
     otherwise an engine is built from env.
     """
-    raw_account_id = os.environ.get("BFX_EXCHANGE_ACCOUNT_ID", "").strip()
+    raw_account_id = os.environ.get("BFX_EXCHANGE_ACCOUNT_ID", "").strip()  # noqa: TID251
     if not raw_account_id:
         if session_factory is None:
             raise RuntimeError("BFX_EXCHANGE_ACCOUNT_ID is required")
@@ -227,7 +227,7 @@ def _week(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, UTC).strftime("%Y-%m-%d")
 
 
-def _cell_alphas(
+def _cell_alphas(  # noqa: PLR0913
     bot_slices: Sequence[tuple[str, CreditLifetime]],
     market_points: Mapping[str, list[MarketRatePoint]],
     *,
@@ -264,7 +264,7 @@ def _cell_alphas(
             except ValueError as exc:
                 reason = str(exc)
         if reason is not None:
-            rows.append(CellMrAlpha(cell, agg or "?", share, False, reason, _ZERO, _ZERO, _ZERO))
+            rows.append(CellMrAlpha(cell, agg or "?", share, False, reason, _ZERO, _ZERO, _ZERO))  # noqa: FBT003
             continue
 
         def scaled(outs: list[WindowOutcome], s: Decimal = share) -> list[WindowOutcome]:
@@ -276,14 +276,14 @@ def _cell_alphas(
                                        now_ms=now_ms)[0].net_monthly
         span_base = attribute_passive(points, window_bounds=[span])[0].net_monthly * share
         ci_lo, ci_hi = _ci(diffs)
-        rows.append(CellMrAlpha(cell, agg or "?", share, True, None, span_active - span_base,
+        rows.append(CellMrAlpha(cell, agg or "?", share, True, None, span_active - span_base,  # noqa: FBT003
                                 ci_lo, ci_hi))
         total_diffs = [t + d for t, d in zip(total_diffs, diffs, strict=True)]
         covered += share
     return rows, total_diffs, covered
 
 
-def compute_g3_report(
+def compute_g3_report(  # noqa: PLR0913, PLR0915
     *,
     credits: Sequence[CreditLifetime],
     cells: CreditCells,

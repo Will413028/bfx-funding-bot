@@ -84,7 +84,7 @@ async def ensure_fill_model_artifact(
         )
 
 
-async def upsert_fill_rate_stats(
+async def upsert_fill_rate_stats(  # noqa: PLR0913
     session: AsyncSession,
     *,
     source: str,

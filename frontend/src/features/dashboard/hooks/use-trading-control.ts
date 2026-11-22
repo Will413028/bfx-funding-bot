@@ -12,7 +12,7 @@ export const PENDING_CONTROL_POLL_MS = 3_000;
 /** Otherwise the state still changes on its own (automatic stops). */
 export const IDLE_CONTROL_POLL_MS = 30_000;
 
-export function tradingControlPath(
+function tradingControlPath(
   exchangeAccountId: string,
   suffix: "" | `/${string}` = "",
 ): string {

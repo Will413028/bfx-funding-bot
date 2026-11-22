@@ -92,7 +92,7 @@ class WriterLock:
         try:
             await self._conn.execute(text("SELECT 1"))
             return True
-        except Exception:  # any connection error means lock lost
+        except Exception:  # any connection error means lock lost  # noqa: BLE001
             log.error("writer_lock_verify_failed key=%s", self._key)
             return False
 
@@ -112,7 +112,7 @@ class WriterLock:
                 # Another live writer grabbed the lock — single-writer contention.
                 log.warning("writer_lock_reacquire_failed_contended key=%s", self._key)
                 return False
-            except Exception:
+            except Exception:  # noqa: BLE001
                 log.error("writer_lock_reacquire_failed key=%s", self._key)
                 return False
 

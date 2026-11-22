@@ -165,7 +165,7 @@ def _exact_subsets(
     return owner, remaining
 
 
-def assign_cells(
+def assign_cells(  # noqa: C901, PLR0912
     credits: Iterable[CreditLifetime],
     trades: Iterable[TradeRecord],
     offer_cells: Mapping[str, str],

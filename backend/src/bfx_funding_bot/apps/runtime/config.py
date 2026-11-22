@@ -22,7 +22,6 @@ class MarketfeedConfig(BaseModel):
     execution_policy: ExecutionPolicy
     book_max_age_seconds: float | None = Field(default=None, gt=0)
     book_reconcile_interval_seconds: float | None = Field(default=None, gt=0)
-    book_max_down_pct: float | None = Field(default=None, ge=0, le=1)
     optimizer_fee_rate: Decimal | None = Field(default=None, ge=0, le=1)
     fill_model_artifact: str | None = None
     run_duration_hours: int | None = Field(default=None, gt=0)

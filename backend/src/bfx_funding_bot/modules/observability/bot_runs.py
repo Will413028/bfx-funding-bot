@@ -62,7 +62,7 @@ class BotRunRecord:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         exchange_account_id: UUID,
-        environ: Mapping[str, str] = os.environ,
+        environ: Mapping[str, str] = os.environ,  # noqa: TID251
         clock_ms: Callable[[], int] = _now_ms,
     ) -> None:
         self._session_factory = session_factory

@@ -202,7 +202,7 @@ def _dialect(session: AsyncSession) -> str:
     return session.bind.dialect.name if session.bind else "postgresql"
 
 
-async def mark_candles_final(
+async def mark_candles_final(  # noqa: PLR0913
     session: AsyncSession,
     *,
     symbol: str,
@@ -272,7 +272,7 @@ async def seal_closed_periods(
     )
 
 
-async def get_candles_in_range(
+async def get_candles_in_range(  # noqa: PLR0913
     session: AsyncSession,
     *,
     symbol: str,
@@ -308,7 +308,7 @@ async def get_candles_in_range(
     return [_row_to_domain(row) for row in result.scalars().all()]
 
 
-async def get_up_to(
+async def get_up_to(  # noqa: PLR0913
     session: AsyncSession,
     *,
     symbol: str,

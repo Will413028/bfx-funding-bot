@@ -193,7 +193,7 @@ def _validate_amount(amount: Decimal) -> None:
         raise ValueError("capital amount must be a finite, non-negative Decimal")
 
 
-def derive_capital(
+def derive_capital(  # noqa: C901, PLR0911, PLR0912, PLR0913
     *,
     scope: CapitalScope,
     accepted: AcceptedCapitalBasis | None,

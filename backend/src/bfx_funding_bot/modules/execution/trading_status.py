@@ -122,7 +122,7 @@ def _trading_state_dict(state: TradingState | None) -> dict[str, Any] | None:
 
 
 class TradingStatusService:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         chain: SafetyGuardChain,
@@ -329,7 +329,7 @@ class TradingStatusService:
                                  for key, value in asdict(view.budget).items()}
                           for cell, view in views.items()},
             }
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             return {"capital_available": False, "reason": str(exc)}
 
     # ------------------------------------------------------------- dry run

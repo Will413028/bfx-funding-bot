@@ -43,7 +43,7 @@ def _expected_alembic_heads() -> frozenset[str]:
             return frozenset()
         script = ScriptDirectory.from_config(Config(str(alembic_ini)))
         return frozenset(script.get_heads())
-    except Exception:
+    except Exception:  # noqa: BLE001
         return frozenset()
 
 
@@ -85,7 +85,7 @@ async def get_read_models(request: Request) -> ReadModels:
 def _readiness_timeout_seconds() -> float:
     """Return a finite, positive, bounded readiness timeout from configuration."""
     try:
-        timeout_seconds = float(os.environ.get("BFX_READINESS_TIMEOUT_SECONDS", "2.0"))
+        timeout_seconds = float(os.environ.get("BFX_READINESS_TIMEOUT_SECONDS", "2.0"))  # noqa: TID251
     except ValueError:
         return 2.0
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
@@ -113,6 +113,6 @@ async def database_is_ready(request: Request) -> bool:
     # Readiness is a fail-closed gate.  This also covers malformed driver
     # results and an unreadable migration graph without turning /ready into a
     # 500 that a deployment health check could mistake for an app crash.
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
     return True

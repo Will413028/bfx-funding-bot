@@ -60,7 +60,7 @@ class _CreditRest(Protocol):
 
 
 class CreditHistorySync:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         rest: _CreditRest,

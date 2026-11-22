@@ -7,8 +7,8 @@ deploys idle capital toward them without recomputing the signal.
 
 E2 (book-aware clamp, 2026-07-06): submit 前 deployment 層可在 policy 界內把
 rate 對齊 live book（taker / undercut / raise；ARCHITECTURE §4 步驟 7c）。
-StandingQuote.rate 仍是 POST/SKIP 閘門與 down-clamp floor 的權威 — clamp
-只調執行價，不回寫 quote。
+StandingQuote.rate 仍是 POST/SKIP 閘門與 taker 判斷的權威，但不是執行價的下限
+（ADR 2026-11-22）— 定價只調執行價，不回寫 quote。
 """
 from __future__ import annotations
 

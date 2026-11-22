@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def make_app(
+def make_app(  # noqa: C901, PLR0913
     probe: HealthProbe,
     *,
     admin_token: str | None = None,
@@ -132,7 +132,7 @@ def make_app(
     return app
 
 
-async def run_healthz_server(
+async def run_healthz_server(  # noqa: PLR0913
     *,
     probe: HealthProbe,
     host: str,
@@ -193,4 +193,4 @@ async def run_healthz_server(
                 "daemon cleanup proceeding (serve_task may leak briefly)",
             )
         except (asyncio.CancelledError, Exception):
-            pass
+            log.debug("healthz_shutdown_gather_failed", exc_info=True)

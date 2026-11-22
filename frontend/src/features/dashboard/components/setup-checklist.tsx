@@ -75,6 +75,7 @@ export function SetupChecklist({
       </div>
 
       <div className="space-y-3">
+        {/* biome-ignore lint/complexity/noExcessiveCognitiveComplexity: baseline from when the rule was enabled; split before adding branches */}
         {steps.map((step) => {
           const Icon = step.icon;
           const isNext = !step.done && steps.indexOf(step) === completedCount;

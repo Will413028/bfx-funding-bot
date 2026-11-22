@@ -2,6 +2,7 @@
 
 import * as Sentry from "@sentry/nextjs";
 import { useEffect } from "react";
+import { isDevelopment } from "@/lib/env";
 import en from "../../messages/en.json";
 
 export default function GlobalError({
@@ -19,9 +20,7 @@ export default function GlobalError({
       <body className="flex min-h-screen flex-col items-center justify-center gap-4 bg-[hsl(220,20%,6%)] text-[hsl(210,20%,92%)]">
         <h1 className="text-2xl font-bold">{en.common.error}</h1>
         <p className="text-sm opacity-60">
-          {process.env.NODE_ENV === "development"
-            ? error.message
-            : en.common.unexpectedError}
+          {isDevelopment ? error.message : en.common.unexpectedError}
         </p>
         <button
           type="button"

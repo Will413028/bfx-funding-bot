@@ -69,7 +69,6 @@ def _set_required_config_env(
     }:
         monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
         monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
-        monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     if policy == ExecutionPolicy.OPTIMIZER_LIVE.value:
         monkeypatch.setenv("BFX_FILL_MODEL_ARTIFACT", "models/fUSD.json")
 
@@ -80,7 +79,6 @@ def _set_explicit_policy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BFX_EXECUTION_POLICY", ExecutionPolicy.BOOK_GUARDED.value)
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
-    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
 
 
 def test_missing_execution_policy_fails_closed(
@@ -161,10 +159,10 @@ def test_book_guarded_requires_all_book_dependencies(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_required_config_env(monkeypatch, phase="simulated", policy="book_guarded")
-    monkeypatch.delenv("BFX_BOOK_MAX_DOWN_PCT")
+    monkeypatch.delenv("BFX_BOOK_MAX_AGE_SECONDS")
     yaml_path = _write_yaml(tmp_path, _valid_yaml())
 
-    with pytest.raises(ValueError, match="BFX_BOOK_MAX_DOWN_PCT"):
+    with pytest.raises(ValueError, match="BFX_BOOK_MAX_AGE_SECONDS"):
         _load(cells_yaml_path=yaml_path)
 
 

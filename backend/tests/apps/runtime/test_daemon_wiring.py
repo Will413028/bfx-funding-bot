@@ -50,7 +50,7 @@ async def test_normal_live_boot_halted_two_cells(monkeypatch, tmp_path, httpx_mo
             monkeypatch.delenv(name)
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
         "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
-        "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
+        "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
         "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
         "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'normal.db'}"}
@@ -143,7 +143,7 @@ async def test_the_wired_kill_halts_then_cancels_at_the_venue(monkeypatch, tmp_p
             monkeypatch.delenv(name)
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
         "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
-        "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
+        "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0", "BFX_KILL_SWITCH": "true",
         "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
         "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'kill.db'}"}
@@ -236,7 +236,7 @@ async def test_live_boot_never_changes_the_trading_state(monkeypatch, tmp_path, 
             monkeypatch.delenv(name)
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
         "BFX_EXECUTION_POLICY": "book_guarded", "BFX_BOOK_MAX_AGE_SECONDS": "30",
-        "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15", "BFX_BOOK_MAX_DOWN_PCT": "0.15",
+        "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15",
         "BFX_SERVICE_VERSION": "test", "BFX_HEALTHZ_PORT": "0",
         "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
         "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'gate.db'}", **deploy_env}
@@ -297,7 +297,6 @@ async def test_live_boot_on_another_schema_stops_trading_and_refuses(monkeypatch
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
         "BFX_EXECUTION_POLICY": "book_guarded", "BFX_HEALTHZ_PORT": "0",
         "BFX_BOOK_MAX_AGE_SECONDS": "30", "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15",
-        "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
         "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'schema.db'}"}
     for name, value in values.items():
@@ -351,7 +350,6 @@ async def test_live_boot_on_an_unsupported_authority_stops_trading_and_refuses(
     values = {"BFX_PHASE": "live", "BFX_DEPLOYMENT_ENV": "ci",
         "BFX_EXECUTION_POLICY": "book_guarded", "BFX_HEALTHZ_PORT": "0",
         "BFX_BOOK_MAX_AGE_SECONDS": "30", "BFX_BOOK_RECONCILE_INTERVAL_SECONDS": "15",
-        "BFX_BOOK_MAX_DOWN_PCT": "0.15",
         "BFX_SAFETY_CONFIG": str(Path(__file__).parents[3] / "configs/safety.live.yaml"),
         "DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'authority.db'}"}
     for name, value in values.items():
@@ -425,7 +423,6 @@ async def test_build_daemon_emit_and_query_env_symmetric(
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
-    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     safety_live = Path(__file__).parents[3] / "configs" / "safety.live.yaml"
     monkeypatch.setenv("BFX_SAFETY_CONFIG", str(safety_live))
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")  # avoid git subprocess
@@ -502,7 +499,6 @@ async def test_build_daemon_reconcile_interval_zero_raises(
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
-    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
 
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 
@@ -559,7 +555,6 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
-    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
     db_path = tmp_path / "resync_wiring.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
@@ -571,7 +566,6 @@ async def test_auth_ws_resync_wired_to_periodic_reconcile(
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
-    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
 
     from bfx_funding_bot.core.db import Base, make_async_engine_from_url
 
@@ -627,7 +621,6 @@ async def test_live_boot_wires_one_book_service_readiness_and_audited_deployment
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "optimizer_live")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
-    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     monkeypatch.setenv("BFX_FILL_MODEL_ARTIFACT", "models/fUST-fill.json")
     monkeypatch.setenv("BFX_OPTIMIZER_FEE_RATE", "0.15")
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
@@ -769,7 +762,6 @@ async def test_canary_build_wires_writer_lock_and_guard(
     monkeypatch.setenv("BFX_EXECUTION_POLICY", "book_guarded")
     monkeypatch.setenv("BFX_BOOK_MAX_AGE_SECONDS", "30")
     monkeypatch.setenv("BFX_BOOK_RECONCILE_INTERVAL_SECONDS", "15")
-    monkeypatch.setenv("BFX_BOOK_MAX_DOWN_PCT", "0.15")
     monkeypatch.setenv("BFX_SERVICE_VERSION", "test-sha")
     db_path = tmp_path / "writer_lock_wiring.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")

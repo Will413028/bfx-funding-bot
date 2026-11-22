@@ -86,7 +86,7 @@ class SubmitAttemptRecorder:
             cell=cell, symbol=symbol, amount=amount, outcome="error", reason=reason,
         )
 
-    def _record(
+    def _record(  # noqa: PLR0913
         self, *, cell: str, symbol: str, amount: Decimal, outcome: SubmitOutcome,
         guard_name: str | None = None, reason: str | None = None,
     ) -> None:

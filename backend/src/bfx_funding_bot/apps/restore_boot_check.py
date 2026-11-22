@@ -181,7 +181,7 @@ def main() -> int:
     except RefusedError as exc:
         print(json.dumps({"error": str(exc)}))
         return EXIT_REFUSED
-    except Exception as exc:  # an unexpected failure is reported by type only
+    except Exception as exc:  # an unexpected failure is reported by type only  # noqa: BLE001
         print(json.dumps({"error": "boot_check_failed", "type": type(exc).__name__}))
         return EXIT_REFUSED
     print(json.dumps(result, sort_keys=True))

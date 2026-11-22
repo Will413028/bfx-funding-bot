@@ -27,21 +27,21 @@ class DeploymentEnvironment(StrEnum):
 
 def _resolve_service_version() -> str:
     """Build-time env first; git fallback for local dev; "unknown" last resort."""
-    v = os.environ.get("BFX_SERVICE_VERSION")
+    v = os.environ.get("BFX_SERVICE_VERSION")  # noqa: TID251
     if v:
         return v
     try:
         return subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], text=True
+            ["git", "rev-parse", "--short", "HEAD"], text=True  # noqa: S607
         ).strip()
-    except Exception:
+    except Exception:  # noqa: BLE001
         return "unknown"
 
 
 def _resolve_host_name() -> str | None:
     """Under Docker, HOSTNAME defaults to the short container ID (the compose
     files set no ``hostname:``); None locally is fine."""
-    return os.environ.get("HOSTNAME")
+    return os.environ.get("HOSTNAME")  # noqa: TID251
 
 
 @dataclass(frozen=True)

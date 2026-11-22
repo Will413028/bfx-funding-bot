@@ -32,7 +32,7 @@ class FaultInjector:
             if n in rule.ordinals:
                 out.append(rule)
             elif rule.probability > 0.0:
-                draw = random.Random(f"{self._plan.seed}:{index}:{target.value}:{key}").random()
+                draw = random.Random(f"{self._plan.seed}:{index}:{target.value}:{key}").random()  # noqa: S311
                 if draw < rule.probability:
                     out.append(rule)
         return out

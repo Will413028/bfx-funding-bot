@@ -91,7 +91,7 @@ def funding_book_checksum(*, bids: BookLevels, asks: BookLevels) -> int:
 class FundingBookWSClient:
     """Parse and maintain the I/O shell for Bitfinex funding-book frames."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         symbols: Sequence[str],
@@ -141,7 +141,7 @@ class FundingBookWSClient:
         )
         return (conf, *subscriptions)
 
-    def set_handlers(
+    def set_handlers(  # noqa: PLR0913
         self,
         *,
         on_snapshot: Callable[[str, list[list[object]], int | None], None],
@@ -263,19 +263,19 @@ class FundingBookWSClient:
         platform = frame.get("platform")
         if code == INFO_MAINTENANCE or (isinstance(platform, dict) and platform.get("status") == 0):
             log.warning("bitfinex_funding_book_maintenance_started %s", frame)
-            self._set_maintenance(True)
+            self._set_maintenance(True)  # noqa: FBT003
             self.mark_disconnected()
         elif code == INFO_MAINTENANCE_END:
             log.warning("bitfinex_funding_book_maintenance_ended %s", frame)
-            self._set_maintenance(False)
+            self._set_maintenance(False)  # noqa: FBT003
             self._reconnect_requested = True
         elif code == INFO_SERVER_RESTART:
             log.warning("bitfinex_funding_book_server_restart %s", frame)
             self._reconnect_requested = True
         elif isinstance(platform, dict) and platform.get("status") == 1:
-            self._set_maintenance(False)
+            self._set_maintenance(False)  # noqa: FBT003
 
-    def _set_maintenance(self, active: bool) -> None:
+    def _set_maintenance(self, active: bool) -> None:  # noqa: FBT001
         if self._on_maintenance is not None:
             self._on_maintenance(active)
 

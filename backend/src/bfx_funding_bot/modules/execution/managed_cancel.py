@@ -70,7 +70,7 @@ class ManagedOfferSweep:
                     account_id=self._ctx.account_id, ctx=self._ctx)
             except ExecutorAuthError:
                 raise  # a refused key ends the daemon, as on every other venue write
-            except Exception as exc:  # reported; the next sweep tries again
+            except Exception as exc:  # reported; the next sweep tries again  # noqa: BLE001
                 failed.append((offer.venue_offer_id, f"{type(exc).__name__}: {exc}"[:200]))
                 continue
             if result.outcome.acknowledged:

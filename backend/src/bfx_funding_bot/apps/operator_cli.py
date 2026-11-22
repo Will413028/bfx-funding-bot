@@ -268,7 +268,7 @@ async def _boot(session: AsyncSession) -> None:
         raise CliExitError("boot", {"error": str(exc).split(" ", 1)[0]}) from exc
 
 
-async def run(args: argparse.Namespace, operator: Operator, factory: Session, *,
+async def run(args: argparse.Namespace, operator: Operator, factory: Session, *,  # noqa: PLR0913
               log: TextIO, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
               credential: EnteredCredential | None = None,
               ) -> tuple[str, dict[str, Any]]:
@@ -414,7 +414,7 @@ def main(argv: Sequence[str] | None = None, *, out: TextIO | None = None,
         outcome, payload = exc.outcome, dict(exc.payload)
     except OperatorCommandError as exc:
         outcome, payload = "rejected", rejection_payload(exc)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         # One bounded line: the message of a connection error may carry the URL.
         outcome, payload = "internal", {"error": "internal", "type": type(exc).__name__}
     print(json.dumps(payload, sort_keys=True, default=str), file=out, flush=True)

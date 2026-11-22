@@ -94,7 +94,7 @@ class BitfinexREST:
             logger.warning("bitfinex rate limited on %s; retrying in %.0fs", path, wait)
             await self._sleep(wait)
 
-    async def get_funding_candles(
+    async def get_funding_candles(  # noqa: PLR0913
         self,
         *,
         symbol: str,

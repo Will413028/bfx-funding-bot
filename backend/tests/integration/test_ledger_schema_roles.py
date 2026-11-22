@@ -1152,7 +1152,7 @@ _DENIED = {"bfx_bot": "permission denied", "bfx_webapi": "permission denied",
            "bfx_webauth": 'relation "ledger_observation" does not exist'}
 
 
-def test_roles_are_read_only_or_exact_writer(seeded) -> None:
+def test_roles_are_read_only_or_exact_writer(seeded) -> None:  # noqa: C901
     with seeded.connect() as conn:
         for table in LEDGER_TABLES:
             name = table.name

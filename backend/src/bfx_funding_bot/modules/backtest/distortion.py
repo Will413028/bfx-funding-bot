@@ -48,7 +48,7 @@ def perturb_candles(
     if not pct_samples:
         raise ValueError("pct_samples must not be empty")
 
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311
     out: list[FundingCandle] = []
     for candle in candles:
         if candle.close is None or rng.random() >= distortion_rate:

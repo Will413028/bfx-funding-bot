@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Protocol
@@ -21,7 +22,7 @@ _TIMEFRAME_MS = {"15m": 15 * 60_000, "30m": 30 * 60_000, "1h": 60 * 60_000}
 
 
 class _BitfinexProtocol(Protocol):
-    async def get_funding_candles(
+    async def get_funding_candles(  # noqa: PLR0913
         self,
         *,
         symbol: str,
@@ -46,7 +47,7 @@ class GapFillResult:
     candles_upserted: int
 
 
-async def fill_gap_from_rest(
+async def fill_gap_from_rest(  # noqa: PLR0913
     *,
     bitfinex: _BitfinexProtocol,
     session: AsyncSession,
@@ -56,8 +57,12 @@ async def fill_gap_from_rest(
     last_known_mts: int,
     now_mts: int,
     limit: int = 125,
+    rest_timeout_s: float | None = None,
 ) -> GapFillResult:
-    """補齊 [last_known_mts+1, now_mts] 區間缺漏 candle 到 funding_candles 表."""
+    """補齊 [last_known_mts+1, now_mts] 區間缺漏 candle 到 funding_candles 表.
+
+    ``rest_timeout_s`` bounds only the venue call; DB work is never cancelled by it.
+    """
     step = _TIMEFRAME_MS.get(timeframe)
     if step is None:
         raise ValueError(f"unsupported timeframe {timeframe!r}")
@@ -65,14 +70,14 @@ async def fill_gap_from_rest(
     if now_mts - last_known_mts < step:
         return GapFillResult(0, 0)
 
-    fetched = await bitfinex.get_funding_candles(
+    fetched = await asyncio.wait_for(bitfinex.get_funding_candles(
         symbol=symbol,
         timeframe=timeframe,
         period_agg=period_agg,
         start=last_known_mts + 1,
         end=now_mts,
         limit=limit,
-    )
+    ), timeout=rest_timeout_s)
     if not fetched:
         return GapFillResult(0, 0)
     await upsert_candles(session, fetched)
@@ -89,7 +94,7 @@ async def fill_gap_from_rest(
     return GapFillResult(candles_fetched=len(fetched), candles_upserted=upserted)
 
 
-async def fill_missing_boundary(
+async def fill_missing_boundary(  # noqa: PLR0913
     *,
     bitfinex: _BitfinexProtocol,
     session: AsyncSession,
@@ -98,6 +103,7 @@ async def fill_missing_boundary(
     period_agg: str,
     boundary_mts: int,
     max_steps: int,
+    rest_timeout_s: float | None = None,
 ) -> bool:
     """Fill the candle that just closed (``boundary_mts``) from REST when nothing recorded it.
 
@@ -106,7 +112,8 @@ async def fill_missing_boundary(
     back at most ``max_steps`` candles, or to the newest stored one if that is nearer: after
     a long outage the newest candles come back, not the oldest page of the gap. The upsert
     is idempotent (sealed rows are no-ops, a repeated refused value is one revision row).
-    Returns whether REST was asked. REST errors propagate; the caller decides.
+    Returns whether REST was asked. REST errors (and a REST call past
+    ``rest_timeout_s``) propagate; the caller decides.
     """
     step = _TIMEFRAME_MS.get(timeframe)
     if step is None:
@@ -131,7 +138,7 @@ async def fill_missing_boundary(
     result = await fill_gap_from_rest(
         bitfinex=bitfinex, session=session, symbol=symbol, timeframe=timeframe,
         period_agg=period_agg, last_known_mts=start - 1, now_mts=boundary_mts,
-        limit=max_steps + 1,
+        limit=max_steps + 1, rest_timeout_s=rest_timeout_s,
     )
     log.info(
         "boundary_gap_fill symbol=%s timeframe=%s period_agg=%s boundary_mts=%d fetched=%d",

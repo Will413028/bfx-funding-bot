@@ -82,7 +82,7 @@ def scrub_event(event: Event, secrets: Sequence[str]) -> Event | None:
                 request["headers"] = {key: value for key, value in headers.items()
                                       if str(key).lower() not in _DROPPED_HEADERS}
         return cast("Event", _scrub(data, secrets))
-    except Exception:  # never send what could not be scrubbed
+    except Exception:  # never send what could not be scrubbed  # noqa: BLE001
         return None
 
 

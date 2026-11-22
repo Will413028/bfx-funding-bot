@@ -87,7 +87,7 @@ class TransitionResult:
     previous: TradingState | None = None
 
 
-def validate_transition(
+def validate_transition(  # noqa: PLR0913
     previous: TradingState | None, *, state: str, cause: str, actor: str, reason: str,
     now_ms: int = 0, auto_resumes_in_window: int = 0,
 ) -> None:

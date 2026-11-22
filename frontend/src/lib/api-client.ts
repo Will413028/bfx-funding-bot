@@ -43,6 +43,7 @@ interface RequestOptions {
 
 // ── Internal request helper ──
 
+// biome-ignore lint/complexity/noExcessiveCognitiveComplexity: baseline from when the rule was enabled; split before adding branches
 async function request<T>(
   method: string,
   path: string,

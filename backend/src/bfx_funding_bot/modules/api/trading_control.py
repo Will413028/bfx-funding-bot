@@ -174,10 +174,10 @@ class CurrencyDisableRequested(ResponseModel):
 
 def _running_identity() -> BuildIdentity:
     """The backend image this web API runs -- the same image as the daemon."""
-    digest = os.environ.get("BFX_IMAGE_DIGEST", "").strip()
+    digest = os.environ.get("BFX_IMAGE_DIGEST", "").strip()  # noqa: TID251
     return BuildIdentity(
         backend_digest=digest if re.fullmatch(_DIGEST, digest) else None,
-        source_revision=os.environ.get("BFX_SOURCE_REVISION", "").strip() or None,
+        source_revision=os.environ.get("BFX_SOURCE_REVISION", "").strip() or None,  # noqa: TID251
     )
 
 

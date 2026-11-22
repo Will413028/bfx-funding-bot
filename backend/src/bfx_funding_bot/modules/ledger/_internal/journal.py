@@ -58,7 +58,7 @@ async def authorize_attempt(
     return await _authorize_attempt(session, scope, attempt, basis_token, now_ms=now_ms)
 
 
-async def _authorize_attempt(
+async def _authorize_attempt(  # noqa: PLR0913
     session: AsyncSession, scope: Scope, attempt: Attempt, basis_token: str, *, now_ms: int,
     locked_guard: LockedCommandGuard | None = None,
 ) -> Authorized | AuthorizeRefused:
@@ -102,7 +102,7 @@ class _Stale:
 _STALE = _Stale()
 
 
-async def authorize_command(
+async def authorize_command(  # noqa: PLR0913
     session: AsyncSession, scope: Scope, attempt: CommandAttempt, basis_token: str, *,
     now_ms: int, locked_guard: LockedCommandGuard, max_snapshot_age_ms: int,
 ) -> Authorized | CommandRefused:
@@ -168,7 +168,7 @@ async def _read_budget(
     return _Budget(encode_basis_token(read.query_id, read.clock_revision), budget.max_new_offer)
 
 
-async def _command_pass(
+async def _command_pass(  # noqa: PLR0913
     session: AsyncSession, scope: Scope, attempt: CommandAttempt, basis_token: str,
     fresh: _Budget | None, *, now_ms: int, locked_guard: LockedCommandGuard,
     max_snapshot_age_ms: int,

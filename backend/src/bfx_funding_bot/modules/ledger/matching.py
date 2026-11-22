@@ -143,7 +143,7 @@ def _coverage_invalid(coverage: Coverage) -> bool:
     )
 
 
-def _incomplete(reason: str, seen: bool) -> UnknownMatch:
+def _incomplete(reason: str, seen: bool) -> UnknownMatch:  # noqa: FBT001
     return UnknownMatch("incomplete", None, None, (), seen, reason)
 
 
@@ -166,7 +166,7 @@ def amount_seen_since_start(terms: UnknownTerms, evidence: MatchEvidence) -> boo
     return False
 
 
-def match_unknown(terms: UnknownTerms, evidence: MatchEvidence) -> UnknownMatch:
+def match_unknown(terms: UnknownTerms, evidence: MatchEvidence) -> UnknownMatch:  # noqa: C901, PLR0911
     """exact / zero only when the stored complete history fence proves it."""
     coverage = evidence.coverage
     seen = amount_seen_since_start(terms, evidence)
@@ -222,7 +222,7 @@ def match_unknown(terms: UnknownTerms, evidence: MatchEvidence) -> UnknownMatch:
     return UnknownMatch("exact_match", offer.venue_offer_id, status, ids, seen, None)
 
 
-def decide_unknown(
+def decide_unknown(  # noqa: PLR0911, PLR0913
     terms: UnknownTerms,
     evidence: MatchEvidence,
     match: UnknownMatch,

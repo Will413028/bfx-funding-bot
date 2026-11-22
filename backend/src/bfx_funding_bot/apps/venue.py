@@ -129,7 +129,7 @@ def _throwaway_credentials() -> Credentials:
     return Credentials(secrets.token_hex(16), secrets.token_hex(32))
 
 
-async def build_venue(
+async def build_venue(  # noqa: PLR0913
     config: MarketfeedConfig,
     *,
     exchange_account_id: UUID,
@@ -155,7 +155,7 @@ async def build_venue(
         clock=clock, metrics=metrics, gate=gate, seam=seam)
 
 
-async def _build_simulated(
+async def _build_simulated(  # noqa: PLR0913
     config: MarketfeedConfig, *, exchange_account_id: UUID, db_engine: AsyncEngine,
     clock: Callable[[], int], metrics: DaemonMetrics, gate: AuthRequestGate, seam: VenueSeam,
 ) -> VenueWiring:

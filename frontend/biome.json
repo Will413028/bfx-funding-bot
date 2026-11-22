@@ -33,6 +33,15 @@
         "useKeyWithClickEvents": "off",
         "useButtonType": "off"
       },
+      "complexity": {
+        "noExcessiveCognitiveComplexity": "error"
+      },
+      "nursery": {
+        "noFloatingPromises": "error"
+      },
+      "style": {
+        "noProcessEnv": "error"
+      },
       "performance": {
         "noImgElement": "warn"
       },
@@ -54,7 +63,12 @@
   },
   "overrides": [
     {
+      "includes": ["**/src/lib/env.ts"],
+      "linter": { "rules": { "style": { "noProcessEnv": "off" } } }
+    },
+    {
       "includes": ["**/e2e/**"],
+      "linter": { "rules": { "style": { "noProcessEnv": "off" } } },
       "formatter": { "enabled": false },
       "assist": { "enabled": false }
     }

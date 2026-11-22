@@ -220,7 +220,7 @@ def classify(returncode: int, report: Path) -> Verdict:
         return Verdict("error", f"pytest exit {returncode}, no report")
     failed: list[str] = []
     errored: list[str] = []
-    for case in ElementTree.parse(report).getroot().iter("testcase"):
+    for case in ElementTree.parse(report).getroot().iter("testcase"):  # noqa: S314
         name = f"{case.get('classname', '')}::{case.get('name', '')}"
         if case.find("error") is not None:
             errored.append(name)

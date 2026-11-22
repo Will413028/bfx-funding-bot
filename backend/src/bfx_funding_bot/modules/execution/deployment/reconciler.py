@@ -165,7 +165,7 @@ class FillModelEvidenceProvider(Protocol):
 
 
 class DeploymentReconciler:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         store: StandingQuoteStore,
@@ -345,7 +345,7 @@ class DeploymentReconciler:
             log.exception("deployment_uncertainty_unreadable symbol=%s", symbol)
             return True
 
-    async def deploy(self, *, venue_offers: tuple[ActiveFundingOffer, ...] = ()) -> None:
+    async def deploy(self, *, venue_offers: tuple[ActiveFundingOffer, ...] = ()) -> None:  # noqa: C901, PLR0912, PLR0915
         ctx = self._ctx
         # venue_offers: threaded from PeriodicReconcile's reconcile snapshot
         # (E1 stale-offer reprice). Consumed below by _reprice_sweep when a
@@ -423,7 +423,7 @@ class DeploymentReconciler:
                     ))
                 min_fill = submit_amount(amount_evidence, symbol=symbol, now_ms=self._clock())
                 fills = allocate_capital(views=views, min_fill=min_fill)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 log.warning("deployment_capital_unavailable symbol=%s reason=%s", symbol, exc)
                 trigger = (capital_block_trigger(exc.reason)
                            if isinstance(exc, _CapitalReadBlocked) else None)
@@ -491,7 +491,6 @@ class DeploymentReconciler:
                     symbol=self._cell_symbol[cell_id],
                 )
                 cell_ctx = replace(ctx, capital_cell_id=cell_id)
-                guard = await self._safety.evaluate(decision, cell_ctx)
                 now = self._clock()
                 snapshot = self._book_provider.snapshot(symbol, now_ms=now)
                 decision_id = str(uuid5(
@@ -574,6 +573,15 @@ class DeploymentReconciler:
                         # Never reinterpret a failed optimizer as an implicit signal
                         # fallback.  Valid fill evidence remains visible in audit.
                         optimizer_block_reason = BlockReason.OPTIMIZER_UNAVAILABLE
+                # The guards judge the rate that will be sent, not the signal rate: the
+                # book can price an offer well below the signal, and the envelope's
+                # rate floor has to turn that into an ordinary skip here instead of a
+                # refusal inside the command gate after the decision was audited READY.
+                guard = await self._safety.evaluate(
+                    (decision.model_copy(update={"offer_rate": gate_price.rate})
+                     if isinstance(gate_price, PriceDecision) else decision),
+                    cell_ctx,
+                )
                 outcome = await self._execution_gate.prepare(
                     decision,
                     decision_id=decision_id,
@@ -702,7 +710,7 @@ class DeploymentReconciler:
                     )
                 await self._emit_submit(cell_id, outcome, result, reconcile_id)
 
-    def _fill_evidence_for(
+    def _fill_evidence_for(  # noqa: PLR0913
         self,
         *,
         candidate: DecisionPayload,
@@ -1077,7 +1085,7 @@ def _reference_rate(price: PriceDecision, *, fallback: Decimal) -> Decimal:
         if isinstance(value, str):
             try:
                 rate = Decimal(value)
-            except Exception:
+            except ArithmeticError:  # decimal.InvalidOperation on a malformed string
                 continue
             if rate.is_finite() and rate > 0:
                 return rate

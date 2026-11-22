@@ -97,7 +97,7 @@ def _body_object(raw: bytes) -> dict[str, Any]:
 class SimulatedVenue(httpx.AsyncBaseTransport):
     """Use `client()` as the `http=` of the auth REST client and the executors."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self, *, account: SimAccount, config: SimulatedVenueConfig, store: VenueEventStore,
         feed: MarketFeed, clock_ms: Callable[[], int], faults: FaultPlan,
         state: VenueState, seq: int,
@@ -121,7 +121,7 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
         self.internal_failures_total = 0
 
     @classmethod
-    async def open(
+    async def open(  # noqa: PLR0913
         cls, *, account: SimAccount, config: SimulatedVenueConfig, store: VenueEventStore,
         feed: MarketFeed, clock_ms: Callable[[], int], faults: FaultPlan | None = None,
     ) -> SimulatedVenue:
@@ -198,7 +198,7 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
             self._record_internal(exc.kind, str(exc))
         except VenueStoreError as exc:
             self._record_internal("store", repr(exc))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             self._record_internal("bug", repr(exc))
 
     async def _reload(self) -> None:
@@ -400,7 +400,7 @@ class SimulatedVenue(httpx.AsyncBaseTransport):
             raise httpx.ReadTimeout("simulated: response lost after commit", request=request)
         return response
 
-    async def _apply_write(
+    async def _apply_write(  # noqa: C901, PLR0911
         self, name: str, type_: str, payload: dict[str, Any], now: int,
     ) -> httpx.Response:
         if name == "submit":

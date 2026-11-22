@@ -63,12 +63,12 @@ class StdoutEventSink:
         if self._metrics is not None:
             try:
                 self._metrics.observe_operational_event(event)
-            except Exception:
+            except Exception:  # noqa: BLE001
                 _module_log.debug("stdout_sink_metrics_hook_failed", exc_info=True)
         enriched = {**event, **self._resource.envelope_fields()}
         log.info(json.dumps(enriched, default=str))
 
-    async def emit_execution_event(
+    async def emit_execution_event(  # noqa: PLR0913
         self,
         event_name: str,
         *,

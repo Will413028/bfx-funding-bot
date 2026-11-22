@@ -117,7 +117,7 @@ def apply_locf_and_unwrap(
     return [fc.candle for fc in filled if fc.candle is not None]
 
 
-def run_cell_wfo_with_locf(
+def run_cell_wfo_with_locf(  # noqa: PLR0913, PLR0917
     strategy_spec: ResearchStrategySpec,
     all_candles: list[FundingCandle],
     eda_cell: dict[str, Any],
@@ -347,7 +347,7 @@ def _cell_verdict_to_dict(
     }
 
 
-async def _amain() -> int:
+async def _amain() -> int:  # noqa: C901, PLR0915
     args = _parse_args()
     logging.basicConfig(
         level=logging.INFO,

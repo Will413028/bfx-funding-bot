@@ -131,7 +131,7 @@ def trailing_percentile(
     return out
 
 
-def simulate(
+def simulate(  # noqa: C901, PLR0912, PLR0913
     r2: Sequence[float | None],
     rlong: Sequence[float | None],
     rule: ThresholdRule,
@@ -254,7 +254,7 @@ class MonthlyDelta:
     win_share: float
 
 
-def monthly_deltas(
+def monthly_deltas(  # noqa: PLR0913
     start_ms: int,
     r2: Sequence[float | None],
     rlong: Sequence[float | None],

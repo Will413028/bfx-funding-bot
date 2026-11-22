@@ -526,7 +526,7 @@ class BitfinexAuthREST:
             parse=lambda raw: parse_credit_observations(raw, source_kind="loan"), budget=budget,
         )
 
-    async def fetch_offer_history_observations(
+    async def fetch_offer_history_observations(  # noqa: PLR0913
         self, *, ctx: HasCredentials, symbol: str, start_ms: int, end_ms: int,
         limit: int = 500, max_pages: int = 5, budget: ObservationRequestBudget | None = None,
     ) -> CoveredHistory[OfferObservation]:
@@ -572,7 +572,7 @@ class BitfinexAuthREST:
                     ctx=ctx, path=path,
                     body={"id": [int(offer_id) for offer_id in batch], "limit": OFFER_ID_BATCH},
                 ))
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001
                 cause = ("cap_exhausted" if isinstance(exc, ObservationRequestCapError)
                          else "request_failed")
                 failed.update({offer_id: cause for offer_id in wanted[i:] if offer_id not in found})
@@ -582,7 +582,7 @@ class BitfinexAuthREST:
                     found.setdefault(row.venue_offer_id, row)
         return OfferIdLookup(found, failed)
 
-    async def fetch_credit_history_observations(
+    async def fetch_credit_history_observations(  # noqa: PLR0913
         self, *, ctx: HasCredentials, symbol: str, start_ms: int, end_ms: int,
         limit: int = 500, max_pages: int = 5, budget: ObservationRequestBudget | None = None,
     ) -> CoveredHistory[CreditObservation]:
@@ -602,7 +602,7 @@ class BitfinexAuthREST:
             start_ms=start_ms, end_ms=end_ms, limit=limit, max_pages=max_pages, budget=budget,
         )
 
-    async def fetch_loan_history_observations(
+    async def fetch_loan_history_observations(  # noqa: PLR0913
         self, *, ctx: HasCredentials, symbol: str, start_ms: int, end_ms: int,
         limit: int = 500, max_pages: int = 5, budget: ObservationRequestBudget | None = None,
     ) -> CoveredHistory[CreditObservation]:
@@ -614,7 +614,7 @@ class BitfinexAuthREST:
             start_ms=start_ms, end_ms=end_ms, limit=limit, max_pages=max_pages, budget=budget,
         )
 
-    async def fetch_trade_observations(
+    async def fetch_trade_observations(  # noqa: PLR0913
         self, *, ctx: HasCredentials, symbol: str, start_ms: int, end_ms: int,
         limit: int = 500, max_pages: int = 5, budget: ObservationRequestBudget | None = None,
     ) -> CoveredHistory[TradeObservation]:
@@ -632,7 +632,7 @@ class BitfinexAuthREST:
             start_ms=start_ms, end_ms=end_ms, limit=limit, max_pages=max_pages, budget=budget,
         )
 
-    async def _page_covered_history(
+    async def _page_covered_history(  # noqa: C901, PLR0913
         self, *, ctx: HasCredentials, endpoint: str, symbol: str | None,
         parse: Callable[[Any], list[_Row]], mts: Callable[[_Row], int],
         key: Callable[[_Row], str | int], start_ms: int, end_ms: int,
@@ -776,7 +776,7 @@ class BitfinexAuthREST:
             ) from exc
         return parse_active_funding_offers(raw)
 
-    async def get_funding_offer_history(
+    async def get_funding_offer_history(  # noqa: C901, PLR0913
         self,
         *,
         ctx: HasCredentials,
@@ -887,7 +887,7 @@ class BitfinexAuthREST:
             for loan in await self._post_funding_lent(ctx=ctx, path=path)
         ]
 
-    async def get_interest_payments(
+    async def get_interest_payments(  # noqa: PLR0913
         self, *, ctx: HasCredentials, currency: str, start_ms: int, end_ms: int,
         limit: int = 500, max_pages: int = 20,
     ) -> list[InterestPayment]:
@@ -903,7 +903,7 @@ class BitfinexAuthREST:
         )
         return sorted(payments, key=lambda entry: (entry.mts, entry.ledger_id))
 
-    async def get_funding_credit_history(
+    async def get_funding_credit_history(  # noqa: PLR0913
         self, *, ctx: HasCredentials, symbol: str, start_ms: int, end_ms: int,
         kind: Literal["credit", "loan"] = "credit", limit: int = 500, max_pages: int = 20,
     ) -> list[FundingCreditRecord]:
@@ -922,7 +922,7 @@ class BitfinexAuthREST:
         )
         return sorted(credits, key=lambda c: (c.mts_update, c.credit_id))
 
-    async def get_funding_trades(
+    async def get_funding_trades(  # noqa: PLR0913
         self, *, ctx: HasCredentials, symbol: str, start_ms: int, end_ms: int,
         limit: int = 500, max_pages: int = 20,
     ) -> list[FundingTrade]:
@@ -935,7 +935,7 @@ class BitfinexAuthREST:
         )
         return sorted(trades, key=lambda t: (t.mts_create, t.trade_id))
 
-    async def _page_hist(
+    async def _page_hist(  # noqa: PLR0913
         self, *, ctx: HasCredentials, path: str, extra: dict[str, Any],
         parse: Callable[[Any], list[_Row]], mts: Callable[[_Row], int],
         key: Callable[[_Row], int], start_ms: int, end_ms: int, limit: int, max_pages: int,

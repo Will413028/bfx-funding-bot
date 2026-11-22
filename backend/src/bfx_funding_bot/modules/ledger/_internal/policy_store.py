@@ -28,7 +28,7 @@ POLICY_SYMBOLS = frozenset({"fUST", "fUSD"})
 
 
 class LedgerPolicyStore(LedgerPolicyReader):
-    async def apply_policy(
+    async def apply_policy(  # noqa: PLR0913
         self, session: AsyncSession, *, symbol: str, policy: CapitalPolicy,
         expected_revision: int, source: dict[str, Any],
         operator_request_id: UUID | None = None,

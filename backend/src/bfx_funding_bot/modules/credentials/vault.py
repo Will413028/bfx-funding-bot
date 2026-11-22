@@ -137,7 +137,7 @@ async def load_account_credentials(
     return decrypt_credential(row, exchange_account_id=exchange_account_id, kek=kek)
 
 
-async def create_active_credential(
+async def create_active_credential(  # noqa: PLR0913
     session: AsyncSession,
     *,
     exchange_account_id: UUID,
@@ -163,7 +163,7 @@ async def create_active_credential(
     )
 
 
-async def rotate_active_credential(
+async def rotate_active_credential(  # noqa: PLR0913
     session: AsyncSession,
     *,
     exchange_account_id: UUID,
@@ -225,7 +225,7 @@ def _writable(account: ExchangeAccount | None, exchange_account_id: UUID) -> Non
     ensure_account_active(account)
 
 
-async def _insert_active(
+async def _insert_active(  # noqa: PLR0913
     session: AsyncSession,
     *,
     exchange_account_id: UUID,

@@ -75,7 +75,7 @@ def build_projections_router() -> APIRouter:
         ])
 
     @router.get("/exchange-accounts/{exchange_account_id}/executions")
-    async def account_executions(
+    async def account_executions(  # noqa: PLR0913, PLR0917
         limit: int = Query(default=50, ge=1, le=_EXECUTIONS_LIMIT_CAP),
         before: str | None = Query(default=None, description="opaque cursor (nextBefore)"),
         event_type: str | None = Query(default=None),

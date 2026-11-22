@@ -27,7 +27,7 @@ class AdaptivePeriodStrategy(Strategy):
     strategy uses.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913, PLR0917
         self,
         ema_span: int,
         ratio_sigma: Decimal,

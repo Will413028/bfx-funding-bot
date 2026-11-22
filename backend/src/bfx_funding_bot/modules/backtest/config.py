@@ -23,7 +23,9 @@ class BacktestConfig:
     market_rate_source: Literal["candle_close"] = "candle_close"
     # "empirical" requires versioned high-confidence FillRateModel evidence.
     # "linear-baseline" is an explicit offline sensitivity baseline only.
-    fill_model: Literal["empirical", "linear-baseline"] = "empirical"
+    # "tape-replay" fills each decision against the public trade tape
+    # (`backtest/replay.py`); `run_backtest` then needs `tape`.
+    fill_model: Literal["empirical", "linear-baseline", "tape-replay"] = "empirical"
     fill_horizon_h: int = 4
     # Credit only the part of a lock that falls inside the record window. Off by
     # default so existing gate/derivation numbers are byte-stable; the
@@ -31,6 +33,22 @@ class BacktestConfig:
     # would otherwise credit a 14d/30d lock opened late in a month in full and
     # then let the next window trade again from hour 0 (double counting).
     truncate_at_window_end: bool = False
+    # tape-replay only: which bound books the fill, how long an unfilled offer
+    # rests before the strategy may decide again, and the offer's absolute size
+    # (partial fills depend on it).
+    replay_bound: Literal["conservative", "optimistic"] = "conservative"
+    replay_max_wait_h: int = 24
+    replay_offer_amount: Decimal = Decimal("1000")
+    # tape-replay only: no offer is placed in the last this-many hours of the
+    # record window. None = `replay_max_wait_h` (an offer needs its full wait).
+    # Arms compared across different waits share the longest wait here, so a
+    # shorter wait does not buy extra tradable hours at the window end.
+    replay_no_placement_tail_h: int | None = None
+    # tape-replay only: the borrower repays a lock the first hour the 2-day market
+    # (`run_backtest(refinance_reference=...)`) closes more than this fraction below
+    # the locked rate, and the capital is free again. None = every lock is held to
+    # maturity, which overstates tenors longer than 2 days (ADR 2026-09-27 D3).
+    replay_refinance_margin: Decimal | None = None
 
     def __post_init__(self) -> None:
         if not (Decimal("0") <= self.fee_rate <= Decimal("1")):
@@ -41,10 +59,32 @@ class BacktestConfig:
             raise ValueError(f"fill_alpha must be positive, got {self.fill_alpha}")
         if self.fill_horizon_h <= 0:
             raise ValueError(f"fill_horizon_h must be positive, got {self.fill_horizon_h}")
+        self._validate_replay()
         if self.market_rate_source != "candle_close":
             raise ValueError(
                 f"market_rate_source must be 'candle_close', got "
                 f"{self.market_rate_source!r}"
+            )
+
+    def _validate_replay(self) -> None:
+        if self.replay_bound not in ("conservative", "optimistic"):
+            raise ValueError(f"replay_bound must be conservative|optimistic, got {self.replay_bound!r}")
+        if self.replay_max_wait_h <= 0:
+            raise ValueError(f"replay_max_wait_h must be positive, got {self.replay_max_wait_h}")
+        if (self.replay_no_placement_tail_h is not None
+                and self.replay_no_placement_tail_h < self.replay_max_wait_h):
+            raise ValueError(
+                "replay_no_placement_tail_h must be >= replay_max_wait_h, got "
+                f"{self.replay_no_placement_tail_h} < {self.replay_max_wait_h}"
+            )
+        if (self.replay_refinance_margin is not None
+                and not Decimal(0) < self.replay_refinance_margin < Decimal(1)):
+            raise ValueError(
+                f"replay_refinance_margin must be in (0, 1), got {self.replay_refinance_margin}"
+            )
+        if self.replay_offer_amount <= 0:
+            raise ValueError(
+                f"replay_offer_amount must be positive, got {self.replay_offer_amount}"
             )
 
 

@@ -68,7 +68,7 @@ class _JsonStderrHandler(logging.Handler):
             sys.stderr.flush()
         except RecursionError:
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001
             self.handleError(record)
 
 

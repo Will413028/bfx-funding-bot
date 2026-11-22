@@ -69,7 +69,7 @@ def _eda_for_cell(eda_blob: dict[str, Any], cell_key: str) -> dict[str, Any]:
         if isinstance(v, (int, float, str)):
             try:
                 out[k] = Decimal(str(v))
-            except Exception:
+            except Exception:  # noqa: BLE001
                 out[k] = v
         else:
             out[k] = v

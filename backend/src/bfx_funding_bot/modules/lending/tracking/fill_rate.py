@@ -61,7 +61,7 @@ class FillRateLearner:
         self.bucket_grid = list(bucket_grid) if bucket_grid is not None else list(BUCKET_GRID_BPS)
         self.horizons = list(horizons) if horizons is not None else list(HORIZONS_H)
 
-    def learn(self, candles: list[FundingCandle]) -> list[BucketStat]:
+    def learn(self, candles: list[FundingCandle]) -> list[BucketStat]:  # noqa: C901
         sorted_c = sorted(candles, key=lambda c: c.mts)
         acc: dict[tuple[int, int], _Acc] = {}
 
